@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::fs::{File, Metadata};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use std::{env, fs};
 
-//第三方库
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
 
@@ -103,14 +103,14 @@ pub enum FileKind {
     Dir(Dir),
 }
 
-pub fn command(args: &Vec<String>) {
+pub fn command(args: &[String]) {
     //参数格式：[程序路径,模块类型,指定搜索路径,输出路径...]
     //获取参数中的指定的路径，若没有则使用程序路径
     let path = match args.get(2) {
-        Some(value) => String::from(value),
-        None => match args.get(0) {
-            Some(vales) => String::from(vales),
-            None => String::new(),
+        Some(value) => value,
+        None => match args.first() {
+            Some(vales) => vales,
+            None => "",
         },
     };
 
@@ -121,20 +121,21 @@ pub fn command(args: &Vec<String>) {
     };
 
     //搜索
-    let files_list = search(&path, skip_symlink);
+    let files_list = search(path, skip_symlink);
 
     //输出到输出文件(若存在参数)
     if let Some(out_path) = args.get(3) {
         //只写模式打开文件，
         match File::create(out_path) {
             Ok(f) => {
+                println!("正在将搜索结果输出到文件");
                 serde_json::to_writer_pretty(f, &files_list).expect("保存到文件错误");
                 //注意：'f'的所有权已经移动，不可再用，不需要关心是否释放，
                 //Rust在离开作用域时，自动释放所在作用域所有持有所有权的变量，文件也会自动关闭。
-                println!("搜索结果已输出到文件: {out_path}")
+                println!(r#"搜索结果已输出到文件: "{out_path}""#)
             }
             Err(err) => {
-                panic!("[致命错误]无法打开输出文件: {out_path} , Error: '{err}'")
+                panic!(r#"[致命错误]无法打开输出文件: "{out_path}" , Error: '{err}'"#)
             }
         }
     } else {
@@ -298,25 +299,28 @@ pub fn search(path: &str, skip_symlink: bool) -> FilesList {
     match path_path.try_exists() {
         Ok(true) => {
             if path_path.is_dir() {
+                if path_path.is_symlink() {
+                    println!(r#"[警告]设定的目录: "{path}" 是符号链接。"#);
+                }
                 let (data_length, file_count, dir_count) =
                     m_search(skip_symlink, path_path.to_path_buf(), &mut files_list);
                 //返回值
                 FilesList {
-                    path : String::from(path),
+                    path: String::from(path),
                     data_length,
                     file_count,
                     dir_count,
                     files_list,
                 }
             } else {
-                panic!("[致命错误]指定的目录 '{path}' ， 已存在，但是是文件，不是目录")
+                panic!(r#"[致命错误]指定的目录 "{path}" ， 已存在，但是是文件，不是目录。"#)
             }
         }
         Ok(false) => {
             if path_path.is_symlink() {
-                panic!("[致命错误]指定的目录 '{path}' 是符号链接(symlink)，但链接已断。")
+                panic!(r#"[致命错误]指定的目录 "{path}" 是符号链接(symlink)，但链接已断。"#)
             } else {
-                panic!("[致命错误]指定的目录 '{path}' 不存在");
+                panic!(r#"[致命错误]指定的目录 "{path}" 不存在"#);
             }
         }
         Err(e) => {
@@ -328,4 +332,59 @@ pub fn search(path: &str, skip_symlink: bool) -> FilesList {
 //将结果转换成json文本
 pub fn data_to_json_json(files_list: &FilesList) -> Result<String> {
     serde_json::to_string_pretty(files_list)
+}
+
+//TEST===
+static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/ff/ok";
+static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/ff/err";
+
+//OK===
+#[test]
+fn test_command_out_file_skip_symlink() {
+    let out_dir_path = TEST_TEMP_OK_DIR_PATH;
+    _ = fs::create_dir_all(out_dir_path);
+    let mut out_file_path = out_dir_path.to_string();
+    out_file_path.push_str("/test_ff_skip_symlink.json");
+    _ = fs::remove_file(&out_file_path);
+    //命令行参数处理
+    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = vec![
+        args[0].clone(),
+        String::from("ff"),
+        String::from("/home/waterball/Downloads"),
+        out_file_path.clone(),
+        String::from("-s"),
+    ];
+    command(args.as_slice());
+    _ = fs::remove_file(&out_file_path);
+}
+
+#[test]
+fn test_command_out_file() {
+    let out_dir_path = TEST_TEMP_OK_DIR_PATH;
+    _ = fs::create_dir_all(out_dir_path);
+    let mut out_file_path = out_dir_path.to_string();
+    out_file_path.push_str("/test_ff.json");
+    _ = fs::remove_file(&out_file_path);
+    //命令行参数处理
+    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = vec![
+        args[0].clone(),
+        String::from("ff"),
+        String::from("/home/waterball/Downloads"),
+        out_file_path.clone(),
+    ];
+    command(args.as_slice());
+    _ = fs::remove_file(&out_file_path);
+}
+#[test]
+fn test_command_no_out_file() {
+    //命令行参数处理
+    let args: Vec<String> = env::args().collect();
+    let args: Vec<String> = vec![
+        args[0].clone(),
+        String::from("ff"),
+        String::from("/home/waterball/Downloads")
+    ];
+    command(args.as_slice());
 }
