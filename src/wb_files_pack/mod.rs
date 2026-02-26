@@ -79,9 +79,9 @@ pub struct PackFilesList {
     //总数据长度
     data_length: u64,
     //所有文件数，不包括目录
-    file_count: u32,
+    file_count: u64,
     //所有目录数
-    dir_count: u32,
+    dir_count: u64,
 } //包文件列表
 impl PackFilesList {
     pub fn files_list(&self) -> &HashMap<String, PackFileInfo> {
@@ -92,11 +92,11 @@ impl PackFilesList {
         self.data_length
     }
 
-    pub fn file_count(&self) -> u32 {
+    pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
-    pub fn dir_count(&self) -> u32 {
+    pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
 
@@ -165,7 +165,7 @@ impl Clone for PackFileKind {
         match self {
             PackFileKind::File(file) => PackFileKind::File(file.clone()),
             PackFileKind::Dir(_) => PackFileKind::None,
-            PackFileKind::None => PackFileKind::None
+            PackFileKind::None => PackFileKind::None,
         }
     }
 }
@@ -204,9 +204,9 @@ pub struct PackDir {
     //列表
     files_list: HashMap<String, PackFileInfo>,
     //所有子文件，不包含目录
-    file_count: u32,
+    file_count: u64,
     //所有目录
-    dir_count: u32,
+    dir_count: u64,
 } //包目录特有数据
 impl PackDir {
     pub fn files_list(&self) -> &HashMap<String, PackFileInfo> {
@@ -217,11 +217,11 @@ impl PackDir {
         &mut self.files_list
     }
 
-    pub fn file_count(&self) -> u32 {
+    pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
-    pub fn dir_count(&self) -> u32 {
+    pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
 

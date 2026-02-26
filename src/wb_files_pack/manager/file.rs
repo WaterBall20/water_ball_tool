@@ -2,14 +2,10 @@
 开始时间：26/02/13 11：31
  */
 use super::WBFPManager;
-use crate::wb_files_pack::PackFileInfo;
-use crate::wb_files_pack::PackFileKind;
 use std::io;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 pub struct PackFileWR {
-    //相关文件信息
-    pack_file_info: PackFileInfo,
     //管理器实例id, 随机数，确保不意外操作
     manager_id: u32,
     //文件位置
@@ -22,56 +18,34 @@ pub struct PackFileWR {
     temp_pos_this_len: u64,
 }
 impl PackFileWR {
-    pub(in crate::wb_files_pack::manager) fn build(
+    pub(in crate::wb_files_pack::manager) fn new(
         manager_id: u32,
-        pack_file_info: &PackFileInfo,
-    ) -> Result<PackFileWR, Error> {
-        if let PackFileKind::File(file) = pack_file_info.file_kind() {
-            Ok(PackFileWR {
-                pack_file_info: pack_file_info.clone(),
-                manager_id,
-                file_pos: 0,
-                file_pos_s: file.data_pos().clone(),
-                temp_pos_index: 0,
-                temp_pos_this_len: 0,
-            })
-        } else {
-            Err(Error::new(ErrorKind::NotADirectory, "提供的参数不是文件"))
+        file_pos_s: Vec<(u64, u64)>,
+    ) -> PackFileWR {
+        PackFileWR {
+            manager_id,
+            file_pos: 0,
+            file_pos_s,
+            temp_pos_index: 0,
+            temp_pos_this_len: 0,
         }
-    }
-    //设置文件位置
-    fn set_pos(&mut self, pos: u64) -> Result<(), Error> {
-        //缓存处理===
-        //获取需要添加的块列表
-        let pos_s = self.get_pos_s(pos)?;
-        //块索引
-        let pos_index = pos_s.len() - 1;
-        //块长度
-        let (_, pos_len) = pos_s.get(pos_index).unwrap();
-        self.temp_pos_index = pos_index;
-        self.temp_pos_this_len = *pos_len;
-
-        self.file_pos = pos;
-        Ok(())
     }
 
     //获取位置列表
-    fn get_pos_s(&self, pos: u64) -> Result<Vec<(u64, u64)>, Error> {
+    fn get_pos_s(&self, pos: u64) -> io::Result<Vec<(u64, u64)>> {
         self.get_add_pos_s2(0, 0, pos)
     }
 
     //获取追加位置列表
-    fn get_add_pos_s(&self, add_pos: u64) -> Result<Vec<(u64, u64)>, Error> {
+    fn get_add_pos_s(&self, add_pos: u64) -> io::Result<Vec<(u64, u64)>> {
         self.get_add_pos_s2(self.temp_pos_index, self.temp_pos_this_len, add_pos)
     }
-
-    //获取追加位置列表
     fn get_add_pos_s2(
         &self,
         start_pos_index: usize,
         start_pos_len: u64,
         add_pos: u64,
-    ) -> Result<Vec<(u64, u64)>, Error> {
+    ) -> io::Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
@@ -98,15 +72,37 @@ impl PackFileWR {
                 pos_index += 1
             }
         }
-        Err(Error::new(ErrorKind::Other, "空间越界"))
+        Err(Error::other("空间越界"))
+    }
+
+    //设置文件大小
+    //TODO:动态扩容实现
+    fn _set_len(&mut self, _manager: &mut WBFPManager) -> io::Result<()> {
+        Err(Error::other("未实现动态扩容"))
+    }
+
+    //设置文件位置
+    fn set_pos(&mut self, pos: u64) -> io::Result<()> {
+        //缓存处理===
+        //获取需要添加的块列表
+        let pos_s = self.get_pos_s(pos)?;
+        //块索引
+        let pos_index = pos_s.len() - 1;
+        //块长度
+        let (_, pos_len) = pos_s.get(pos_index).unwrap();
+        self.temp_pos_index = pos_index;
+        self.temp_pos_this_len = *pos_len;
+
+        self.file_pos = pos;
+        Ok(())
     }
 
     //追加文件位置
-    fn add_pos(&mut self, length: u64) -> Result<(), Error> {
+    fn add_pos(&mut self, length: u64) -> io::Result<()> {
         //获取需要添加的块列表
         self.add_pos2(length, self.get_add_pos_s(length)?)
     }
-    fn add_pos2(&mut self, length: u64, add_pos_s: Vec<(u64, u64)>) -> Result<(), Error> {
+    fn add_pos2(&mut self, length: u64, add_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
         //需要添加的索引数
         let add_pos_index = add_pos_s.len() - 1;
         //缓存_当前块添加的大小
@@ -124,11 +120,12 @@ impl PackFileWR {
         self.file_pos += length;
         Ok(())
     }
+
     //减少文件位置
     fn sub_pos(&mut self, length: u64) -> io::Result<()> {
         self.sub_pos2(length, Vec::new())
     }
-    fn sub_pos2(&mut self, length: u64, sub_pos_s: Vec<(u64, u64)>) -> Result<(), Error> {
+    fn sub_pos2(&mut self, length: u64, _sub_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
         //TODO：暂时使用从头计算，可能存在性能损失，部分功能未实现
         let r_pos = self.file_pos as i64 - length as i64;
         if r_pos < 0 {
@@ -151,42 +148,35 @@ impl PackFileWR {
         buf: &[u8],
         buf_len: usize,
     ) -> io::Result<usize> {
-        manager.write_lock()?;
-        //大小判断
-        if buf.len() < buf_len {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "提供的缓冲区长度比提供的大小小",
-            ));
-        }
-        //指定大小的切片
-        let m_buf = &buf[..buf_len];
-        //当前大小所需的位置列表
-        let pos_s = self.get_add_pos_s(buf_len as u64)?;
-        //当前已写入大小
-        let mut write_len = 0;
-        //写入
-        for (pos, len) in pos_s {
-            let len = len as usize;
-            let this_data = &m_buf[write_len..(write_len - len)];
-            //更改文件位置
-            manager.set_pack_file_pos(pos)?;
-            //写入数据
-            //TODO:未来功能：写入优化、写时复制
-            let mut pos_write_len = 0;
-            while pos_write_len != len {
-                if pos_write_len > len {
-                    return Err(Error::new(ErrorKind::Other, "文件写出的大小大于预期"));
-                } else {
-                    let pos_pack_file_write_len =
-                        manager.pack_file_write2_root(&this_data[pos_write_len..], true)?;
-                    pos_write_len += pos_pack_file_write_len;
-                    write_len += pos_pack_file_write_len;
-                }
+        //管理器实例检查
+        if self.manager_id != manager.run_data.id {
+            Err(Error::other("管理器实例不一致"))
+        } else {
+            manager.write_lock()?;
+            //大小判断
+            if buf.len() < buf_len {
+                return Err(Error::other("提供的缓冲区长度比提供的大小小"));
             }
+            //指定大小的切片
+            let m_buf = &buf[..buf_len];
+            //当前大小所需的位置列表
+            let pos_s = self.get_add_pos_s(buf_len as u64)?;
+            //当前已写入大小
+            let mut write_len = 0;
+            //写入
+            for (pos, len) in pos_s {
+                let len = len as usize;
+                let this_data = &m_buf[write_len..(write_len + len)];
+                //更改文件位置
+                manager.set_pack_file_pos(pos)?;
+                //写入数据
+                manager.pack_file_write_root(this_data)?;
+                write_len += len;
+                //TODO:未来功能：写入优化、写时复制
+            }
+            self.add_pos(write_len as u64)?;
+            Ok(write_len)
         }
-
-        Ok(write_len)
     }
 
     pub fn read(&mut self, manager: &mut WBFPManager, buf: &mut [u8]) -> io::Result<usize> {
@@ -199,39 +189,33 @@ impl PackFileWR {
         buf: &mut [u8],
         buf_len: usize,
     ) -> io::Result<usize> {
-        //大小检查
-        if buf.len() < buf_len {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "提供的缓冲区长度比提供的大小小",
-            ));
-        }
-        //指定大小的切片
-        let m_buf = &mut buf[..buf_len];
-        //当前大小所需的位置列表
-        let pos_s = self.get_add_pos_s(buf_len as u64)?;
-        //当前已读取大小
-        let mut read_len = 0;
-        //读取
-        for (pos, len) in pos_s {
-            let len = len as usize;
-            let this_buf = &mut m_buf[read_len..(read_len + len)];
-            //更改文件位置
-            manager.set_pack_file_pos(pos)?;
-            //读取数据
-            let mut pos_read_len = 0;
-            while pos_read_len != len {
-                if pos_read_len > len {
-                    return Err(Error::new(ErrorKind::Other, "读取的大小大于预期"));
-                } else {
-                    let this_pack_file_read_len =
-                        manager.pack_file_read_root(&mut this_buf[pos_read_len..]);
-                    pos_read_len += this_pack_file_read_len;
-                    read_len += this_pack_file_read_len;
-                }
+        //管理器实例检查
+        if self.manager_id != manager.run_data.id {
+            Err(Error::other("管理器实例不一致"))
+        } else {
+            //大小检查
+            if buf.len() < buf_len {
+                return Err(Error::other("提供的缓冲区长度比提供的大小小"));
             }
+            //指定大小的切片
+            let m_buf = &mut buf[..buf_len];
+            //当前大小所需的位置列表
+            let pos_s = self.get_add_pos_s(buf_len as u64)?;
+            //当前已读取大小
+            let mut read_len = 0;
+            //读取
+            for (pos, len) in pos_s {
+                let len = len as usize;
+                let this_buf = &mut m_buf[read_len..(read_len + len)];
+                //更改文件位置
+                manager.set_pack_file_pos(pos)?;
+                //读取数据
+                manager.pack_file_read_root(this_buf)?;
+                read_len += len;
+            }
+            self.add_pos(read_len as u64)?;
+            Ok(read_len)
         }
-        Ok(read_len)
     }
 }
 
@@ -260,7 +244,7 @@ impl Seek for PackFileWR {
                     self.sub_pos(-pos as u64)?;
                     Ok(self.file_pos)
                 } else {
-                    Err(Error::new(ErrorKind::Other, "未实现动态扩容"))
+                    Err(Error::other("未实现动态扩容"))
                 }
             }
         }
@@ -268,17 +252,21 @@ impl Seek for PackFileWR {
 }
 
 impl Read for PackFileWR {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
         todo!()
     }
 }
 
 impl Write for PackFileWR {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
         todo!()
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        todo!()
+    }
+
+    fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
         todo!()
     }
 }
