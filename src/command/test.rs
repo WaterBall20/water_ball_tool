@@ -21,7 +21,7 @@ fn ff_out_file_skip_symlink() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     let args: Vec<String> = vec![
-        String::from("/home/waterball/Downloads"),
+        String::from("."),
         out_file_path.clone(),
         String::from("-s"),
     ];
@@ -38,7 +38,7 @@ fn ff_out_file() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     let args: Vec<String> = vec![
-        String::from("/home/waterball/Downloads"),
+        String::from("."),
         out_file_path.clone(),
     ];
     ff(args.as_slice(), None);
@@ -54,7 +54,7 @@ fn ff_out_file_longtime() {
     out_file_path.push_str("/test_ff_long_time.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("/home/waterball/"), out_file_path.clone()];
+    let args: Vec<String> = vec![String::from("/"), out_file_path.clone()];
     ff(args.as_slice(), None);
     _ = fs::remove_file(&out_file_path);
 }
@@ -62,7 +62,7 @@ fn ff_out_file_longtime() {
 #[test]
 fn ff_no_out_file() {
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("/home/waterball/Downloads")];
+    let args: Vec<String> = vec![String::from(".")];
     ff(args.as_slice(), None);
 }
 
