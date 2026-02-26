@@ -18,7 +18,7 @@ pub struct PackFileWR {
     temp_pos_this_len: u64,
 }
 impl PackFileWR {
-    pub(in crate::wb_files_pack::manager) fn new(
+    pub(in crate::wb_files_pack) fn new(
         manager_id: u32,
         file_pos_s: Vec<(u64, u64)>,
     ) -> PackFileWR {
@@ -32,19 +32,25 @@ impl PackFileWR {
     }
 
     //获取位置列表
-    fn get_pos_s(&self, pos: u64) -> io::Result<Vec<(u64, u64)>> {
-        self.get_add_pos_s2(0, 0, pos)
+    fn get_pos_s(&self, pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
+        self.get_add_pos_s2(0, 0, pos, is_read)
     }
 
     //获取追加位置列表
-    fn get_add_pos_s(&self, add_pos: u64) -> io::Result<Vec<(u64, u64)>> {
-        self.get_add_pos_s2(self.temp_pos_index, self.temp_pos_this_len, add_pos)
+    fn get_add_pos_s(&self, add_pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
+        self.get_add_pos_s2(
+            self.temp_pos_index,
+            self.temp_pos_this_len,
+            add_pos,
+            is_read,
+        )
     }
     fn get_add_pos_s2(
         &self,
         start_pos_index: usize,
         start_pos_len: u64,
         add_pos: u64,
+        is_read: bool,
     ) -> io::Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
@@ -72,7 +78,11 @@ impl PackFileWR {
                 pos_index += 1
             }
         }
-        Err(Error::other("空间越界"))
+        if is_read {
+            Ok(r_pos)
+        } else {
+            Err(Error::other("空间越界"))
+        }
     }
 
     //设置文件大小
@@ -85,7 +95,7 @@ impl PackFileWR {
     fn set_pos(&mut self, pos: u64) -> io::Result<()> {
         //缓存处理===
         //获取需要添加的块列表
-        let pos_s = self.get_pos_s(pos)?;
+        let pos_s = self.get_pos_s(pos, false)?;
         //块索引
         let pos_index = pos_s.len() - 1;
         //块长度
@@ -100,7 +110,7 @@ impl PackFileWR {
     //追加文件位置
     fn add_pos(&mut self, length: u64) -> io::Result<()> {
         //获取需要添加的块列表
-        self.add_pos2(length, self.get_add_pos_s(length)?)
+        self.add_pos2(length, self.get_add_pos_s(length, false)?)
     }
     fn add_pos2(&mut self, length: u64, add_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
         //需要添加的索引数
@@ -160,7 +170,7 @@ impl PackFileWR {
             //指定大小的切片
             let m_buf = &buf[..buf_len];
             //当前大小所需的位置列表
-            let pos_s = self.get_add_pos_s(buf_len as u64)?;
+            let pos_s = self.get_add_pos_s(buf_len as u64, false)?;
             //当前已写入大小
             let mut write_len = 0;
             //写入
@@ -179,13 +189,13 @@ impl PackFileWR {
         }
     }
 
-    pub fn read(&mut self, manager: &mut WBFPManager, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn read(&mut self, manager: &WBFPManager, buf: &mut [u8]) -> io::Result<usize> {
         self.read2(manager, buf, buf.len())
     }
 
     pub fn read2(
         &mut self,
-        manager: &mut WBFPManager,
+        manager: &WBFPManager,
         buf: &mut [u8],
         buf_len: usize,
     ) -> io::Result<usize> {
@@ -200,7 +210,7 @@ impl PackFileWR {
             //指定大小的切片
             let m_buf = &mut buf[..buf_len];
             //当前大小所需的位置列表
-            let pos_s = self.get_add_pos_s(buf_len as u64)?;
+            let pos_s = self.get_add_pos_s(buf_len as u64, true)?;
             //当前已读取大小
             let mut read_len = 0;
             //读取

@@ -1,7 +1,7 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::{create_new_file, create_new_file2};
+use crate::wb_files_pack::manager::{create_new_file, create_new_file2, open_file};
 use std::fs;
 use std::io::{Seek, SeekFrom};
 use std::path::Path;
@@ -97,16 +97,63 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         //file1
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw1.seek(SeekFrom::Start(0)).unwrap();
-        rw1.read(&mut pack, &mut read_data1[..]).unwrap();
+        rw1.read(&pack, &mut read_data1[..]).unwrap();
         //file2
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
-        rw2.read(&mut pack, &mut read_data2[..]).unwrap();
+        rw2.read(&pack, &mut read_data2[..]).unwrap();
         assert_eq!(write_data2, read_data2);
         assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
     _remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
+}
+
+#[test]
+fn create_new_file_and_open_pack() {
+    //测试目录
+    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
+    pack_dir.push_str("/create_new_file_and_open_pack");
+    let pack_dir: &Path = pack_dir.as_ref();
+    fs::create_dir_all(pack_dir).unwrap();
+    let pack_file = pack_dir.join("pack");
+    _remove_test_pack_files(&pack_file);
+    //
+    {
+        //创建文件
+        create_new_file(&pack_file).expect("无法创建文件");
+    }
+    //打开已创建并关闭的文件
+    {
+        open_file(&pack_file).expect("无法打开包文件");
+    }
+    _remove_test_pack_files(&pack_file);
+    _ = fs::remove_dir_all(pack_dir)
+}
+
+#[test]
+fn create_new_file_and_open_pack_json_ver() {
+    //测试目录
+    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
+    pack_dir.push_str("/create_new_file_and_open_pack_json_ver");
+    let pack_dir: &Path = pack_dir.as_ref();
+    fs::create_dir_all(pack_dir).unwrap();
+    let pack_file = pack_dir.join("pack");
+    _remove_test_pack_files(&pack_file);
+    //
+    {
+        //创建文件
+        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        //更改实例内部的数据版本
+        pack.pack_data.attribute.data_version.value = super::DATA_VERSION + 1;
+        pack.pack_data.attribute.data_version.compatible = super::DATA_VERSION_COMPATIBLE - 1;
+    }
+    //打开已创建并关闭的文件
+    {
+        open_file(&pack_file).expect("无法打开包文件");
+    }
+    _remove_test_pack_files(&pack_file);
+    _ = fs::remove_dir_all(pack_dir)
 }
 
 //ERR===
@@ -123,9 +170,7 @@ fn create_new_pack_file_err() {
     _remove_test_pack_files(&pack_file);
     //
     let r = {
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
-        //给包文件上锁，使其无法创建
-        pack.write_lock().expect("无法给包文件上锁");
+        create_new_file(&pack_file).expect("无法创建文件");
         //当上锁时，无法创建是正确的。
         create_new_file(&pack_file)
     };
@@ -134,4 +179,55 @@ fn create_new_pack_file_err() {
         _ = fs::remove_dir_all(pack_dir);
         panic!("{}", err)
     }
+}
+#[test]
+#[should_panic(expected = "Json版本过高")]
+fn create_new_file_and_open_pack_err_json_ver1() {
+    //测试目录
+    let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
+    pack_dir.push_str("/create_new_file_and_open_pack_err_json_ver1");
+    let pack_dir: &Path = pack_dir.as_ref();
+    fs::create_dir_all(pack_dir).unwrap();
+    let pack_file = pack_dir.join("pack");
+    _remove_test_pack_files(&pack_file);
+    //
+    {
+        //创建文件
+        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        //更改实例内部的数据版本
+        pack.pack_data.attribute.data_version.value = super::DATA_VERSION + 1;
+        pack.pack_data.attribute.data_version.compatible = super::DATA_VERSION + 1;
+    }
+    //打开已创建并关闭的文件
+    {
+        open_file(&pack_file).expect("无法打开包文件");
+    }
+    _remove_test_pack_files(&pack_file);
+    _ = fs::remove_dir_all(pack_dir)
+}
+
+#[test]
+#[should_panic(expected = "Json版本过低")]
+fn create_new_file_and_open_pack_err_json_ver2() {
+    //测试目录
+    let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
+    pack_dir.push_str("/create_new_file_and_open_pack_err_json_ver2");
+    let pack_dir: &Path = pack_dir.as_ref();
+    fs::create_dir_all(pack_dir).unwrap();
+    let pack_file = pack_dir.join("pack");
+    _remove_test_pack_files(&pack_file);
+    //
+    {
+        //创建文件
+        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        //更改实例内部的数据版本
+        pack.pack_data.attribute.data_version.value = super::DATA_VERSION_COMPATIBLE - 1;
+        pack.pack_data.attribute.data_version.compatible = super::DATA_VERSION_COMPATIBLE - 1;
+    }
+    //打开已创建并关闭的文件
+    {
+        open_file(&pack_file).expect("无法打开包文件");
+    }
+    _remove_test_pack_files(&pack_file);
+    _ = fs::remove_dir_all(pack_dir)
 }

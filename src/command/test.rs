@@ -65,7 +65,8 @@ fn ff_no_out_file() {
     let args: Vec<String> = vec![String::from("/home/waterball/Downloads")];
     ff(args.as_slice(), None);
 }
-//水球包文件打包
+
+//水球包文件打包===
 #[test]
 fn wbfp_create_new_pack_m() {
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
@@ -76,13 +77,14 @@ fn wbfp_create_new_pack_m() {
     out_file_path.push_str("/pack");
     //命令行参数处理
     let args: Vec<String> = vec![
+        String::from("-m"),
         String::from("./src"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), None);
     _ = fs::remove_dir_all(&out_file_path);
 }
-//水球包文件打包_长时间
+// 长时间
 #[test]
 #[ignore]
 fn wbfp_create_new_pack_m_longtime() {
@@ -94,13 +96,14 @@ fn wbfp_create_new_pack_m_longtime() {
     out_file_path.push_str("/pack");
     //命令行参数处理
     let args: Vec<String> = vec![
+        String::from("-m"),
         String::from("/home/waterball/Documents"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), None);
     _ = fs::remove_dir_all(&out_file_path);
 }
-//水球包文件打包不分离数据
+// 不分离数据
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file() {
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
@@ -111,11 +114,47 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
     out_file_path.push_str("/pack");
     //命令行参数处理
     let args: Vec<String> = vec![
+        String::from("-m"),
         String::from("./src"),
         out_file_path.clone(),
         String::from("-f"),
     ];
     wbfp(args.as_slice(), None);
+    _ = fs::remove_dir_all(&out_file_path);
+}
+
+// 水球包文件解包===
+// 不分离数据打包
+#[test]
+fn wbfp_create_new_pack_m_no_s_data_file_s() {
+    let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
+    out_dir_path.push_str("/create_new_pack_m_no_s_data_file_s");
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::create_dir_all(&out_dir_path);
+    let mut out_file_path = out_dir_path.clone();
+    out_file_path.push_str("/pack");
+    //前提：打包
+    {
+        //命令行参数处理
+        let args: Vec<String> = vec![
+            String::from("-m"),
+            String::from("./src"),
+            out_file_path.clone(),
+            String::from("-f"),
+        ];
+        wbfp(args.as_slice(), None);
+    }
+    //解包
+    {
+        out_dir_path.push_str("/s");
+        //命令行参数处理
+        let args: Vec<String> = vec![
+            String::from("-s"),
+            out_file_path.clone(),
+            out_dir_path.clone()
+        ];
+        wbfp(args.as_slice(), None);
+    }
     _ = fs::remove_dir_all(&out_file_path);
 }
 
@@ -152,6 +191,7 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     out_file_path.push_str("/pack");
     //命令行参数处理
     let args: Vec<String> = vec![
+        String::from("-m"),
         String::from("/~"),
         out_file_path.clone(),
     ];

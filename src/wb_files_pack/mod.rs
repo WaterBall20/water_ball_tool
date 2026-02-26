@@ -3,8 +3,12 @@
  */
 pub mod manager;
 
+use crate::wb_files_pack::manager::file::PackFileWR;
+use crate::wb_files_pack::manager::WBFPManager;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io;
+use std::io::Error;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WBFilesPackData {
@@ -103,6 +107,10 @@ impl PackFilesList {
     pub fn add_file(&mut self, file_info: PackFileInfo) -> Option<PackFileInfo> {
         self.files_list.insert(file_info.name.clone(), file_info)
     }
+
+    fn files_list_mut(&mut self) -> &mut HashMap<String, PackFileInfo> {
+        &mut self.files_list
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,6 +146,14 @@ impl PackFileInfo {
 
     pub fn file_kind(&self) -> &PackFileKind {
         &self.file_kind
+    }
+
+    pub fn get_rw(&self, pack_man: &WBFPManager) -> io::Result<PackFileWR> {
+        if let PackFileKind::File(file) = &self.file_kind {
+            Ok(PackFileWR::new(pack_man.run_data.id, file.data_pos.clone()))
+        } else {
+            Err(Error::other("类型不是文件"))
+        }
     }
 }
 impl Clone for PackFileInfo {
