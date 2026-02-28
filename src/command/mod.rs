@@ -125,12 +125,12 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     let s_data_file = match args.get(2) {
         Some(value) => {
             if value.contains("-f") {
-                !water_ball_tool::wb_files_pack::manager::DEF_S_DATA_FILE
+                !water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE
             } else {
-                water_ball_tool::wb_files_pack::manager::DEF_S_DATA_FILE
+                water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE
             }
         }
-        None => water_ball_tool::wb_files_pack::manager::DEF_S_DATA_FILE,
+        None => water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE,
     };
 
     //进度条
@@ -442,7 +442,7 @@ fn read_pack(
         };
         //分配空间
         if let Err(err) = out_file.set_len(info.length()) {
-            warn!("无法对输出文件{this_out_path:?}进行预分配空间，将继续。")
+            warn!("无法对输出文件{this_out_path:?}进行预分配空间，将继续, err:{err}")
         }
         //写入操作
         let mut write_len = 0;

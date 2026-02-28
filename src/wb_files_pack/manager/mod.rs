@@ -2,10 +2,7 @@
 开始时间：26/2/11 15：51
  */
 use crate::wb_files_pack::manager::file::PackFileWR;
-use crate::wb_files_pack::{
-    Attribute, DataVersion, PackDir, PackFile, PackFileInfo, PackFileKind, PackFilesList,
-    WBFilesPackData,
-};
+use crate::wb_files_pack::*;
 use rand::RngExt;
 use std::collections::HashMap;
 use std::fs::File;
@@ -16,80 +13,36 @@ use tracing::{debug, error, info, warn};
 
 pub mod file;
 
-#[cfg(test)]
+/*#[cfg(test)]
 mod test;
 
-//当前解析器版本
-pub static DATA_VERSION: u32 = 10;
-//当前解析器兼任版本
-pub static DATA_VERSION_COMPATIBLE: u32 = 10;
-
-//默认写实复制
-pub static DEF_COW: bool = false;
-
-//默认分离数据为单独文件
-pub static DEF_S_DATA_FILE: bool = true;
-
-//文件头-文件名:WPFilesPack
-pub static FILE_HEADER_TYPE_NAME: [u8; 11] = [
-    0x57u8, 0x42, 0x46, 0x69, 0x6c, 0x65, 0x73, 0x50, 0x61, 0x63, 0x6b,
-];
-//文件头版本
-static FILE_HEADER_VERSION: [u8; 2] = [0, 1];
-
-//文件头标签位长度
-static FILE_HEADER_TAG_LENGTH: usize = 1;
-
-//文件头JSON数据起始位置的位置
-static FILE_HEADER_JSON_DATA_START_POS_POS: u64 =
-    (FILE_HEADER_TYPE_NAME.len() + FILE_HEADER_VERSION.len() + FILE_HEADER_TAG_LENGTH) as u64;
-
-//文件头JSON数据的起始位置和结束位置段长度
-static FILE_HEADER_JSON_DATA_START_AND_END_LENGTH: u64 = 8 + 8;
-
-//文件头数据长度位置
-static FILE_HEADER_DATA_LENGTH_POS: u64 =
-    FILE_HEADER_JSON_DATA_START_POS_POS + FILE_HEADER_JSON_DATA_START_AND_END_LENGTH;
-
-//文件头数据长度长度
-static FILE_HEADER_DATA_LENGTH_LENGTH: u64 = 8;
-//文件头长度
-static FILE_HEADER_LENGTH: u64 = FILE_HEADER_JSON_DATA_START_POS_POS
-    + FILE_HEADER_JSON_DATA_START_AND_END_LENGTH
-    + FILE_HEADER_DATA_LENGTH_LENGTH;
-
-//内部缓冲区大小
-//TODO:未使用的字段
-static _FILE_BUF_LEN: usize = 1024 * 1024 * 8;
+#[cfg(debug_assertions)]
+#[cfg(test)]
+mod new_test;*/
 
 pub struct WBFPManager {
-    pack_data: WBFilesPackData,
+    //清单实例
+    manifest: WBFilesPacManifest,
+    //空数据列表
+    empty_data_pos_list: DataPosList,
     //包文件实例
     pack_file: File,
-    //包数据文件实例
-    json_data_file: Option<File>,
-    //包数据文件B实例
-    json_data_file_b: Option<File>,
+    //清单文件实例
+    manifest_file: Option<File>,
     //启用写时复制
-    //TODO:未实现功能
-    _cow: bool,
-    //数据分离
-    s_data_file: bool,
-    //JSON数据起始位置
-    json_data_start_pos: u64,
-    //JSON数据结束位置
-    json_data_end_pos: u64,
+    cow: bool,
+    //清单分离
+    s_manifest_file: bool,
+    //清单数据位置
+    manifest_file_pos: u64,
     //当前包文件数据长度
     pack_file_data_length: u64,
     //运行时数据结构体
     pub(super) run_data: WBFPManagerRun,
-}
-//运行时数据结构体
+} //水球包文件管理器
 pub(super) struct WBFPManagerRun {
     //包文件路径
     pack_path: String,
-    //当前写入B Json文件
-    is_write_json_data_file_b: bool,
     //写入锁
     write_lock: bool,
     //写入锁路径
@@ -98,8 +51,6 @@ pub(super) struct WBFPManagerRun {
     write_lock_file: Option<File>,
     //包文件位置
     pack_file_pos: u64,
-    //id
-    pub(super) id: u32,
     //总写入大小
     all_write_len: u64,
     //上次总写入的长度
@@ -108,15 +59,7 @@ pub(super) struct WBFPManagerRun {
     all_cr_file_count: u64,
     //上次创建总创建文件数量
     last_all_cr_file_count: u64,
-    //写入缓冲区
-    //write_buf: Vec<u8>,
-    //写入缓冲区占用大小
-    //write_buf_len: u64,
-    //读取缓冲区
-    //read_buf:Vec<u8>,
-    //读取缓冲区占用大小
-    //read_buf_len: u64,
-}
+} //运行时数据结构体
 impl WBFPManagerRun {
     fn new<P: AsRef<Path>>(
         pack_path: P,
@@ -125,12 +68,10 @@ impl WBFPManagerRun {
     ) -> WBFPManagerRun {
         WBFPManagerRun {
             pack_path: String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文本")),
-            is_write_json_data_file_b: false,
             write_lock: false,
             write_lock_path,
             write_lock_file,
             pack_file_pos: 0,
-            id: rand::rng().random_range(0..100_000_000),
             all_write_len: 0,
             last_all_write_len: 0,
             all_cr_file_count: 0,
@@ -142,20 +83,21 @@ impl WBFPManager {
     //创建实例
     fn new<P: AsRef<Path>>(
         pack_path: P,
-        wb_files_pack_data: WBFilesPackData,
+        manifest: WBFilesPacManifest,
+        empty_data_pos_list: DataPosList,
         pack_file: File,
-        json_data_file: Option<File>,
-        json_data_file_b: Option<File>,
+        manifest_file: Option<File>,
+        s_manifest_file: bool,
         write_lock_file: Option<File>,
     ) -> WBFPManager {
         Self::new2(
             pack_path,
-            wb_files_pack_data,
+            manifest,
+            empty_data_pos_list,
             pack_file,
-            json_data_file,
-            json_data_file_b,
+            manifest_file,
+            s_manifest_file,
             write_lock_file,
-            0,
             0,
             0,
         )
@@ -163,30 +105,28 @@ impl WBFPManager {
 
     fn new2<P: AsRef<Path>>(
         pack_path: P,
-        pack_data: WBFilesPackData,
+        manifest: WBFilesPacManifest,
+        empty_data_pos_list: DataPosList,
         pack_file: File,
-        json_data_file: Option<File>,
-        json_data_file_b: Option<File>,
+        manifest_file: Option<File>,
+        s_manifest_file: bool,
         write_lock_file: Option<File>,
-        json_data_start_pos: u64,
-        json_data_end_pos: u64,
+        manifest_file_pos: u64,
         pack_file_data_length: u64,
     ) -> WBFPManager {
-        let cow = pack_data.attribute().cow();
-        let s_data_file = pack_data.attribute().s_data_file();
+        let cow = manifest.attribute().cow();
         let mut write_lock_path =
             String::from(pack_path.as_ref().to_str().expect("无法将转换路径成文本"));
         write_lock_path.push_str(".lock");
         let write_lock_path = Path::new(&write_lock_path).to_path_buf();
         WBFPManager {
-            pack_data,
+            manifest,
+            empty_data_pos_list,
             pack_file,
-            json_data_file,
-            json_data_file_b,
-            _cow: cow,
-            s_data_file,
-            json_data_start_pos,
-            json_data_end_pos,
+            manifest_file,
+            cow,
+            s_manifest_file,
+            manifest_file_pos,
             pack_file_data_length,
             run_data: WBFPManagerRun::new(pack_path, write_lock_path, write_lock_file),
         }
@@ -205,12 +145,12 @@ impl WBFPManager {
         //写入标签===
         //文件头标签，二进制位:
         //|   0   |     1    |
-        //|写实复制|数据文件分离|
+        //|写实复制|清单文件分离|
         let mut header_tag: u8 = 0;
-        if self.pack_data.attribute().cow() {
+        if self.cow {
             header_tag |= 0b10000000
         }
-        if self.pack_data.attribute().s_data_file() {
+        if self.s_manifest_file {
             header_tag |= 0b01000000
         }
         self.pack_file_write_root([header_tag].as_slice()).unwrap();
@@ -220,14 +160,14 @@ impl WBFPManager {
         self.set_pack_file_len(FILE_HEADER_LENGTH)
             .expect("无法设置文件大小");
 
-        self.save_json_data().expect("无法保存索引数据");
+        //self.save_json_data().expect("无法保存索引数据");
 
         self.write_unlock().expect("解除文件锁失败");
     }
 
     //读取===
 
-    pub fn get_files_list(&self) -> &PackFilesList {
+    /*pub fn get_files_list(&self) -> &PackFilesList {
         &self.pack_data.pack_files_list
     }
 
@@ -308,11 +248,10 @@ impl WBFPManager {
             }
         }
         info
-    }
+    }*/
 
     //包文件读取
     fn pack_file_read_root(&self, data: &mut [u8]) -> io::Result<()> {
-        //自我注意：这里必须是引用，除非想一次性写入。
         let mut file = &self.pack_file;
         file.read_exact(data)?;
         Ok(())
@@ -320,7 +259,7 @@ impl WBFPManager {
 
     //写入===
 
-    pub(crate) fn get_files_list_mut(&mut self) -> &mut PackFilesList {
+    /*pub(crate) fn get_files_list_mut(&mut self) -> &mut PackFilesList {
         &mut self.pack_data.pack_files_list
     }
 
@@ -408,7 +347,9 @@ impl WBFPManager {
         self.get_file_rw2(&Self::create_path_vec(path))
     }
     pub fn get_file_rw2(&self, path_list: &[String]) -> io::Result<PackFileWR> {
-        let info = self.get_file_file_info2(path_list).ok_or(Error::other(""))?;
+        let info = self
+            .get_file_file_info2(path_list)
+            .ok_or(Error::other(""))?;
         info.get_rw(self)
     }
 
@@ -546,20 +487,9 @@ impl WBFPManager {
         } else {
             panic!("路径为空")
         }
-    }
+    }*/
 
-    //附加运行时所有创建数量
-    fn add_run_all_cr_file_count(&mut self) -> io::Result<()> {
-        self.run_data.all_cr_file_count += 1;
-        let l = self.run_data.all_cr_file_count - self.run_data.last_all_cr_file_count;
-        if l > 32 {
-            self.save_and_up_all()?;
-            self.run_data.last_all_cr_file_count = self.run_data.all_cr_file_count;
-        }
-        Ok(())
-    }
-
-    //创建目录
+    /*//创建目录
     pub fn create_dir<P: AsRef<Path>>(&mut self, path: &P, modified_time: u128) -> io::Result<()> {
         self.create_dir2(&Self::create_path_vec(path), modified_time)
     }
@@ -672,12 +602,16 @@ impl WBFPManager {
         pack_files_list.file_count += r.add_file_count;
         pack_files_list.dir_count += r.add_dir_count;
         Ok(())
-    }
+    }*/
 
     //将路径转换为Vec
     fn create_path_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         let path = path.as_ref();
-        let path = if let Ok(r) = path.strip_prefix("./").or_else(|_| path.strip_prefix(".")) {
+        let path = if let Ok(r) = path
+            .strip_prefix("./")
+            .or_else(|_| path.strip_prefix("."))
+            .or_else(|_| path.strip_prefix(".\\\\"))
+        {
             r
         } else {
             path
@@ -692,8 +626,8 @@ impl WBFPManager {
     //核心代码===
 
     //垃圾回收 TODO:未使用方法
-    fn _file_gc(&mut self, gc_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
-        let pos_s = &mut self.pack_data.attribute.empty_data_pos;
+    fn file_gc(&mut self, gc_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
+        let pos_s = &mut self.empty_data_pos_list.list;
         'gc_for: for (gc_pos, gc_len) in &gc_pos_s {
             //排序插入
             let mut j = 0;
@@ -719,7 +653,7 @@ impl WBFPManager {
         let mut add_pos: Vec<(u64, u64)> = Vec::new();
         let mut l_add_len = 0;
         //优先使用空隙
-        let empty_data_pos = &mut self.pack_data.attribute.empty_data_pos;
+        let empty_data_pos = &mut self.empty_data_pos_list.list;
         //当大小没有写完，且空隙存在则优先使用空隙
         while l_add_len != length && !empty_data_pos.is_empty() {
             //从第一个开始
@@ -749,10 +683,41 @@ impl WBFPManager {
         add_pos
     }
 
+    //获取连续的空间
+    fn get_file_pos_l(&mut self, length: u64) -> (u64, u64) {
+        //优先使用空隙
+        let empty_data_pos = &mut self.empty_data_pos_list.list;
+        //优先使用空数据，但必须完整一块
+        let index = 0;
+        while !empty_data_pos.is_empty() {
+            //从第一个开始
+            let (pos, len) = empty_data_pos.get_mut(index).unwrap();
+            //判断是否能占用完
+            //剩余大小
+            return if length == *len {
+                //能占用完，但必须等于
+                let r = (*pos, *len);
+                empty_data_pos.remove(0);
+                r
+            } else if *len > length {
+                //不能则切出
+                let r = (*pos, *len - length);
+                //修改，位置加大小使其向后移动，长度减大小使其边界不变
+                *pos += length;
+                *len -= length;
+                r
+            } else {
+                continue
+            };
+        }
+        //扩容处理
+        (self.pack_file_data_length, length)
+    }
+
     //保存所有数据
     fn save_and_up_all(&mut self) -> io::Result<()> {
         self.up_data_length()?;
-        self.save_json_data()?;
+        self.save_manifest()?;
         Ok(())
     }
 
@@ -766,9 +731,28 @@ impl WBFPManager {
         self.pack_file_write_root(self.pack_file_data_length.to_le_bytes().as_slice())?;
         Ok(())
     }
+    //保存实例的清单
+    fn save_manifest(&mut self) -> io::Result<()> {
+        fn s_save(pack_struct: PackStruct) {}
+        let root_struct = &self.manifest;
+        todo!()
+    }
+
+    fn save_empty_data_pos_lis(&mut self) -> io::Result<()> {
+        //获取当前数据
+        //当前文件位置
+        let this_pos = self.manifest.attribute.empty_data_pos_list_pos;
+        //数据大小
+        let this_len = self.empty_data_pos_list.data_len;
+        //目前的数据大小
+        //转换数据
+        let data = self.empty_data_pos_list.get_bytes_vec();
+        //获取新空间
+        let new_data = self.get_file_pos_l(data.len() as u64);
+    }
 
     //写入数据文件
-    fn save_json_data(&mut self) -> io::Result<()> {
+    /*fn save_json_data(&mut self) -> io::Result<()> {
         //数据分离：写入数据文件a
         fn write_json_data2_root_a(write_file: &mut Option<File>, buf: &[u8]) -> io::Result<usize> {
             if let Some(write_file) = write_file {
@@ -827,14 +811,14 @@ impl WBFPManager {
             self.json_data_end_pos = self.json_data_start_pos + json_data.len() as u64;
             //更新JSON数据的起始和结束位置
             //更改文件偏移量
-            self.set_pack_file_pos2(FILE_HEADER_JSON_DATA_START_POS_POS, true)?;
+            self.set_pack_file_pos2(FILE_HEADER_MANIFEST_DATA_START_POS_POS, true)?;
             //写入起始位置
             self.pack_file_write_root(self.json_data_start_pos.to_le_bytes().as_slice())?;
             //写入结束位置
             self.pack_file_write_root(self.json_data_end_pos.to_le_bytes().as_slice())?;
             Ok(())
         }
-    }
+    }*/
 
     //写入锁信息
     fn write_lock_info(&self) -> PackLockInfo {
@@ -924,20 +908,6 @@ impl WBFPManager {
         file.write_all(data)?;
         let len = data.len() as u64;
         self.run_data.pack_file_pos += len;
-        self.add_run_all_write_len(data.len() as u64)?;
-        Ok(())
-    }
-
-    fn add_run_all_write_len(&mut self, length: u64) -> io::Result<()> {
-        //当文件创建数量相同期间不变更
-        if self.run_data.all_cr_file_count != self.run_data.last_all_cr_file_count {
-            self.run_data.all_write_len += length;
-            let l = self.run_data.all_write_len - self.run_data.last_all_write_len;
-            if l > 1024 * 1024 * 32 {
-                self.run_data.last_all_write_len = self.run_data.all_write_len;
-                self.save_json_data()?;
-            }
-        }
         Ok(())
     }
 
@@ -948,7 +918,7 @@ impl WBFPManager {
         file.set_len(len)
     }
 }
-impl Drop for WBFPManager {
+/*impl Drop for WBFPManager {
     fn drop(&mut self) {
         //确保文件完全写入
         _ = self.pack_file.sync_all();
@@ -968,7 +938,7 @@ impl Drop for WBFPManager {
         //释放写入锁
         _ = self.write_unlock();
     }
-}
+}*/
 
 struct MutDirReturn {
     //
@@ -1082,9 +1052,9 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
     Ok(write_lock)
 }
 //打开
-pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
-    fn load_json_data(data: &[u8]) -> io::Result<WBFilesPackData> {
-        let pack: WBFilesPackData = serde_json::from_slice(data)?;
+/*pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
+    fn load_json_data(data: &[u8]) -> io::Result<WBFilesPacManifest> {
+        let pack: WBFilesPacManifest = serde_json::from_slice(data)?;
         //兼容性判断
         //文件版本
         let ver = pack.attribute.data_version.value;
@@ -1128,7 +1098,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
         ));
     }
     //读取标志位
-    let he_tag = header[HEADER_TYPE_LEN + 2..FILE_HEADER_JSON_DATA_START_POS_POS as usize][0];
+    let he_tag = header[HEADER_TYPE_LEN + 2..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize][0];
     //写时复制 TODO:未使用变量
     let _cow = he_tag >> 7 == 1;
     let s_data_file = he_tag >> 6 == 1;
@@ -1189,15 +1159,15 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
         //获取起始位置和结束位置
         let json_data_start_pos = u64::from_le_bytes(
             *<&[u8; 8]>::try_from(
-                &header[FILE_HEADER_JSON_DATA_START_POS_POS as usize
-                    ..FILE_HEADER_JSON_DATA_START_POS_POS as usize + 8],
+                &header[FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize
+                    ..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 8],
             )
                 .unwrap(),
         );
         let json_data_end_pos = u64::from_le_bytes(
             *<&[u8; 8]>::try_from(
-                &header[FILE_HEADER_JSON_DATA_START_POS_POS as usize + 8
-                    ..FILE_HEADER_JSON_DATA_START_POS_POS as usize + 16],
+                &header[FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 8
+                    ..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 16],
             )
                 .unwrap(),
         );
@@ -1209,7 +1179,9 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
         //缓存
         let mut json_data: Vec<u8> = Vec::with_capacity(json_data_len as usize);
         //限制大小读取
-        (&mut pack_file).take(json_data_len).read_to_end(&mut json_data)?;
+        (&mut pack_file)
+            .take(json_data_len)
+            .read_to_end(&mut json_data)?;
 
         if json_data_len as usize != json_data.len() {
             return Err(Error::other("读取到的Json数据不完整"));
@@ -1227,13 +1199,13 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             pack_data_len,
         ))
     }
-}
+}*/
 
 //创建===
 
 //创建新包文件
 pub fn create_new_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
-    create_new_file2(pack_path, DEF_COW, DEF_S_DATA_FILE)
+    create_new_file2(pack_path, DEFAULT_COW, DEFAULT_S_DATA_FILE)
 }
 
 //创建新包文件
@@ -1256,7 +1228,7 @@ pub fn create_new_file2<P: AsRef<Path>>(
 pub fn create_file2<P: AsRef<Path>>(
     pack_path: &P,
     cow: bool,
-    s_data_file: bool,
+    s_manifest_file: bool,
     create_new: bool,
 ) -> Result<WBFPManager, Error> {
     let mut write_lock_path =
@@ -1274,27 +1246,21 @@ pub fn create_file2<P: AsRef<Path>>(
         .open(pack_path)?;
     //创建包文件数据文件
 
-    let pack_data_file;
-    let pack_data_file_b;
-    if s_data_file {
-        let mut data_path =
+    let manifest_file = if s_manifest_file {
+        let mut manifest_path =
             String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文件"));
-        data_path.push_str(".json");
-        pack_data_file = Some(File::create(&data_path)?);
-        data_path.push_str(".b");
-        pack_data_file_b = Some(File::create(data_path)?)
+        manifest_path.push_str(".json");
+        Some(File::create(&manifest_path)?)
     } else {
-        pack_data_file = None;
-        pack_data_file_b = None;
-    }
+        None
+    };
 
     Ok(create2(
         pack_path,
         cow,
-        s_data_file,
         pack_file,
-        pack_data_file,
-        pack_data_file_b,
+        s_manifest_file,
+        manifest_file,
         write_lock_file,
     ))
 }
@@ -1305,10 +1271,9 @@ pub fn create_file2<P: AsRef<Path>>(
 fn _create<P: AsRef<Path>>(pack_path: &P, pack_file: File) -> WBFPManager {
     create2(
         pack_path,
-        DEF_COW,
-        DEF_S_DATA_FILE,
+        DEFAULT_COW,
         pack_file,
-        None,
+        DEFAULT_S_DATA_FILE,
         None,
         None,
     )
@@ -1317,34 +1282,24 @@ fn _create<P: AsRef<Path>>(pack_path: &P, pack_file: File) -> WBFPManager {
 fn create2<P: AsRef<Path>>(
     pack_path: &P,
     cow: bool,
-    s_data_file: bool,
     pack_file: File,
-    json_data_file: Option<File>,
-    json_data_file_b: Option<File>,
+    s_manifest_file: bool,
+    manifest_file: Option<File>,
     write_lock_file: Option<File>,
 ) -> WBFPManager {
     WBFPManager::new(
         pack_path,
-        WBFilesPackData {
+        WBFilesPacManifest {
             attribute: Attribute {
-                data_version: DataVersion {
-                    value: DATA_VERSION,
-                    compatible: DATA_VERSION_COMPATIBLE,
-                },
                 cow,
-                s_data_file,
-                empty_data_pos: Vec::new(),
+                ..Attribute::default()
             },
-            pack_files_list: PackFilesList {
-                files_list: HashMap::new(),
-                data_length: 0,
-                file_count: 0,
-                dir_count: 0,
-            },
+            ..WBFilesPacManifest::default()
         },
+        DataPosList::default(),
         pack_file,
-        json_data_file,
-        json_data_file_b,
+        manifest_file,
+        s_manifest_file,
         write_lock_file,
     )
 }

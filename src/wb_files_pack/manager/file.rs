@@ -2,30 +2,31 @@
 开始时间：26/02/13 11：31
  */
 use super::WBFPManager;
+use crate::wb_files_pack::DataPosList;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
-pub struct PackFileWR {
-    //管理器实例id, 随机数，确保不意外操作
-    manager_id: u32,
+pub struct PackFileWR<'a> {
+    //管理器实例
+    manager: &'a mut WBFPManager,
     //文件位置
     file_pos: u64,
     //文件分配的位置
-    file_pos_s: Vec<(u64, u64)>,
+    file_pos_list: &'a mut DataPosList,
     //缓存_文件分配的位置当前索引
     temp_pos_index: usize,
     //缓存_文件分配的当前位置已占用大小
     temp_pos_this_len: u64,
 }
-impl PackFileWR {
-    pub(in crate::wb_files_pack) fn new(
-        manager_id: u32,
-        file_pos_s: Vec<(u64, u64)>,
-    ) -> PackFileWR {
+impl PackFileWR<'_> {
+    pub(in crate::wb_files_pack) fn new<'a>(
+        manager: &'a mut WBFPManager,
+        file_pos_list: &'a mut DataPosList,
+    ) -> PackFileWR<'a> {
         PackFileWR {
-            manager_id,
+            manager,
             file_pos: 0,
-            file_pos_s,
+            file_pos_list,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
         }
@@ -55,8 +56,8 @@ impl PackFileWR {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
-        while pos_index < self.file_pos_s.len() {
-            let (mut pos, mut len) = *self.file_pos_s.get(start_pos_index).unwrap();
+        while pos_index < self.file_pos_list.list.len() {
+            let (mut pos, mut len) = *self.file_pos_list.list.get(start_pos_index).unwrap();
             //当前校准
             if pos_index == start_pos_index {
                 //位置偏移
@@ -146,90 +147,9 @@ impl PackFileWR {
             Ok(())
         }
     }
-
-    //写入方法
-    pub fn write(&mut self, manager: &mut WBFPManager, data: &[u8]) -> io::Result<usize> {
-        self.write2(manager, data, data.len())
-    }
-
-    pub fn write2(
-        &mut self,
-        manager: &mut WBFPManager,
-        buf: &[u8],
-        buf_len: usize,
-    ) -> io::Result<usize> {
-        //管理器实例检查
-        if self.manager_id != manager.run_data.id {
-            Err(Error::other("管理器实例不一致"))
-        } else {
-            manager.write_lock()?;
-            //大小判断
-            if buf.len() < buf_len {
-                return Err(Error::other("提供的缓冲区长度比提供的大小小"));
-            }
-            //指定大小的切片
-            let m_buf = &buf[..buf_len];
-            //当前大小所需的位置列表
-            let pos_s = self.get_add_pos_s(buf_len as u64, false)?;
-            //当前已写入大小
-            let mut write_len = 0;
-            //写入
-            for (pos, len) in pos_s {
-                let len = len as usize;
-                let this_data = &m_buf[write_len..(write_len + len)];
-                //更改文件位置
-                manager.set_pack_file_pos(pos)?;
-                //写入数据
-                manager.pack_file_write_root(this_data)?;
-                write_len += len;
-                //TODO:未来功能：写入优化、写时复制
-            }
-            self.add_pos(write_len as u64)?;
-            Ok(write_len)
-        }
-    }
-
-    pub fn read(&mut self, manager: &WBFPManager, buf: &mut [u8]) -> io::Result<usize> {
-        self.read2(manager, buf, buf.len())
-    }
-
-    pub fn read2(
-        &mut self,
-        manager: &WBFPManager,
-        buf: &mut [u8],
-        buf_len: usize,
-    ) -> io::Result<usize> {
-        //管理器实例检查
-        if self.manager_id != manager.run_data.id {
-            Err(Error::other("管理器实例不一致"))
-        } else {
-            //大小检查
-            if buf.len() < buf_len {
-                return Err(Error::other("提供的缓冲区长度比提供的大小小"));
-            }
-            //指定大小的切片
-            let m_buf = &mut buf[..buf_len];
-            //当前大小所需的位置列表
-            let pos_s = self.get_add_pos_s(buf_len as u64, true)?;
-            //当前已读取大小
-            let mut read_len = 0;
-            //读取
-            for (pos, len) in pos_s {
-                let len = len as usize;
-                let this_buf = &mut m_buf[read_len..(read_len + len)];
-                //更改文件位置
-                manager.set_pack_file_pos(pos)?;
-                //读取数据
-                manager.pack_file_read_root(this_buf)?;
-                read_len += len;
-            }
-            self.add_pos(read_len as u64)?;
-            Ok(read_len)
-        }
-    }
 }
 
-impl Seek for PackFileWR {
+impl Seek for PackFileWR<'_> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match pos {
             SeekFrom::Start(pos) => {
@@ -261,22 +181,55 @@ impl Seek for PackFileWR {
     }
 }
 
-impl Read for PackFileWR {
-    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-        todo!()
+impl Read for PackFileWR<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        //当前大小所需的位置列表
+        let pos_s = self.get_add_pos_s(buf.len() as u64, true)?;
+        //当前已读取大小
+        let mut read_len = 0;
+        //读取
+        for (pos, len) in pos_s {
+            let len = len as usize;
+            let this_buf = &mut buf[read_len..(read_len + len)];
+            //更改文件位置
+            self.manager.set_pack_file_pos(pos)?;
+            //读取数据
+            self.manager.pack_file_read_root(this_buf)?;
+            read_len += len;
+        }
+        self.add_pos(read_len as u64)?;
+        Ok(read_len)
     }
 }
 
-impl Write for PackFileWR {
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        todo!()
+impl Write for PackFileWR<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.manager.write_lock()?;
+        //当前大小所需的位置列表
+        let pos_s = self.get_add_pos_s(buf.len() as u64, false)?;
+        //当前已写入大小
+        let mut write_len = 0;
+        //写入
+        for (pos, len) in pos_s {
+            let len = len as usize;
+            let this_data = &buf[write_len..(write_len + len)];
+            //更改文件位置
+            self.manager.set_pack_file_pos(pos)?;
+            //写入数据
+            self.manager.pack_file_write_root(this_data)?;
+            write_len += len;
+            //TODO:未来功能：写入优化、写时复制
+        }
+        self.add_pos(write_len as u64)?;
+        Ok(write_len)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         todo!()
     }
 
-    fn write_all(&mut self, _buf: &[u8]) -> io::Result<()> {
-        todo!()
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.write(buf)?;
+        Ok(())
     }
 }
