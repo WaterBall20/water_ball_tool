@@ -8,7 +8,6 @@ mod test;
 use std::collections::HashMap;
 use std::io;
 use std::io::Error;
-use std::slice::SliceIndex;
 
 //文件头===
 //文件头-文件名:WPFilesPack
@@ -277,8 +276,16 @@ impl DataPosList {
     }
 
     fn get_bytes_vec(&mut self) -> Vec<u8> {
+        self.get_bytes_vec2(None)
+    }
+
+    fn get_bytes_vec2(&mut self, this_gc_pos: Option<(u64, u64)>) -> Vec<u8> {
         let mut data = Vec::new();
-        for to_le_byte in (self.list.len() as u64).to_le_bytes() {
+        let list_count = match this_gc_pos {
+            Some(_) => self.list.len() + 1,
+            None => self.list.len()
+        };
+        for to_le_byte in (list_count as u64).to_le_bytes() {
             data.push(to_le_byte)
         }
         for (pos, len) in &self.list {

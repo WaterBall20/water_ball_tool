@@ -288,11 +288,20 @@ impl FileFinder {
                 files_list,
             })
         } else if path.is_file() {
-            Err(Error::new(ErrorKind::NotADirectory, "提供的路径是文件不是目录"))
+            Err(Error::new(
+                ErrorKind::NotADirectory,
+                "提供的路径是文件不是目录",
+            ))
         } else if path.is_symlink() {
-            Err(Error::new(ErrorKind::NotADirectory, "提供的路径是符号链接，但链接已断"))
+            Err(Error::new(
+                ErrorKind::NotADirectory,
+                "提供的路径是符号链接，但链接已断",
+            ))
         } else {
-            Err(Error::new(ErrorKind::NotFound, "未找到目录，提供的路径不存在或拒绝访问"))
+            Err(Error::new(
+                ErrorKind::NotFound,
+                "未找到目录，提供的路径不存在或拒绝访问",
+            ))
         }
     }
 

@@ -25,6 +25,8 @@ pub struct WBFPManager {
     manifest: WBFilesPacManifest,
     //空数据列表
     empty_data_pos_list: DataPosList,
+    //GC的数据列表
+    gc_data_pos_list: DataPosList,
     //包文件实例
     pack_file: File,
     //清单文件实例
@@ -122,6 +124,7 @@ impl WBFPManager {
         WBFPManager {
             manifest,
             empty_data_pos_list,
+            gc_data_pos_list: DataPosList::default(),
             pack_file,
             manifest_file,
             cow,
@@ -625,26 +628,64 @@ impl WBFPManager {
 
     //核心代码===
 
-    //垃圾回收 TODO:未使用方法
-    fn file_gc(&mut self, gc_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
-        let pos_s = &mut self.empty_data_pos_list.list;
-        'gc_for: for (gc_pos, gc_len) in &gc_pos_s {
+    //垃圾回收提交 TODO:未使用方法
+    fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
+        for pos in gc_pos_list {
+            //直接添加
+            self.gc_data_pos_list.list.push(pos)
+        }
+        Ok(())
+    }
+
+    //垃圾回收
+    fn file_gc(&mut self) -> io::Result<()> {
+        //准备：排序
+        let pos_gc_list = &self.gc_data_pos_list.list;
+        let pos_list = &mut self.empty_data_pos_list.list;
+        'gc_for: for (gc_pos, gc_len) in pos_gc_list {
             //排序插入
             let mut j = 0;
-            while j < pos_s.len() {
-                let (pos, _) = pos_s.get(j).unwrap();
+            while j < pos_list.len() {
+                let (pos, _) = pos_list.get(j).unwrap();
                 //插入判断
                 if gc_pos < pos {
                     //如果位置在前
-                    pos_s.insert(j, (*gc_pos, *gc_len));
+                    pos_list.insert(j, (*gc_pos, *gc_len));
                     continue 'gc_for;
                 }
                 j += 1;
             }
-            pos_s.push((*gc_pos, *gc_len));
+            pos_list.push((*gc_pos, *gc_len));
         }
-        //TODO:需要实现合并功能
+        //清空缓存
+        self.gc_data_pos_list.list.clear();
 
+        //合并功能
+        //当前索引
+        let mut index = 0;
+        //直接使用无限循环，内部判断
+        loop {
+            //下一个索引内容
+            let (next_pos, next_len) = match pos_list.get(index + 1) {
+                Some(v) => v.clone(), //必须复制
+                None => break,
+            };
+            //当前索引内容
+            let (this_pos, this_len) = match pos_list.get_mut(index) {
+                Some(v) => v,
+                None => break,
+            };
+            let this_end_pos = *this_pos + *this_len;
+            //检查，判断当前位置加当前长度是否等于下一个位置
+            if this_end_pos == next_pos {
+                //合并，将下一个占用的大小加到当前大小
+                *this_len += next_pos + next_len;
+                pos_list.remove(1);
+            } else {
+                //否则什么都不做，并附加索引
+                index += 1;
+            }
+        }
         Ok(())
     }
 
@@ -707,7 +748,7 @@ impl WBFPManager {
                 *len -= length;
                 r
             } else {
-                continue
+                continue;
             };
         }
         //扩容处理
@@ -739,6 +780,8 @@ impl WBFPManager {
     }
 
     fn save_empty_data_pos_lis(&mut self) -> io::Result<()> {
+        //保存前GC处理
+        self.file_gc()?;
         //获取当前数据
         //当前文件位置
         let this_pos = self.manifest.attribute.empty_data_pos_list_pos;
@@ -748,7 +791,20 @@ impl WBFPManager {
         //转换数据
         let data = self.empty_data_pos_list.get_bytes_vec();
         //获取新空间
-        let new_data = self.get_file_pos_l(data.len() as u64);
+        let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
+        assert_eq!(data.len() as u64, new_len);
+        //设置文件位置
+        self.set_pack_file_pos(new_pos)?;
+        //写入
+        self.pack_file_write_root(&data)?;
+        //GC提交
+        self.file_gc_add({
+            let mut r = Vec::new();
+            r.push((this_pos, this_len));
+            r
+        })?;
+        //更改指针
+
     }
 
     //写入数据文件
