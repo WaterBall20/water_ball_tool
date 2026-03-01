@@ -21,24 +21,22 @@ mod test;
 mod new_test;*/
 
 pub struct WBFPManager {
-    //清单实例
+    // 清单实例
     manifest: WBFilesPacManifest,
-    //空数据列表
+    // 空数据列表
     empty_data_pos_list: DataPosList,
-    //GC的数据列表
-    gc_data_pos_list: DataPosList,
-    //包文件实例
+    // 包文件实例
     pack_file: File,
-    //清单文件实例
+    // 清单文件实例
     manifest_file: Option<File>,
-    //启用写时复制
+    // 启用写时复制
     cow: bool,
-    //清单分离
+    // 清单分离
     s_manifest_file: bool,
-    //清单数据位置
-    manifest_file_pos: u64,
-    //当前包文件数据长度
+    // 当前包文件数据长度
     pack_file_data_length: u64,
+    // 根结构位置
+    root_struct_pos: u64,
     //运行时数据结构体
     pub(super) run_data: WBFPManagerRun,
 } //水球包文件管理器
@@ -61,6 +59,8 @@ pub(super) struct WBFPManagerRun {
     all_cr_file_count: u64,
     //上次创建总创建文件数量
     last_all_cr_file_count: u64,
+    //GC的数据列表
+    gc_data_pos_list: DataPosList,
 } //运行时数据结构体
 impl WBFPManagerRun {
     fn new<P: AsRef<Path>>(
@@ -78,6 +78,7 @@ impl WBFPManagerRun {
             last_all_write_len: 0,
             all_cr_file_count: 0,
             last_all_cr_file_count: 0,
+            gc_data_pos_list: DataPosList::default(),
         }
     }
 }
@@ -767,7 +768,7 @@ impl WBFPManager {
         //上锁
         self.write_lock()?;
         //修改包文件位置
-        self.set_pack_file_pos2(FILE_HEADER_DATA_LENGTH_POS, true)?;
+        self.set_pack_file_pos(FILE_HEADER_DATA_LENGTH_POS)?;
         //写入数据
         self.pack_file_write_root(self.pack_file_data_length.to_le_bytes().as_slice())?;
         Ok(())
@@ -778,18 +779,50 @@ impl WBFPManager {
         let root_struct = &self.manifest;
         todo!()
     }
+    //保存结构
+    fn save_pack_struct(&mut self) -> io::Result<()> {
+        let root_struct = &self.manifest.root_struct;
+        self.s_pack_struct(root_struct)
+    }
+    fn s_pack_struct(&mut self, pack_struct: &PackStruct, pack_struct_pos: u64) -> io::Result<()> {
+        let mut this_struct = pack_struct;
+        //旧数据大小
+        let gc_len = this_struct.data_len;
+        //获取新数据
+        let data = this_struct.get_bytes_vec();
+        //获取新位置
+        let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
+        //更改文件指针位置
+        self.set_pack_file_pos(new_pos)?;
+        //写入
+        self.pack_file_write_root(&data)?;
+        //GC
+    } //递归
 
-    fn save_empty_data_pos_lis(&mut self) -> io::Result<()> {
+    //保存属性
+    fn save_pack_attribute(&mut self) -> io::Result<()> {
+        //属性
+        let attribute = &mut self.manifest.attribute;
+        //转换数据
+        let data = attribute.get_bytes_vec();
+        //写入数据
+        //设置文件指针位置,从文件头后面写
+        self.set_pack_file_pos(FILE_HEADER_LENGTH)?;
+    }
+
+    //保存空数据位置列表
+    fn save_empty_data_pos_list(&mut self) -> io::Result<()> {
         //保存前GC处理
         self.file_gc()?;
-        //获取当前数据
         //当前文件位置
         let this_pos = self.manifest.attribute.empty_data_pos_list_pos;
         //数据大小
         let this_len = self.empty_data_pos_list.data_len;
         //目前的数据大小
         //转换数据
-        let data = self.empty_data_pos_list.get_bytes_vec();
+        let data = self
+            .empty_data_pos_list
+            .get_bytes_vec2(Some((this_pos, this_len)));
         //获取新空间
         let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
         assert_eq!(data.len() as u64, new_len);
@@ -798,13 +831,12 @@ impl WBFPManager {
         //写入
         self.pack_file_write_root(&data)?;
         //GC提交
-        self.file_gc_add({
-            let mut r = Vec::new();
-            r.push((this_pos, this_len));
-            r
-        })?;
+        self.file_gc_add(vec![(this_pos, this_pos)])?;
         //更改指针
-
+        self.manifest.attribute.empty_data_pos_list_pos = new_pos;
+        //GC处理
+        self.file_gc()?;
+        Ok(())
     }
 
     //写入数据文件
@@ -928,30 +960,14 @@ impl WBFPManager {
 
     //附加文件长度
     fn add_pack_len(&mut self, length: u64) -> io::Result<()> {
-        //上锁
-        self.write_lock()?;
-        //附加长度
-        self.pack_file_data_length += length;
-        //更改文件大小
-        self.set_pack_file_len(FILE_HEADER_LENGTH + self.pack_file_data_length)?;
-        Ok(())
+        self.set_pack_file_len(self.pack_file_data_length + length)
     }
 
-    //设置包文件文件地址，不包括文件头，即相对于文件头末尾
-    fn set_pack_file_pos(&self, pos: u64) -> io::Result<()> {
-        self.set_pack_file_pos2(pos, false)
-    }
-
-    //设置文件大小，是否从文件头算，true ,表示从文件头开始算
-    fn set_pack_file_pos2(&self, pos: u64, header_len: bool) -> io::Result<()> {
+    //设置包文件文件地址
+    fn set_pack_file_pos(&self, pos: u64, _: bool) -> io::Result<()> {
         if self.run_data.pack_file_pos != pos {
             let mut file = &self.pack_file;
-            file.seek(SeekFrom::Start(if header_len {
-                pos
-            } else {
-                FILE_HEADER_LENGTH + pos
-            }))?;
-            //self.run_data.pack_file_pos = pos;
+            file.seek(SeekFrom::Start(pos))?;
         }
         Ok(())
     }

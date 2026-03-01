@@ -202,7 +202,7 @@ impl Attribute {
         }
     }
 
-    fn get_bytes_vec(&mut self, empty_data_pos_s_pos: u64) -> Vec<u8> {
+    fn get_bytes_vec(&mut self) -> Vec<u8> {
         let mut data = Vec::new();
         //格式版本
         for to_le_byte in self.version.to_le_bytes() {
@@ -220,7 +220,7 @@ impl Attribute {
         }
         data.push(bool_data);
         //空数据列表的文件指针位置
-        for to_le_byte in empty_data_pos_s_pos.to_le_bytes() {
+        for to_le_byte in self.empty_data_pos_list_pos.to_le_bytes() {
             data.push(to_le_byte)
         }
         //所有文件数
@@ -289,6 +289,15 @@ impl DataPosList {
             data.push(to_le_byte)
         }
         for (pos, len) in &self.list {
+            for to_le_byte in pos.to_le_bytes() {
+                data.push(to_le_byte)
+            }
+            for to_le_byte in len.to_le_bytes() {
+                data.push(to_le_byte)
+            }
+        }
+        //附加自身GC
+        if let Some((pos, len)) = this_gc_pos {
             for to_le_byte in pos.to_le_bytes() {
                 data.push(to_le_byte)
             }
