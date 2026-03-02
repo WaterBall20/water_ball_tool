@@ -1,7 +1,7 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::create_new_file;
+use crate::wb_files_pack::manager::{create_new_file, open_file};
 use std::fs;
 use std::path::Path;
 
@@ -12,9 +12,7 @@ fn _remove_test_pack_files<P: AsRef<Path>>(path: &P) {
     let pack_path = path.as_ref().to_str().unwrap().to_string();
     _ = fs::remove_file(&pack_path);
     let mut pack_json_path = pack_path.clone();
-    pack_json_path.push_str(".json");
-    _ = fs::remove_file(&pack_json_path);
-    pack_json_path.push_str(".b");
+    pack_json_path.push_str(".wbm");
     _ = fs::remove_file(pack_json_path);
     let mut pack_lock_path = pack_path.clone();
     pack_lock_path.push_str(".lock");
@@ -126,7 +124,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
     } //使用作用域实现自动释放
     _remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
-}
+}*/
 
 //创建包文件并打开刚创建的包文件
 #[test]
@@ -151,6 +149,7 @@ fn create_new_file_and_open_pack() {
     _ = fs::remove_dir_all(pack_dir)
 }
 
+/*
 #[test]
 fn create_new_file_and_open_pack_json_ver() {
     //测试目录

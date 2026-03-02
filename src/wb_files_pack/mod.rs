@@ -20,11 +20,11 @@ pub static FILE_HEADER_TYPE_NAME: [u8; 11] = [
 static FILE_HEADER_VERSION: [u8; 2] = [0, 2];
 
 //文件头标签位长度
-static FILE_HEADER_TAG_LENGTH: usize = 1;
+static FILE_HEADER_BOOL_DATA_LENGTH: usize = 1;
 
 //文件头清单数据属性起始位置的位置
 static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS: u64 =
-    (FILE_HEADER_TYPE_NAME.len() + FILE_HEADER_VERSION.len() + FILE_HEADER_TAG_LENGTH) as u64;
+    (FILE_HEADER_TYPE_NAME.len() + FILE_HEADER_VERSION.len() + FILE_HEADER_BOOL_DATA_LENGTH) as u64;
 //文件头清单数据属性起始位置数据段长度
 static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS_LENGTH: u64 = 8;
 //文件头清单数据根结构起始位置的位置
@@ -78,8 +78,6 @@ pub struct WBFilesPackManifest {
     empty_data_list: DataPosList,
     //清单空数据列表
     this_empty_data_list: Option<DataPosList>,
-    //清单空数据列表位置
-    this_empty_data_list_pos: u64,
     //清单文件实例
     file: Option<File>,
     //清单文件大小
@@ -120,9 +118,13 @@ static MANIFEST_ATTRIBUTE_BOOL_DATA_LEN: usize = 1;
 static MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX: usize =
     MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN;
 static MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN: usize = 8;
+//根结构的文件指针位置
+static MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX: usize =
+    MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN;
+static MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN: usize = 8;
 //所有文件数
 static MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX: usize =
-    MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN;
+    MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN;
 static MANIFEST_ATTRIBUTE_FILE_COUNT_LEN: usize = 8;
 //所有目录数
 static MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX: usize =
@@ -133,9 +135,10 @@ static MANIFEST_ATTRIBUTE_LEN: usize = MANIFEST_ATTRIBUTE_VERSION_LEN
     + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN
     + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN
     + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN
+    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN
     + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN
     + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN;
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Attribute {
     //格式版本
     version: u16,
@@ -145,11 +148,26 @@ pub struct Attribute {
     cow: bool,
     //空数据列表的文件指针位置
     empty_data_pos_list_pos: u64,
+    // 根结构位置
+    root_struct_pos: u64,
     //文件数，不含目录
     file_count: u64,
     //目录数
     dir_count: u64,
 } //包文件属性
+impl Default for Attribute {
+    fn default() -> Self {
+        Self {
+            version: MANIFEST_VERSION,
+            version_compatible: MANIFEST_VERSION_COMPATIBLE,
+            cow: DEFAULT_COW,
+            empty_data_pos_list_pos: 0,
+            root_struct_pos: 0,
+            file_count: 0,
+            dir_count: 0,
+        }
+    }
+}
 impl Attribute {
     pub fn version(&self) -> u16 {
         self.version
@@ -200,6 +218,14 @@ impl Attribute {
                     .try_into()
                     .unwrap(),
             );
+            //根结构文件指针位置
+            let root_struct_pos = u64::from_le_bytes(
+                data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
+                    ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
+                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
             //所有文件数
             let file_count = u64::from_le_bytes(
                 data[MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX
@@ -219,6 +245,7 @@ impl Attribute {
                 version_compatible,
                 cow,
                 empty_data_pos_list_pos,
+                root_struct_pos,
                 file_count,
                 dir_count,
             })
@@ -244,6 +271,10 @@ impl Attribute {
         data.push(bool_data);
         //空数据列表的文件指针位置
         for to_le_byte in self.empty_data_pos_list_pos.to_le_bytes() {
+            data.push(to_le_byte)
+        }
+        //根结构的文件指针位置
+        for to_le_byte in self.root_struct_pos.to_le_bytes() {
             data.push(to_le_byte)
         }
         //所有文件数
@@ -338,14 +369,40 @@ static PACK_STRUCT_DATA_LEN_LEN: usize = 8;
 
 #[derive(Default, Debug, PartialEq)]
 pub struct PackStruct {
+    //结构项列表
+    items: HashMap<String, PackStructItem>,
+    //运行时数据
+    run_data: PackStructRun,
+} //包结构
+#[derive(Default, Debug, PartialEq, Clone)]
+struct PackStructRun {
     //此结构的文件指针位置
     this_file_pos: u64,
     //数据长度
     data_len: u64,
-    //结构项列表
-    items: HashMap<String, PackStructItem>,
-} //包结构
+}
+impl PackStructRun {
+    fn set_this_file_pos(&mut self, pos: u64)
+    {
+        self.this_file_pos = pos
+    }
+
+    fn set_data_len(&mut self, len: u64) {
+        self.data_len = len;
+    }
+}
 impl PackStruct {
+    fn l_clone(&self) -> Self {
+        let mut l_clone_items = HashMap::new();
+        for (item_name, item) in &self.items {
+            l_clone_items.insert(item_name.clone(), item.l_clone());
+        }
+        Self {
+            items: l_clone_items,
+            run_data: self.run_data.clone(),
+        }
+    }
+
     pub fn items(&self) -> &HashMap<String, PackStructItem> {
         &self.items
     }
@@ -374,15 +431,14 @@ impl PackStruct {
                     read_len += item_data_len;
                 }
                 Ok(Self {
-                    this_file_pos,
-                    data_len: data_len as u64,
                     items,
+                    run_data: PackStructRun::default(),
                 })
             }
         }
     }
 
-    fn get_bytes_vec(&mut self) -> Vec<u8> {
+    fn get_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         let mut items_data = Vec::new();
         //获取项数据
@@ -403,8 +459,6 @@ impl PackStruct {
         for items_datum in items_data {
             data.push(items_datum)
         }
-        //更新大小
-        self.data_len = data_len;
         data
     }
 }
@@ -445,6 +499,15 @@ impl PackStructItem {
 
     pub fn metadata(&self) -> &Option<PackFileMetadata> {
         &self.pack_file_metadata
+    }
+
+    fn l_clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            metadata_file_pos: self.metadata_file_pos,
+            item_type: self.item_type.l_clone(),
+            pack_file_metadata: None,
+        }
     }
 
     fn load(data: &[u8]) -> io::Result<Self> {
@@ -530,6 +593,17 @@ pub enum PackStructItemType {
     File,
     Dir(PackStructItemDir),
 } //结构项类型
+impl PackStructItemType {
+    fn l_clone(&self) -> Self {
+        match self {
+            PackStructItemType::File =>
+                PackStructItemType::File,
+            PackStructItemType::Dir(dir) => {
+                PackStructItemType::Dir(dir.l_clone())
+            }
+        }
+    }
+}
 
 static PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN: usize = 8;
 
@@ -541,6 +615,13 @@ pub struct PackStructItemDir {
     pack_struct: Option<PackStruct>,
 } //结构项目录类型特有数据
 impl PackStructItemDir {
+    fn l_clone(&self) -> Self {
+        Self {
+            struct_file_pos: self.struct_file_pos,
+            pack_struct: None,
+        }
+    }
+
     pub fn pack_struct(&self) -> &Option<PackStruct> {
         &self.pack_struct
     }

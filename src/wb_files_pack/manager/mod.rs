@@ -32,8 +32,6 @@ pub struct WBFPManager {
     s_manifest_file: bool,
     // 当前包文件大小
     pack_file_length: u64,
-    // 根结构位置
-    root_struct_pos: u64,
     //运行时数据结构体
     pub(super) run_data: WBFPManagerRun,
 } //水球包文件管理器
@@ -118,7 +116,6 @@ impl WBFPManager {
             pack_file,
             cow,
             s_manifest_file,
-            root_struct_pos,
             pack_file_length,
             run_data: WBFPManagerRun::new(pack_path, write_lock_path, write_lock_file),
         }
@@ -149,12 +146,21 @@ impl WBFPManager {
         //===
 
         //设置文件大小
-        self.set_pack_file_len(FILE_HEADER_LENGTH)
+        self.set_pack_file_len(FILE_HEADER_LENGTH + MANIFEST_ATTRIBUTE_LEN as u64)
             .expect("无法设置文件大小");
+
+        //保存空数据列表
+        self.save_empty_data_pos_list().expect("保存空数据列表");
+        //保存根结构
+        self.save_pack_struct_and_metadata()
+            .expect("保存根结构失败");
 
         //保存清单属性
         self.save_manifest_attribute().expect("写入清单属性失败");
         //self.save_json_data().expect("无法保存索引数据");
+
+        //保存有效大小
+        self.save_pack_length().expect("无法保存有效大小属性");
 
         self.write_unlock().expect("解除文件锁失败");
     }
@@ -254,13 +260,9 @@ impl WBFPManager {
         //合并功能
         //当前索引
         let mut index = 0;
-        //直接使用无限循环，内部判断
-        loop {
-            //下一个索引内容
-            let (next_pos, next_len) = match pos_list.get(index + 1) {
-                Some(v) => v.clone(), //必须复制
-                None => break,
-            };
+        //如果有下一个则循环
+        while let Some(v) = pos_list.get(index + 1) {
+            let (next_pos, next_len) = *v;
             //当前索引内容
             let (this_pos, this_len) = match pos_list.get_mut(index) {
                 Some(v) => v,
@@ -382,17 +384,17 @@ impl WBFPManager {
 
     //保存所有数据
     fn save_and_up_all(&mut self) -> io::Result<()> {
-        self.up_data_length()?;
+        self.save_pack_length()?;
         self.save_manifest()?;
         Ok(())
     }
 
     //保存数据长度
-    fn up_data_length(&mut self) -> io::Result<()> {
+    fn save_pack_length(&mut self) -> io::Result<()> {
         //上锁
         self.write_lock()?;
         //修改包文件位置
-        self.set_pack_file_pos(FILE_HEADER_DATA_LENGTH_POS)?;
+        self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH_POS)?;
         //写入数据
         self.pack_file_write_root(self.pack_file_length.to_le_bytes().as_slice())?;
         Ok(())
@@ -404,12 +406,57 @@ impl WBFPManager {
         todo!()
     }
     //保存结构
-    /*fn save_pack_struct_and_metadata(&mut self) -> io::Result<()> {
-        let root_struct_pos = self.root_struct_pos;
-        let mut root_struct = &self.manifest.root_struct;
-        self.s_pack_struct(&mut root_struct, root_struct_pos)
-    }*/
-    fn s_pack_struct(&mut self, pack_struct: &mut PackStruct, pack_struct_pos: u64) -> io::Result<
+    fn save_pack_struct_and_metadata(&mut self) -> io::Result<()> {
+        //TODO:未完成递归
+
+        //保存根结构
+        //当前位置
+        let pos = self.manifest.attribute.root_struct_pos;
+        //当前数据大小
+        let len = self.manifest.root_struct.run_data.data_len;
+
+        //保存数据
+        let (new_pos, new_len) =
+            self.save_pack_struct_write(self.manifest.root_struct.l_clone(), pos)?;
+        //更新数据指针和大小
+        self.manifest.attribute.root_struct_pos = new_pos;
+        self.manifest.root_struct.run_data.data_len = new_len;
+        self.manifest.root_struct.run_data.this_file_pos = new_pos;
+        Ok(())
+    }
+    fn save_pack_struct_write(
+        &mut self,
+        pack_struct: PackStruct,
+        this_pos: u64,
+    ) -> io::Result<(u64, u64)> {
+        //当前大小
+        let this_len = pack_struct.run_data.data_len;
+        //转换数据
+        let data = pack_struct.get_bytes_vec();
+        //判断是否分离
+        if self.s_manifest_file {
+            //获取新位置
+            let (pos, len) = self.get_manifest_file_pos_l(data.len() as u64)?;
+            //更改位置
+            self.set_manifest_file_pos(pos)?;
+            //写入
+            self.manifest_file_write_root(&data)?;
+            //提交垃圾回收
+            self.manifest_file_gc_add(vec![(this_pos, this_len)])?;
+            Ok((pos, len))
+        } else {
+            //获取新位置
+            let (pos, len) = self.get_file_pos_l(data.len() as u64);
+            //更改位置
+            self.set_pack_file_pos_write(pos)?;
+            //写入
+            self.pack_file_write_root(&data)?;
+            //提交垃圾回收
+            self.file_gc_add(vec![(this_pos, this_len)])?;
+            Ok((pos, len))
+        }
+    }
+    /*fn s_pack_struct(&mut self, pack_struct: &mut PackStruct, pack_struct_pos: u64) -> io::Result<
         ()> {
         //
         //旧数据大小
@@ -419,12 +466,12 @@ impl WBFPManager {
         //获取新位置
         let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
         //更改文件指针位置
-        self.set_pack_file_pos(new_pos)?;
+        self.set_pack_file_pos_write(new_pos)?;
         //写入
         self.pack_file_write_root(&data)?;
         //GC
         todo!()
-    } //递归
+    } //递归*/
 
     //保存属性
     fn save_manifest_attribute(&mut self) -> io::Result<()> {
@@ -434,7 +481,7 @@ impl WBFPManager {
         let data = attribute.get_bytes_vec();
         //写入数据
         //设置文件指针位置,从文件头后面写
-        self.set_pack_file_pos(FILE_HEADER_LENGTH)?;
+        self.set_pack_file_pos_write(FILE_HEADER_LENGTH)?;
         //写入数据
         self.pack_file_write_root(&data)?;
         Ok(())
@@ -472,7 +519,7 @@ impl WBFPManager {
             let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
             assert_eq!(data.len() as u64, new_len);
             //设置文件位置
-            self.set_pack_file_pos(new_pos)?;
+            self.set_pack_file_pos_write(new_pos)?;
             //写入
             self.pack_file_write_root(&data)?;
             //GC提交
@@ -536,13 +583,29 @@ impl WBFPManager {
         }
     }
 
-    //附加文件长度
-    fn add_pack_len(&mut self, length: u64) -> io::Result<()> {
+    //附加设置文件长度
+    fn add_set_pack_len(&mut self, length: u64) -> io::Result<()> {
         self.set_pack_file_len(self.pack_file_length + length)
     }
 
+    //更新文件大小
+    fn up_pack_length(&mut self) {
+        //判断是否需要设置
+        if self.run_data.pack_file_pos > self.pack_file_length {
+            self.pack_file_length = self.run_data.pack_file_pos
+        }
+    }
+
+    //更新清单文件大小
+    fn up_manifest_length(&mut self) {
+        //判断是否需要设置
+        if self.manifest.run_data.file_pos > self.manifest.file_len {
+            self.manifest.file_len = self.manifest.run_data.file_pos
+        }
+    }
+
     //设置包文件文件地址
-    fn set_pack_file_pos(&self, pos: u64) -> io::Result<()> {
+    fn set_pack_file_pos_read(&self, pos: u64) -> io::Result<()> {
         if self.run_data.pack_file_pos != pos {
             let mut file = &self.pack_file;
             file.seek(SeekFrom::Start(pos))?;
@@ -550,21 +613,28 @@ impl WBFPManager {
         Ok(())
     }
 
+    fn set_pack_file_pos_write(&mut self, pos: u64) -> io::Result<()> {
+        self.set_pack_file_pos_read(pos)?;
+        self.run_data.pack_file_pos = pos;
+        Ok(())
+    }
+
     //包文件写入
     fn pack_file_write_root(&mut self, data: &[u8]) -> io::Result<()> {
         self.write_lock()?;
-        //自我注意：这里必须是引用，除非想一次性写入。
         let file = &mut self.pack_file;
         file.write_all(data)?;
         let len = data.len() as u64;
         self.run_data.pack_file_pos += len;
+        self.up_pack_length();
         Ok(())
     }
 
     //设置包文件大小
     fn set_pack_file_len(&mut self, len: u64) -> io::Result<()> {
-        (&mut self.pack_file).set_len(len)?;
+        self.pack_file.set_len(len)?;
         self.pack_file_length = len;
+        self.up_pack_length();
         Ok(())
     }
 
@@ -586,7 +656,8 @@ impl WBFPManager {
         if let Some(file) = &mut self.manifest.file {
             file.write_all(data)?;
             let len = data.len() as u64;
-            self.run_data.pack_file_pos += len;
+            self.manifest.run_data.file_pos += len;
+            self.up_manifest_length();
             Ok(())
         } else {
             Err(Error::other("清单文件实例不存在"))
@@ -737,28 +808,25 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
     Ok(write_lock)
 }
 //打开
-/*pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
-    fn load_json_data(data: &[u8]) -> io::Result<WBFilesPacManifest> {
-        let pack: WBFilesPacManifest = serde_json::from_slice(data)?;
+pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
+    fn load_manifest_attribute(data: &[u8]) -> io::Result<Attribute> {
+        let attribute = Attribute::load(data)?;
         //兼容性判断
         //文件版本
-        let ver = pack.attribute.data_version.value;
-        //文件兼容版本
-        let com_ver = pack.attribute.data_version.compatible;
-        if ver != DATA_VERSION {
+        if attribute.version != MANIFEST_VERSION {
             warn!("Json数据版本不一致");
             //兼容性判断
-            if ver < DATA_VERSION_COMPATIBLE {
+            if attribute.version < MANIFEST_VERSION_COMPATIBLE {
                 //版本低于解析器最低兼容版本
                 error!("检查发现Json版本过低，低于实例最低兼容版本，拒绝创建包文件实例");
                 return Err(Error::other("Json版本过低"));
-            } else if com_ver > DATA_VERSION {
+            } else if attribute.version_compatible > MANIFEST_VERSION {
                 //版本过高
                 error!("检查发现Json版本过高，实例版本低于文件指定的兼容版本，拒绝创建包文件实例");
                 return Err(Error::other("Json版本过高"));
             }
         }
-        Ok(pack)
+        Ok(attribute)
     }
 
     //打开水球包文件
@@ -782,12 +850,12 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
             "文件格式版本不一致，对于文件格式，版本必须一致",
         ));
     }
-    //读取标志位
-    let he_tag = header[HEADER_TYPE_LEN + 2..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize][0];
+    //读取布尔数据位
+    let bool_data = header[FILE_HEADER_BOOL_DATA_LENGTH];
     //写时复制 TODO:未使用变量
-    let _cow = he_tag >> 7 == 1;
-    let s_data_file = he_tag >> 6 == 1;
-    let pack_data_len = u64::from_le_bytes(
+    let _cow = bool_data >> 7 == 1;
+    let s_data_file = bool_data >> 6 == 1;
+    let pack_len = u64::from_le_bytes(
         header[FILE_HEADER_DATA_LENGTH_POS as usize
             ..(FILE_HEADER_DATA_LENGTH_POS + FILE_HEADER_DATA_LENGTH_LENGTH) as usize]
             .try_into()
@@ -795,96 +863,46 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
     );
     //如果分离数据文件
     if s_data_file {
-        let mut json_path_str = pack_path.as_ref().to_str().unwrap().to_string();
-        json_path_str.push_str(".json");
-        let json_path = PathBuf::from(&json_path_str);
-        //获取当前已存在的数据
-        let json_data = fs::read(&json_path)?;
-        let pack_data = load_json_data(&json_data).map_or_else(
-            |_| {
-                //如果错误就尝试读取B文件
-                json_path_str.push_str(".b");
-                let json_b_path = PathBuf::from(json_path_str);
-                //判断文件是否存在
-                if json_b_path.is_file() {
-                    //获取数据
-                    let json_data = fs::read(&json_b_path)?;
-                    Ok(load_json_data(&json_data)?)
-                } else if json_b_path.is_dir() {
-                    Err(Error::other(
-                        "无法读取[包文件]数据文件A，自动尝试通过同步文件B恢复，但目前是目录",
-                    ))
-                } else if json_b_path.is_symlink() {
-                    Err(Error::other(
-                        "无法获取[包文件]数据文件A，自动尝试通过同步文件B恢复，目前是符号链接，但链接已断",
-                    ))
-                } else {
-                    Err(Error::new(
-                        ErrorKind::NotFound,
-                        "无法获取[包文件]数据文件A，自动尝试通过同步文件B恢复，但文件不存在或拒绝访问",
-                    ))
-                }
-            },
-            Ok,
-        )?;
-        let json_file = File::options().read(true).write(true).open(json_path)?;
-        //创建实例
-        Ok(WBFPManager::new2(
-            pack_path,
-            pack_data,
-            pack_file,
-            Some(json_file),
-            None,
-            None,
-            0,
-            0,
-            pack_data_len,
-        ))
-    } else {
-        //获取起始位置和结束位置
-        let json_data_start_pos = u64::from_le_bytes(
-            *<&[u8; 8]>::try_from(
-                &header[FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize
-                    ..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 8],
-            )
-                .unwrap(),
-        );
-        let json_data_end_pos = u64::from_le_bytes(
-            *<&[u8; 8]>::try_from(
-                &header[FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 8
-                    ..FILE_HEADER_MANIFEST_DATA_START_POS_POS as usize + 16],
-            )
-                .unwrap(),
-        );
-        let json_data_len = json_data_end_pos - json_data_start_pos;
-
-        //读取数据
-        //设置文件位置
-        pack_file.seek(SeekFrom::Start(json_data_start_pos + FILE_HEADER_LENGTH))?;
-        //缓存
-        let mut json_data: Vec<u8> = Vec::with_capacity(json_data_len as usize);
-        //限制大小读取
-        (&mut pack_file)
-            .take(json_data_len)
-            .read_to_end(&mut json_data)?;
-
-        if json_data_len as usize != json_data.len() {
-            return Err(Error::other("读取到的Json数据不完整"));
+        //获取属性
+        let mut attribute_data = [0u8; MANIFEST_ATTRIBUTE_LEN];
+        if pack_file.read(&mut attribute_data)? < MANIFEST_ATTRIBUTE_LEN {
+            return Err(Error::other("无法完整的读取清单属性，文件可能破损"));
         }
-        let pack_data = load_json_data(&json_data)?;
-        Ok(WBFPManager::new2(
-            pack_path,
-            pack_data,
-            pack_file,
-            None,
-            None,
-            None,
-            json_data_start_pos,
-            json_data_end_pos,
-            pack_data_len,
-        ))
+        let attribute = load_manifest_attribute(&attribute_data)?;
+        //空数据列表===
+        let mut data = Vec::new();
+        //文件指针位置
+        let empty_pos = attribute.empty_data_pos_list_pos;
+        //获取数量数据以确定大小
+        let mut pos_count_data = [0u8; DATA_POS_LIST_COUNT_LEN];
+        //设置文件位置
+        pack_file.seek(SeekFrom::Start(empty_pos))?;
+        //读取
+        if pack_file.read(&mut pos_count_data)? < DATA_POS_LIST_COUNT_LEN {
+            error!("无法读取空数据列表数据，将会导致游离数据")
+        } else {
+            let pos_count = u64::from_le_bytes(pos_count_data.try_into().unwrap());
+            //复制数量数据到用于解析的动态数组
+            for pos_count_datum in pos_count_data {
+                data.push(pos_count_datum)
+            }
+            //列表项数据大小
+            let empty_pos_items_len = pos_count as usize * DATA_POS_LIST_ITEM_LEN;
+            //列表项数据动态数组
+            let mut empty_pos_items_data = Vec::with_capacity(empty_pos_items_len);
+            //读取
+            pack_file.take(empty_pos_items_len as u64).read_to_end(&mut empty_pos_items_data)?;
+            //合并数据
+            for empty_pos_items_datum in empty_pos_items_data {
+                data.push(empty_pos_items_datum)
+            }
+            //读取数据2
+        }
+        todo!()
+    } else {
+        todo!()
     }
-}*/
+}
 
 //创建===
 
@@ -986,7 +1004,6 @@ fn create2<P: AsRef<Path>>(
             } else {
                 None
             },
-            this_empty_data_list_pos: 0,
             file: manifest_file,
             file_len: 0,
             run_data: WBFilesPackManifestRun {
