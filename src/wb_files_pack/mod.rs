@@ -2,10 +2,12 @@
 开始时间：26/2/11 15：51
  */
 pub mod manager;
-#[cfg(test)]
-mod test;
+
+/*#[cfg(test)]
+mod test;*/
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
 use std::io::Error;
 
@@ -66,15 +68,27 @@ static DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
 //总大小
 static DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
 
-#[derive(Default, Debug)]
-pub struct WBFilesPacManifest {
+#[derive(Debug)]
+pub struct WBFilesPackManifest {
     //属性
     attribute: Attribute,
     //根结构
     root_struct: PackStruct,
+    //空数据列表
+    empty_data_list: DataPosList,
+    //清单空数据列表
+    this_empty_data_list: Option<DataPosList>,
+    //清单空数据列表位置
+    this_empty_data_list_pos: u64,
+    //清单文件实例
+    file: Option<File>,
+    //清单文件大小
+    file_len: u64,
+    //运行时数据
+    run_data: WBFilesPackManifestRun,
 } //包文件数据
 
-impl WBFilesPacManifest {
+impl WBFilesPackManifest {
     pub fn attribute(&self) -> &Attribute {
         &self.attribute
     }
@@ -82,6 +96,15 @@ impl WBFilesPacManifest {
     pub fn root_struct(&self) -> &PackStruct {
         &self.root_struct
     }
+}
+
+//清单数据运行数据
+#[derive(Debug)]
+struct WBFilesPackManifestRun {
+    //清单文件位置
+    file_pos: u64,
+    //GC数据列表
+    gc_data_pos_list: DataPosList,
 }
 
 //格式版本
@@ -283,7 +306,7 @@ impl DataPosList {
         let mut data = Vec::new();
         let list_count = match this_gc_pos {
             Some(_) => self.list.len() + 1,
-            None => self.list.len()
+            None => self.list.len(),
         };
         for to_le_byte in (list_count as u64).to_le_bytes() {
             data.push(to_le_byte)
@@ -400,7 +423,7 @@ static PACK_STRUCT_ITEM_NAME_INDEX: usize =
 //虚拟文件元数据的文件指针位置
 static PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN: usize = 8;
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct PackStructItem {
     //名称
     name: String,
@@ -408,6 +431,8 @@ pub struct PackStructItem {
     metadata_file_pos: u64,
     //结构项类型
     item_type: PackStructItemType,
+    //元数据
+    pack_file_metadata: Option<PackFileMetadata>,
 } //包结构项
 impl PackStructItem {
     pub fn name(&self) -> &String {
@@ -416,6 +441,10 @@ impl PackStructItem {
 
     pub fn item_type(&self) -> &PackStructItemType {
         &self.item_type
+    }
+
+    pub fn metadata(&self) -> &Option<PackFileMetadata> {
+        &self.pack_file_metadata
     }
 
     fn load(data: &[u8]) -> io::Result<Self> {
@@ -448,6 +477,7 @@ impl PackStructItem {
             name,
             metadata_file_pos,
             item_type,
+            pack_file_metadata: None,
         })
     }
 

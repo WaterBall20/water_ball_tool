@@ -6,21 +6,21 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 // 开始时间:2026-02-08 22:37
 
-mod command;
+//mod command;
 
 fn main() {
     let mp = MultiProgress::new();
     init_global_logging(&mp);
     //命令行参数处理
     let args: Vec<String> = env::args().collect();
-    if let Some(mod_type) = args.get(1) {
+    /*if let Some(mod_type) = args.get(1) {
         let args = &args[2..];
         match &mod_type[..] {
             "ff" => command::ff(args, Some(&mp)),
             "wbfp" => command::wbfp(args, Some(&mp)),
             _ => {}
         }
-    }
+    }*/
 }
 
 // 创建一个包装类，让 MultiProgress 兼容 io::Write
