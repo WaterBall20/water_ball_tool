@@ -3,8 +3,8 @@
  */
 pub mod manager;
 
-/*#[cfg(test)]
-mod test;*/
+/* #[cfg(test)]
+mod test; */
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -67,6 +67,8 @@ static DATA_POS_LIST_ITEM_POS_LEN: usize = 8;
 static DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
 //总大小
 static DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
+//数据块大小
+static DATA_BLOCK_LEN: usize = 4096;
 
 #[derive(Debug)]
 pub struct WBFilesPackManifest {
@@ -193,7 +195,7 @@ impl Attribute {
             let version_compatible = u16::from_le_bytes(
                 data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                     ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                    + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
+                        + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
                     .try_into()
                     .unwrap(),
             );
@@ -214,7 +216,7 @@ impl Attribute {
             let empty_data_pos_list_pos = u64::from_le_bytes(
                 data[MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
                     ..MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN]
+                        + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN]
                     .try_into()
                     .unwrap(),
             );
@@ -222,7 +224,7 @@ impl Attribute {
             let root_struct_pos = u64::from_le_bytes(
                 data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                     ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
+                        + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
                     .try_into()
                     .unwrap(),
             );
@@ -382,8 +384,7 @@ struct PackStructRun {
     data_len: u64,
 }
 impl PackStructRun {
-    fn set_this_file_pos(&mut self, pos: u64)
-    {
+    fn set_this_file_pos(&mut self, pos: u64) {
         self.this_file_pos = pos
     }
 
@@ -596,11 +597,8 @@ pub enum PackStructItemType {
 impl PackStructItemType {
     fn l_clone(&self) -> Self {
         match self {
-            PackStructItemType::File =>
-                PackStructItemType::File,
-            PackStructItemType::Dir(dir) => {
-                PackStructItemType::Dir(dir.l_clone())
-            }
+            PackStructItemType::File => PackStructItemType::File,
+            PackStructItemType::Dir(dir) => PackStructItemType::Dir(dir.l_clone()),
         }
     }
 }
@@ -896,5 +894,98 @@ impl PackFileMetadataDir {
             data.push(to_le_byte)
         }
         data
+    }
+}
+
+//清单数据块实际占用大小
+static MANIFEST_DATA_BLOCK_DATA_LEN_LEN: usize = 4;
+//清单数据块版本号占用
+static MANIFEST_DATA_BLOCK_DATA_VER_INDEX: usize = 4;
+static MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
+
+//清单数据块
+/*
+清单数据块是4k对其的，
+清单数据块采用A/B机制尽量实现原子化更新和备份，
+由于A/B机制，所以内部分成两块，每块的前面版本和末尾的版本应是对应的，如果不对应则说明数据很可能损坏。
+数据块格式：4字节32位占用大小+4字节32位版本
+*/
+struct ManifestDataBlock {
+    //块占用倍数
+    black_x: u64,
+    //块实际占用
+    len: u64,
+    //A/B标志
+    data_is_a: bool,
+}
+impl ManifestDataBlock {
+    fn get_load_len(data: &[u8]) -> io::Result<u32> {
+        if data.len() < MANIFEST_DATA_BLOCK_DATA_LEN_LEN {
+            Err(Error::other("提供的数据不完整"))
+        } else {
+            let data_len =
+                u32::from_le_bytes(data[..MANIFEST_DATA_BLOCK_DATA_LEN_LEN].try_into().unwrap());
+            //2倍4k对齐大小计算
+            Ok((data_len / DATA_BLOCK_LEN as u32) * DATA_BLOCK_LEN as u32 * 2)
+        }
+    }
+
+    fn load(data: &[u8], a_data_len: u32) -> io::Result<Vec<u8>> {
+        fn get_ver(data: &[u8]) -> (u32, u32) {
+            let ver = u32::from_le_bytes(
+                data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
+                    ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
+            let end_ver = u32::from_le_bytes(
+                data[data.len() - MANIFEST_DATA_BLOCK_DATA_VER_LEN..]
+                    .try_into()
+                    .unwrap(),
+            );
+            (ver, end_ver)
+        }
+
+        //数据大小
+        let data_len = data.len();
+        //个体大小
+        let l_data_len = data_len / 2;
+        //整除判断
+        if !data_len.is_multiple_of(DATA_BLOCK_LEN) {
+            Err(Error::other("数据未对其，无法解析"))
+        } else {
+            let data = Vec::new();
+            //AB数据分开
+            let a_data = &data[..l_data_len];
+            let b_data = &data[l_data_len..];
+            //获取版本并判断最终读取的是A还是B
+            //完整性判断
+            let (a_ver, a_end_ver) = get_ver(a_data);
+            let a_err = a_end_ver < a_ver;
+            let (b_ver, b_end_ver) = get_ver(b_data);
+            let b_err = b_end_ver < b_ver;
+
+            //版本判断
+            let mut read_a = true;
+            if a_err {
+                //完全破碎判断
+                if b_err {
+                    return Err(Error::other("解析错误，数据损坏"));
+                }
+                //如果损坏则读取B
+                read_a = false;
+            } else if a_ver < b_ver {
+                //如果A没有损坏了就判断版本
+                read_a = false;
+            }
+            if read_a {
+                //实际读取
+                //TODO:需要完成清单数据块的A的读取
+                Ok(data)
+            } else {
+                //TODO:需要完成清单数据块的B的读取
+                Ok(data)
+            }
+        }
     }
 }

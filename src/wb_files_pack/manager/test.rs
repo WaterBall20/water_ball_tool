@@ -1,7 +1,7 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::{create_new_file, open_file};
+use crate::wb_files_pack::manager::{ create_new_file, open_file };
 use std::fs;
 use std::path::Path;
 
@@ -146,7 +146,7 @@ fn create_new_file_and_open_pack() {
         open_file(&pack_file).expect("无法打开包文件");
     }
     _remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir)
+    _ = fs::remove_dir_all(pack_dir);
 }
 
 /*

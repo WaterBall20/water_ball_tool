@@ -62,8 +62,8 @@ impl WBFPManagerRun {
         pack_path: P,
         write_lock_path: PathBuf,
         write_lock_file: Option<File>,
-    ) -> WBFPManagerRun {
-        WBFPManagerRun {
+    ) -> Self {
+        Self {
             pack_path: String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文本")),
             write_lock: false,
             write_lock_path,
@@ -85,7 +85,7 @@ impl WBFPManager {
         pack_file: File,
         s_manifest_file: bool,
         write_lock_file: Option<File>,
-    ) -> WBFPManager {
+    ) -> Self {
         Self::new2(
             pack_path,
             manifest,
@@ -105,13 +105,13 @@ impl WBFPManager {
         write_lock_file: Option<File>,
         root_struct_pos: u64,
         pack_file_length: u64,
-    ) -> WBFPManager {
+    ) -> Self {
         let cow = manifest.attribute().cow();
         let mut write_lock_path =
             String::from(pack_path.as_ref().to_str().expect("无法将转换路径成文本"));
         write_lock_path.push_str(".lock");
         let write_lock_path = Path::new(&write_lock_path).to_path_buf();
-        WBFPManager {
+        Self {
             manifest,
             pack_file,
             cow,
@@ -137,10 +137,10 @@ impl WBFPManager {
         //|写实复制|清单文件分离|
         let mut header_tag: u8 = 0;
         if self.cow {
-            header_tag |= 0b10000000
+            header_tag |= 0b1000_0000;
         }
         if self.s_manifest_file {
-            header_tag |= 0b01000000
+            header_tag |= 0b0100_0000;
         }
         self.pack_file_write_root([header_tag].as_slice()).unwrap();
         //===
@@ -183,15 +183,10 @@ impl WBFPManager {
     //将路径转换为Vec
     fn create_path_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         let path = path.as_ref();
-        let path = if let Ok(r) = path
+        let path = path
             .strip_prefix("./")
             .or_else(|_| path.strip_prefix("."))
-            .or_else(|_| path.strip_prefix(".\\\\"))
-        {
-            r
-        } else {
-            path
-        };
+            .or_else(|_| path.strip_prefix(".\\\\")).map_or(path, |r| r);
         let mut path_list: Vec<String> = Vec::new();
         for item in path {
             path_list.push(String::from(item.to_str().expect("转换文本错误")));
@@ -205,7 +200,7 @@ impl WBFPManager {
     fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
         for pos in gc_pos_list {
             //直接添加
-            self.run_data.gc_data_pos_list.list.push(pos)
+            self.run_data.gc_data_pos_list.list.push(pos);
         }
         Ok(())
     }
@@ -213,7 +208,7 @@ impl WBFPManager {
     fn manifest_file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
         for pos in gc_pos_list {
             //直接添加
-            self.manifest.run_data.gc_data_pos_list.list.push(pos)
+            self.manifest.run_data.gc_data_pos_list.list.push(pos);
         }
         Ok(())
     }
@@ -311,7 +306,7 @@ impl WBFPManager {
         //扩容处理
         if l_add_len != length {
             let this_add_len = length - l_add_len;
-            add_pos.push((self.pack_file_length, this_add_len))
+            add_pos.push((self.pack_file_length, this_add_len));
         }
         add_pos
     }
@@ -592,7 +587,7 @@ impl WBFPManager {
     fn up_pack_length(&mut self) {
         //判断是否需要设置
         if self.run_data.pack_file_pos > self.pack_file_length {
-            self.pack_file_length = self.run_data.pack_file_pos
+            self.pack_file_length = self.run_data.pack_file_pos;
         }
     }
 
@@ -751,7 +746,7 @@ fn write_lock_info(run_lock: bool, path: &PathBuf) -> PackLockInfo {
                 file.read_exact(&mut buf).expect("无法读取锁文件");
                 let pid = u32::from_le_bytes(buf);
                 file_lock_pid = Some(pid);
-                file_lock_pid_run = Some(is_process_running(pid))
+                file_lock_pid_run = Some(is_process_running(pid));
             }
             true
         } else {

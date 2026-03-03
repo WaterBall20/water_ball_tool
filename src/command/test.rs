@@ -160,7 +160,6 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
 
 
 //ERR===
-//TODO:需要编写会引发错误的测试
 //文件查找器输出文件跳过符号链接，但文件不存在
 #[test]
 #[should_panic(expected = "NotFound")]
