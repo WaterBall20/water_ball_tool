@@ -8,7 +8,7 @@ mod test;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
+use std::{ clone, io };
 use std::io::Error;
 
 //当前解析器版本
@@ -220,7 +220,7 @@ impl Attribute {
         }
     }
 
-    fn get_bytes_vec(&mut self) -> Vec<u8> {
+    fn to_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         //格式版本
         for to_le_byte in self.version.to_le_bytes() {
@@ -261,7 +261,7 @@ static DATA_POS_LIST_COUNT_LEN: usize = 8;
 
 #[derive(Debug, Default, PartialEq)]
 struct DataPosList {
-    data_len: u64,
+    data_block: Option<ManifestDataBlock>,
     list: Vec<(u64, u64)>,
 }
 impl DataPosList {
@@ -269,7 +269,7 @@ impl DataPosList {
         &self.list
     }
 
-    fn load(data: &[u8]) -> Self {
+    fn load(data: &[u8], data_block: Option<ManifestDataBlock>) -> Self {
         //数量
         let count = usize::from_le_bytes(data[..DATA_POS_LIST_COUNT_LEN].try_into().unwrap());
         let data_len = count * DATA_POS_LIST_ITEM_LEN + DATA_POS_LIST_COUNT_LEN;
@@ -297,16 +297,16 @@ impl DataPosList {
             list.push((pos, len));
         }
         Self {
-            data_len: data_len as u64,
             list,
+            data_block,
         }
     }
 
-    fn get_bytes_vec(&mut self) -> Vec<u8> {
-        self.get_bytes_vec2(None)
+    fn to_bytes_vec(&self) -> Vec<u8> {
+        self.to_bytes_vec2(None)
     }
 
-    fn get_bytes_vec2(&mut self, this_gc_pos: Option<(u64, u64)>) -> Vec<u8> {
+    fn to_bytes_vec2(&self, this_gc_pos: Option<(u64, u64)>) -> Vec<u8> {
         let mut data = Vec::new();
         let list_count = match this_gc_pos {
             Some(_) => self.list.len() + 1,
@@ -332,8 +332,6 @@ impl DataPosList {
                 data.push(to_le_byte);
             }
         }
-        //更新大小
-        self.data_len = data.len() as u64;
         data
     }
 }
@@ -351,16 +349,16 @@ pub struct PackStruct {
 struct PackStructRun {
     //此结构的文件指针位置
     this_file_pos: u64,
-    //数据长度
-    data_len: u64,
+    //数据块
+    data_block: ManifestDataBlock,
 }
 impl PackStructRun {
     fn set_this_file_pos(&mut self, pos: u64) {
         self.this_file_pos = pos;
     }
 
-    fn set_data_len(&mut self, len: u64) {
-        self.data_len = len;
+    fn get_data_block(&mut self) -> &mut ManifestDataBlock {
+        &mut self.data_block
     }
 }
 impl PackStruct {
@@ -379,7 +377,7 @@ impl PackStruct {
         &self.items
     }
 
-    fn load(this_file_pos: u64, data: &[u8]) -> io::Result<Self> {
+    fn load(this_file_pos: u64, data: &[u8], data_block: ManifestDataBlock) -> io::Result<Self> {
         if data.len() < 8 {
             Err(Error::other("提供的数据大小不够"))
         } else {
@@ -403,13 +401,13 @@ impl PackStruct {
                 }
                 Ok(Self {
                     items,
-                    run_data: PackStructRun::default(),
+                    run_data: PackStructRun { this_file_pos, data_block },
                 })
             }
         }
     }
 
-    fn get_bytes_vec(&self) -> Vec<u8> {
+    fn to_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         let mut items_data = Vec::new();
         //获取项数据
@@ -641,7 +639,7 @@ static PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
 #[derive(PartialEq, Debug)]
 pub struct PackFileMetadata {
     //数据长度
-    data_len: u64,
+    data_block: ManifestDataBlock,
     //写时复制
     cow: bool,
     //长度
@@ -672,7 +670,7 @@ impl PackFileMetadata {
         &self.file_type
     }
 
-    fn load(data: &[u8]) -> io::Result<Self> {
+    fn load(data: &[u8], data_block: ManifestDataBlock) -> io::Result<Self> {
         let data_len = u64::from_le_bytes(
             data[..PACK_FILE_METADATA_DATA_LEN_LEN].try_into().unwrap()
         );
@@ -703,7 +701,7 @@ impl PackFileMetadata {
         };
 
         Ok(Self {
-            data_len,
+            data_block,
             cow,
             modified,
             len,
@@ -711,11 +709,11 @@ impl PackFileMetadata {
         })
     }
 
-    fn get_bytes_vec(&mut self) -> Vec<u8> {
+    fn to_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         //类型及其数据
-        let type_data = match &mut self.file_type {
-            PackFileMetadataType::File(file) => (0, file.get_bytes_vec()),
+        let type_data = match &self.file_type {
+            PackFileMetadataType::File(file) => (0, file.to_bytes_vec()),
             PackFileMetadataType::Dir(dir) => (1, dir.to_bytes_vec()),
         };
         //数据长度
@@ -751,7 +749,6 @@ impl PackFileMetadata {
             data.push(type_datum);
         }
         //更新大小
-        self.data_len = data_len;
         data
     }
 }
@@ -800,7 +797,7 @@ impl PackFileMetadataFile {
             data_pos_list,
         })
     }
-    fn get_bytes_vec(&mut self) -> Vec<u8> {
+    fn to_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         //哈希算法类型
         data.push(self.hash_type);
@@ -812,7 +809,7 @@ impl PackFileMetadataFile {
             data.push(*hash);
         }
         //已分配数据列表
-        for data_pos_list_data in self.data_pos_list.get_bytes_vec() {
+        for data_pos_list_data in self.data_pos_list.to_bytes_vec() {
             data.push(data_pos_list_data);
         }
         data
@@ -885,9 +882,26 @@ static MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
 由于A/B机制，所以内部分成两块，每块的前面版本和末尾的版本应是对应的，如果不对应则说明数据很可能损坏。
 数据块格式：4字节32位占用大小+4字节32位版本
 */
-struct ManifestDataBlock;
+#[derive(Default, Debug, PartialEq)]
+struct ManifestDataBlock {
+    run_block_data: Vec<u8>,
+}
+impl Clone for ManifestDataBlock {
+    fn clone(&self) -> Self {
+        Self {
+            run_block_data: Vec::new(),
+        }
+    }
+}
 
 impl ManifestDataBlock {
+    fn from_new(data: &[u8]) -> io::Result<Self> {
+        let block_len = Self::get_block_len_us(data.len());
+        let mut run_block_data = vec![0; block_len];
+        Self::save_data_to_block_data_new(data, &mut run_block_data)?;
+        Ok(Self { run_block_data })
+    }
+
     fn get_data_len(data: &[u8]) -> u64 {
         u64::from_le_bytes(data[..MANIFEST_DATA_BLOCK_DATA_LEN_LEN].try_into().unwrap())
     }

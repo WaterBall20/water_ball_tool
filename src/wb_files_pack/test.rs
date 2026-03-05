@@ -33,7 +33,7 @@ fn pack_struct_to_bytes_vec_and_load() {
         }),
         pack_file_metadata: None,
     });
-    let data = ps.get_bytes_vec();
+    let data = ps.to_bytes_vec();
     let ps_load = PackStruct::load(0, &data).unwrap();
     assert_eq!(ps, ps_load);
 }
@@ -66,7 +66,7 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
             },
         }),
     };
-    let data = pfm.get_bytes_vec();
+    let data = pfm.to_bytes_vec();
     let pfm_load = PackFileMetadata::load(&data).unwrap();
     assert_eq!(pfm, pfm_load);
 }
@@ -79,7 +79,7 @@ fn pack_file_metadata_dir_to_bytes_vec_and_load() {
         modified: 294,
         file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
     };
-    let data = pfm.get_bytes_vec();
+    let data = pfm.to_bytes_vec();
     let pfm_load = PackFileMetadata::load(&data).unwrap();
     assert_eq!(pfm, pfm_load);
 }
@@ -87,7 +87,7 @@ fn pack_file_metadata_dir_to_bytes_vec_and_load() {
 #[test]
 fn pack_file_metadata_data_block_save_and_load() {
     let mut a = Attribute::default();
-    let a_data = a.get_bytes_vec();
+    let a_data = a.to_bytes_vec();
     let mut data_block = vec![0u8; ManifestDataBlock::get_block_len_us(a_data.len())];
     //Save
     ManifestDataBlock::save_data_to_block_data_new(&a_data, &mut data_block).unwrap();
@@ -105,13 +105,13 @@ fn pack_file_metadata_data_block_save_and_load() {
         version: 10,
         version_compatible: 10,
     };
-    ManifestDataBlock::save_data_to_block_data(&b.get_bytes_vec(), &mut data_block).unwrap();
+    ManifestDataBlock::save_data_to_block_data(&b.to_bytes_vec(), &mut data_block).unwrap();
     //Load
     let save_load_data = ManifestDataBlock::get_data(&data_block).unwrap();
     let b_load = Attribute::load(save_load_data).unwrap();
     assert_eq!(b, b_load);
     //Save3
-    ManifestDataBlock::save_data_to_block_data(&b.get_bytes_vec(), &mut data_block).unwrap();
+    ManifestDataBlock::save_data_to_block_data(&b.to_bytes_vec(), &mut data_block).unwrap();
     //Load
     let save_load_data = ManifestDataBlock::get_data(&data_block).unwrap();
     let b_load = Attribute::load(save_load_data).unwrap();

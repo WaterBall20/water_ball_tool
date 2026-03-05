@@ -184,10 +184,11 @@ impl WBFPManager {
         self.set_pack_file_len(FILE_HEADER_BLOCK_LEN as u64).expect("无法设置文件大小");
 
         //保存空数据列表
-        self.save_empty_data_pos_list().expect("保存空数据列表");
+        self.init_save_empty_data_list().expect("初始化和保存空数据列表失败");
 
         //保存根结构
-        self.save_pack_struct_and_metadata().expect("保存根结构失败");
+        //self.save_pack_struct_and_metadata().expect("保存根结构失败");
+        self.init_save_root_pack_struct().expect("初始化和保存根结构失败");
 
         //保存清单属性
         self.save_manifest_attribute().expect("写入清单属性失败");
@@ -197,6 +198,42 @@ impl WBFPManager {
 
         //解除文件锁
         self.write_unlock().expect("解除文件锁失败");
+    }
+
+    fn init_save_root_pack_struct(&mut self) -> io::Result<()> {
+        let data = self.manifest.root_struct.to_bytes_vec();
+        let mut block_data = vec![0; DATA_BLOCK_LEN];
+        ManifestDataBlock::save_data_to_block_data_new(&data, &mut block_data)?;
+        if self.s_manifest_file {
+            let (pos, _) = self.get_manifest_file_pos(DATA_BLOCK_LEN as u64)?;
+            self.set_manifest_file_pos(pos)?;
+            self.manifest_file_write_root(&block_data)?;
+            self.manifest.attribute.root_struct_pos = pos;
+        } else {
+            let (pos, _) = self.get_file_pos(DATA_BLOCK_LEN as u64);
+            self.set_pack_file_pos_write(pos)?;
+            self.pack_file_write_root(&block_data)?;
+            self.manifest.attribute.root_struct_pos = pos;
+        }
+        Ok(())
+    }
+
+    fn init_save_empty_data_list(&mut self) -> io::Result<()> {
+        let data = self.manifest.attribute.to_bytes_vec();
+        let mut block_data = vec![0; DATA_BLOCK_LEN];
+        ManifestDataBlock::save_data_to_block_data_new(&data, &mut block_data)?;
+        if self.s_manifest_file {
+            let (pos, _) = self.get_manifest_file_pos(DATA_BLOCK_LEN as u64)?;
+            self.set_manifest_file_pos(pos)?;
+            self.manifest_file_write_root(&block_data)?;
+            self.manifest.attribute.empty_data_pos_list_pos = pos;
+        } else {
+            let (pos, _) = self.get_file_pos(DATA_BLOCK_LEN as u64);
+            self.set_pack_file_pos_write(pos)?;
+            self.pack_file_write_root(&block_data)?;
+            self.manifest.attribute.empty_data_pos_list_pos = pos;
+        }
+        Ok(())
     }
 
     //读取===
@@ -209,6 +246,19 @@ impl WBFPManager {
     }
 
     //写入===
+
+    fn create_pack_struct(&mut self) -> io::Result<(PackStruct, u64)> {
+        let pack_struct = PackStruct::default();
+        let data = pack_struct.to_bytes_vec();
+        let block_len = ManifestDataBlock::get_block_len_us(data.len());
+        let mut block_data = vec![0; block_len];
+        ManifestDataBlock::save_data_to_block_data_new(&data, &mut block_data)?;
+        //
+        let (block_pos, _) = self.get_file_pos(block_len as u64);
+        self.set_pack_file_pos_write(block_pos)?;
+        self.pack_file_write_root(&block_data)?;
+        Ok((pack_struct, block_pos))
+    }
 
     //创建文件
 
@@ -232,20 +282,18 @@ impl WBFPManager {
     //核心代码===
 
     //垃圾回收提交 TODO:未使用方法
-    fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
+    fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         for pos in gc_pos_list {
             //直接添加
             self.run_data.gc_data_pos_list.list.push(pos);
         }
-        Ok(())
     }
     //清单文件垃圾回收提交 TODO:未使用方法
-    fn manifest_file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
+    fn manifest_file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         for pos in gc_pos_list {
             //直接添加
             self.manifest.run_data.gc_data_pos_list.list.push(pos);
         }
-        Ok(())
     }
     //垃圾回收
     fn file_gc(&mut self) {
@@ -311,42 +359,7 @@ impl WBFPManager {
     }
 
     //获取可用的文件位置
-    fn get_file_pos(&mut self, length: u64) -> Vec<(u64, u64)> {
-        let mut add_pos: Vec<(u64, u64)> = Vec::new();
-        let mut l_add_len = 0;
-        //优先使用空隙
-        let empty_data_pos = &mut self.manifest.empty_data_list.list;
-        //当大小没有写完，且空隙存在则优先使用空隙
-        while l_add_len != length && !empty_data_pos.is_empty() {
-            //从第一个开始
-            let get_0 = empty_data_pos.get_mut(0).unwrap();
-            let (pos, len) = get_0;
-            //判断是否能占用完
-            //剩余大小
-            let m_len = length - l_add_len;
-            if m_len >= *len {
-                //能占用完，则附加并删除空隙
-                add_pos.push((*pos, *len));
-                l_add_len += *len;
-                empty_data_pos.remove(0);
-            } else {
-                //不能则切出
-                add_pos.push((*pos, *len - m_len));
-                //修改，位置加大小使其向后移动，长度减大小使其边界不变
-                *get_0 = (*pos + m_len, *len - m_len);
-                return add_pos;
-            }
-        }
-        //扩容处理
-        if l_add_len != length {
-            let this_add_len = length - l_add_len;
-            add_pos.push((self.pack_file_length, this_add_len));
-        }
-        add_pos
-    }
-
-    //获取连续的空间
-    fn get_file_pos_l(&mut self, length: u64) -> (u64, u64) {
+    fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
         //优先使用空隙
         let empty_data_pos = &mut self.manifest.empty_data_list.list;
         //优先使用空数据，但必须完整一块
@@ -376,7 +389,7 @@ impl WBFPManager {
         (self.pack_file_length, length)
     }
     //获取连续的清单空间
-    fn get_manifest_file_pos_l(&mut self, length: u64) -> io::Result<(u64, u64)> {
+    fn get_manifest_file_pos(&mut self, length: u64) -> io::Result<(u64, u64)> {
         //尝试获取空数据列表
 
         if let Some(empty_data_pos) = &mut self.manifest.this_empty_data_list {
@@ -456,6 +469,7 @@ impl WBFPManager {
         self.manifest.root_struct.run_data.this_file_pos = new_pos;
         Ok(())
     }
+
     fn save_pack_struct_write(
         &mut self,
         pack_struct: PackStruct,
@@ -464,30 +478,31 @@ impl WBFPManager {
         //当前大小
         let this_len = pack_struct.run_data.data_len;
         //转换数据
-        let data = pack_struct.get_bytes_vec();
+        let data = pack_struct.to_bytes_vec();
         //判断是否分离
         if self.s_manifest_file {
             //获取新位置
-            let (pos, len) = self.get_manifest_file_pos_l(data.len() as u64)?;
+            let (pos, len) = self.get_manifest_file_pos(data.len() as u64)?;
             //更改位置
             self.set_manifest_file_pos(pos)?;
             //写入
             self.manifest_file_write_root(&data)?;
             //提交垃圾回收
-            self.manifest_file_gc_add(vec![(this_pos, this_len)])?;
+            self.manifest_file_gc_add(vec![(this_pos, this_len)]);
             Ok((pos, len))
         } else {
             //获取新位置
-            let (pos, len) = self.get_file_pos_l(data.len() as u64);
+            let (pos, len) = self.get_file_pos(data.len() as u64);
             //更改位置
             self.set_pack_file_pos_write(pos)?;
             //写入
             self.pack_file_write_root(&data)?;
             //提交垃圾回收
-            self.file_gc_add(vec![(this_pos, this_len)])?;
+            self.file_gc_add(vec![(this_pos, this_len)]);
             Ok((pos, len))
         }
     }
+
     /*fn s_pack_struct(&mut self, pack_struct: &mut PackStruct, pack_struct_pos: u64) -> io::Result<
         ()> {
         //
@@ -510,7 +525,7 @@ impl WBFPManager {
         //属性
         let attribute = &mut self.manifest.attribute;
         //转换数据
-        let data = attribute.get_bytes_vec();
+        let data = attribute.to_bytes_vec();
         //写入数据
         //设置文件指针位置,从文件头后面写
         self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH)?;
@@ -530,9 +545,9 @@ impl WBFPManager {
         //判断是否分离
         if self.s_manifest_file {
             //转换数据
-            let data = self.manifest.empty_data_list.get_bytes_vec();
+            let data = self.manifest.empty_data_list.to_bytes_vec();
             //获取新空间
-            let (new_pos, new_len) = self.get_manifest_file_pos_l(data.len() as u64)?;
+            let (new_pos, new_len) = self.get_manifest_file_pos(data.len() as u64)?;
             assert_eq!(data.len() as u64, new_len);
             //设置文件位置
             self.set_manifest_file_pos(new_pos)?;
@@ -543,16 +558,16 @@ impl WBFPManager {
             Ok(())
         } else {
             //转换数据
-            let data = self.manifest.empty_data_list.get_bytes_vec2(Some((this_pos, this_len)));
+            let data = self.manifest.empty_data_list.to_bytes_vec2(Some((this_pos, this_len)));
             //获取新空间
-            let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
+            let (new_pos, new_len) = self.get_file_pos(data.len() as u64);
             assert_eq!(data.len() as u64, new_len);
             //设置文件位置
             self.set_pack_file_pos_write(new_pos)?;
             //写入
             self.pack_file_write_root(&data)?;
             //GC提交
-            self.file_gc_add(vec![(this_pos, this_pos)])?;
+            self.file_gc_add(vec![(this_pos, this_pos)]);
             //更改指针
             self.manifest.attribute.empty_data_pos_list_pos = new_pos;
             //GC处理
@@ -702,14 +717,15 @@ impl WBFPManager {
         }
     }
 }
-/*impl Drop for WBFPManager {
+impl Drop for WBFPManager {
     fn drop(&mut self) {
         //确保文件完全写入
         _ = self.pack_file.sync_all();
         //释放缓存文件===
         //强制写入索引数据
         _ = self.save_and_up_all();
-        //如果索引文件分离
+        //TODO:需要完成
+        /* //如果索引文件分离
         if self.s_data_file {
             //写入两个索引文件，使其同步
             _ = self.save_json_data();
@@ -718,11 +734,11 @@ impl WBFPManager {
             json_b_path.push_str(".json.b");
             //改动：移除自动删除代码，并改为用户提示
             info!(r#"包文件已安全保存，"{json_b_path}"是原子同步文件，用来确保安全，你可以删除。"#)
-        }
+        } */
         //释放写入锁
         _ = self.write_unlock();
     }
-}*/
+}
 
 struct MutDirReturn {
     //
