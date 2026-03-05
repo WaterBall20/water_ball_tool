@@ -6,10 +6,10 @@ use crate::wb_files_pack::*;
 use rand::RngExt;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
-use std::{fs, io};
-use tracing::{debug, error, info, warn};
+use std::io::{ Error, ErrorKind, Read, Seek, SeekFrom, Write };
+use std::path::{ Path, PathBuf };
+use std::{ fs, io };
+use tracing::{ debug, error, info, warn };
 
 //pub mod file;
 
@@ -20,6 +20,42 @@ mod test;
 #[cfg(debug_assertions)]
 #[cfg(test)]
 mod new_test;*/
+
+//文件头===
+//文件头-文件名:WPFilesPack
+pub static FILE_HEADER_TYPE_NAME: [u8; 11] = [
+    0x57u8, 0x42, 0x46, 0x69, 0x6c, 0x65, 0x73, 0x50, 0x61, 0x63, 0x6b,
+];
+//文件头版本
+static FILE_HEADER_VERSION: [u8; 2] = [0, 2];
+
+//文件头标签位长度
+static FILE_HEADER_BOOL_DATA_LENGTH: usize = 1;
+
+//文件头清单数据属性起始位置的位置
+static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS: u64 = (FILE_HEADER_TYPE_NAME.len() +
+    FILE_HEADER_VERSION.len() +
+    FILE_HEADER_BOOL_DATA_LENGTH) as u64;
+//文件头清单数据属性起始位置数据段长度
+static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS_LENGTH: u64 = 8;
+
+//文件头数据长度位置
+static FILE_HEADER_DATA_LENGTH_POS: u64 =
+    FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS + FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS_LENGTH;
+
+//文件头数据长度长度
+static FILE_HEADER_DATA_LENGTH_LENGTH: u64 = 8;
+//文件头长度
+static FILE_HEADER_DATA_LENGTH: u64 =
+    FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS + FILE_HEADER_DATA_LENGTH_LENGTH;
+
+//文件头块长度
+static FILE_HEADER_BLOCK_LEN: usize = DATA_BLOCK_LEN;
+//默认写实复制
+pub static DEFAULT_COW: bool = false;
+
+//默认分离数据为单独文件
+pub static DEFAULT_S_DATA_FILE: bool = true;
 
 pub struct WBFPManager {
     // 清单实例
@@ -61,7 +97,7 @@ impl WBFPManagerRun {
     fn new<P: AsRef<Path>>(
         pack_path: P,
         write_lock_path: PathBuf,
-        write_lock_file: Option<File>,
+        write_lock_file: Option<File>
     ) -> Self {
         Self {
             pack_path: String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文本")),
@@ -84,17 +120,9 @@ impl WBFPManager {
         manifest: WBFilesPackManifest,
         pack_file: File,
         s_manifest_file: bool,
-        write_lock_file: Option<File>,
+        write_lock_file: Option<File>
     ) -> Self {
-        Self::new2(
-            pack_path,
-            manifest,
-            pack_file,
-            s_manifest_file,
-            write_lock_file,
-            0,
-            0,
-        )
+        Self::new2(pack_path, manifest, pack_file, s_manifest_file, write_lock_file, 0, 0)
     }
 
     fn new2<P: AsRef<Path>>(
@@ -104,11 +132,12 @@ impl WBFPManager {
         s_manifest_file: bool,
         write_lock_file: Option<File>,
         root_struct_pos: u64,
-        pack_file_length: u64,
+        pack_file_length: u64
     ) -> Self {
         let cow = manifest.attribute().cow();
-        let mut write_lock_path =
-            String::from(pack_path.as_ref().to_str().expect("无法将转换路径成文本"));
+        let mut write_lock_path = String::from(
+            pack_path.as_ref().to_str().expect("无法将转换路径成文本")
+        );
         write_lock_path.push_str(".lock");
         let write_lock_path = Path::new(&write_lock_path).to_path_buf();
         Self {
@@ -123,13 +152,17 @@ impl WBFPManager {
 
     //初始化新包
     fn init_new_pack(&mut self) {
+        //文件头缓存
+        let mut file_header_buf = Vec::with_capacity(DATA_BLOCK_LEN);
         //写出文件头
         //类型名称
-        self.pack_file_write_root(FILE_HEADER_TYPE_NAME.as_slice())
-            .unwrap();
+        for value in FILE_HEADER_TYPE_NAME {
+            file_header_buf.push(value);
+        }
         //写入文件版本
-        self.pack_file_write_root(FILE_HEADER_VERSION.as_slice())
-            .unwrap();
+        for value in FILE_HEADER_VERSION {
+            file_header_buf.push(value);
+        }
 
         //写入标签===
         //文件头标签，二进制位:
@@ -142,26 +175,27 @@ impl WBFPManager {
         if self.s_manifest_file {
             header_tag |= 0b0100_0000;
         }
-        self.pack_file_write_root([header_tag].as_slice()).unwrap();
+        file_header_buf.push(header_tag);
         //===
 
+        self.pack_file_write_root(&file_header_buf).expect("无法写入文件头");
+
         //设置文件大小
-        self.set_pack_file_len(FILE_HEADER_LENGTH + MANIFEST_ATTRIBUTE_LEN as u64)
-            .expect("无法设置文件大小");
+        self.set_pack_file_len(FILE_HEADER_BLOCK_LEN as u64).expect("无法设置文件大小");
 
         //保存空数据列表
         self.save_empty_data_pos_list().expect("保存空数据列表");
+
         //保存根结构
-        self.save_pack_struct_and_metadata()
-            .expect("保存根结构失败");
+        self.save_pack_struct_and_metadata().expect("保存根结构失败");
 
         //保存清单属性
         self.save_manifest_attribute().expect("写入清单属性失败");
-        //self.save_json_data().expect("无法保存索引数据");
 
         //保存有效大小
         self.save_pack_length().expect("无法保存有效大小属性");
 
+        //解除文件锁
         self.write_unlock().expect("解除文件锁失败");
     }
 
@@ -186,7 +220,8 @@ impl WBFPManager {
         let path = path
             .strip_prefix("./")
             .or_else(|_| path.strip_prefix("."))
-            .or_else(|_| path.strip_prefix(".\\\\")).map_or(path, |r| r);
+            .or_else(|_| path.strip_prefix(".\\\\"))
+            .map_or(path, |r| r);
         let mut path_list: Vec<String> = Vec::new();
         for item in path {
             path_list.push(String::from(item.to_str().expect("转换文本错误")));
@@ -214,10 +249,7 @@ impl WBFPManager {
     }
     //垃圾回收
     fn file_gc(&mut self) {
-        Self::from_gc(
-            &mut self.run_data.gc_data_pos_list,
-            &mut self.manifest.empty_data_list,
-        );
+        Self::from_gc(&mut self.run_data.gc_data_pos_list, &mut self.manifest.empty_data_list);
     }
 
     //清单文件垃圾回收
@@ -261,7 +293,9 @@ impl WBFPManager {
             //当前索引内容
             let (this_pos, this_len) = match pos_list.get_mut(index) {
                 Some(v) => v,
-                None => break,
+                None => {
+                    break;
+                }
             };
             let this_end_pos = *this_pos + *this_len;
             //检查，判断当前位置加当前长度是否等于下一个位置
@@ -354,21 +388,23 @@ impl WBFPManager {
                 let (pos, len) = empty_data_pos.get_mut(index).unwrap();
                 //判断是否能占用完
                 //剩余大小
-                return Ok(if length == *len {
-                    //能占用完，但必须等于
-                    let r = (*pos, *len);
-                    empty_data_pos.remove(0);
-                    r
-                } else if *len > length {
-                    //不能则切出
-                    let r = (*pos, *len - length);
-                    //修改，位置加大小使其向后移动，长度减大小使其边界不变
-                    *pos += length;
-                    *len -= length;
-                    r
-                } else {
-                    continue;
-                });
+                return Ok(
+                    if length == *len {
+                        //能占用完，但必须等于
+                        let r = (*pos, *len);
+                        empty_data_pos.remove(0);
+                        r
+                    } else if *len > length {
+                        //不能则切出
+                        let r = (*pos, *len - length);
+                        //修改，位置加大小使其向后移动，长度减大小使其边界不变
+                        *pos += length;
+                        *len -= length;
+                        r
+                    } else {
+                        continue;
+                    }
+                );
             }
             //扩容处理
             Ok((self.manifest.file_len, length))
@@ -403,7 +439,6 @@ impl WBFPManager {
     //保存结构
     fn save_pack_struct_and_metadata(&mut self) -> io::Result<()> {
         //TODO:未完成递归
-
         //保存根结构
         //当前位置
         let pos = self.manifest.attribute.root_struct_pos;
@@ -411,8 +446,10 @@ impl WBFPManager {
         let len = self.manifest.root_struct.run_data.data_len;
 
         //保存数据
-        let (new_pos, new_len) =
-            self.save_pack_struct_write(self.manifest.root_struct.l_clone(), pos)?;
+        let (new_pos, new_len) = self.save_pack_struct_write(
+            self.manifest.root_struct.l_clone(),
+            pos
+        )?;
         //更新数据指针和大小
         self.manifest.attribute.root_struct_pos = new_pos;
         self.manifest.root_struct.run_data.data_len = new_len;
@@ -422,7 +459,7 @@ impl WBFPManager {
     fn save_pack_struct_write(
         &mut self,
         pack_struct: PackStruct,
-        this_pos: u64,
+        this_pos: u64
     ) -> io::Result<(u64, u64)> {
         //当前大小
         let this_len = pack_struct.run_data.data_len;
@@ -476,7 +513,7 @@ impl WBFPManager {
         let data = attribute.get_bytes_vec();
         //写入数据
         //设置文件指针位置,从文件头后面写
-        self.set_pack_file_pos_write(FILE_HEADER_LENGTH)?;
+        self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH)?;
         //写入数据
         self.pack_file_write_root(&data)?;
         Ok(())
@@ -506,10 +543,7 @@ impl WBFPManager {
             Ok(())
         } else {
             //转换数据
-            let data = self
-                .manifest
-                .empty_data_list
-                .get_bytes_vec2(Some((this_pos, this_len)));
+            let data = self.manifest.empty_data_list.get_bytes_vec2(Some((this_pos, this_len)));
             //获取新空间
             let (new_pos, new_len) = self.get_file_pos_l(data.len() as u64);
             assert_eq!(data.len() as u64, new_len);
@@ -537,12 +571,14 @@ impl WBFPManager {
 
     //设置写入锁
     fn write_lock(&mut self) -> io::Result<()> {
-        let lock_file = write_lock(true, &self.run_data.write_lock_path)?;
-        if let Some(lock_file) = lock_file {
-            self.run_data.write_lock_file = Some(lock_file);
+        if !self.run_data.write_lock {
+            let lock_file = write_lock(true, &self.run_data.write_lock_path)?;
+            if let Some(lock_file) = lock_file {
+                self.run_data.write_lock_file = Some(lock_file);
+            }
+            self.run_data.write_lock = true;
+            self.pack_file.lock()?;
         }
-        self.run_data.write_lock = true;
-        self.pack_file.lock()?;
         Ok(())
     }
 
@@ -557,10 +593,7 @@ impl WBFPManager {
                 return Err(Error::other("无法解锁，锁文件类型是符号链接"));
             }
             if lock_info.file_lock_is_dir {
-                Err(Error::new(
-                    ErrorKind::IsADirectory,
-                    "无法解锁，锁文件类型是目录",
-                ))
+                Err(Error::new(ErrorKind::IsADirectory, "无法解锁，锁文件类型是目录"))
             } else {
                 //释放文件句柄
                 if let Some(lock_file) = self.run_data.write_lock_file.take() {
@@ -595,7 +628,7 @@ impl WBFPManager {
     fn up_manifest_length(&mut self) {
         //判断是否需要设置
         if self.manifest.run_data.file_pos > self.manifest.file_len {
-            self.manifest.file_len = self.manifest.run_data.file_pos
+            self.manifest.file_len = self.manifest.run_data.file_pos;
         }
     }
 
@@ -780,12 +813,13 @@ fn write_lock(run_lock: bool, write_lock_path: &PathBuf) -> Result<Option<File>,
         //判断锁文件
         match lock_info.file_lock_pid_run {
             Some(true) => panic!("无法为包文件上写入锁，正在被其他进程持有。"),
-            Some(false) => panic!(
-                r#"[警告]包文件未正常解锁，但相关进程(pid:{})可能已停止。
+            Some(false) =>
+                panic!(
+                    r#"[警告]包文件未正常解锁，但相关进程(pid:{})可能已停止。
                     如果你认为可以继续，可以删除锁文件：{:?} 强制解锁"#,
-                lock_info.file_lock_pid.expect(""),
-                write_lock_path
-            ),
+                    lock_info.file_lock_pid.expect(""),
+                    write_lock_path
+                ),
             None => Ok(Some(write_lock_file(write_lock_path)?)),
         }
     }
@@ -803,7 +837,7 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
     Ok(write_lock)
 }
 //打开
-pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
+/* pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
     fn load_manifest_attribute(data: &[u8]) -> io::Result<Attribute> {
         let attribute = Attribute::load(data)?;
         //兼容性判断
@@ -897,7 +931,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
     } else {
         todo!()
     }
-}
+} */
 
 //创建===
 
@@ -910,14 +944,14 @@ pub fn create_new_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager>
 pub fn create_new_file2<P: AsRef<Path>>(
     pack_path: &P,
     cow: bool,
-    s_data_file: bool,
+    s_data_file: bool
 ) -> Result<WBFPManager, Error> {
     //判断文件是否存在
-    let mut path = match pack_path.as_ref().try_exists() {
+    let mut path = (match pack_path.as_ref().try_exists() {
         Ok(true) => Err(Error::other("文件可能已存在，无法创建！")),
         Ok(false) => create_file2(pack_path, cow, s_data_file, true),
         Err(_) => create_file2(pack_path, cow, s_data_file, true),
-    }?;
+    })?;
     path.init_new_pack();
     Ok(path)
 }
@@ -927,10 +961,11 @@ pub fn create_file2<P: AsRef<Path>>(
     pack_path: &P,
     cow: bool,
     s_manifest_file: bool,
-    create_new: bool,
+    create_new: bool
 ) -> Result<WBFPManager, Error> {
-    let mut write_lock_path =
-        String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文本"));
+    let mut write_lock_path = String::from(
+        pack_path.as_ref().to_str().expect("无法将路径转换成文本")
+    );
     write_lock_path.push_str(".lock");
     let write_lock_path = PathBuf::from(write_lock_path);
     let write_lock_file = write_lock(false, &write_lock_path)?;
@@ -945,36 +980,23 @@ pub fn create_file2<P: AsRef<Path>>(
     //创建包文件数据文件
 
     let manifest_file = if s_manifest_file {
-        let mut manifest_path =
-            String::from(pack_path.as_ref().to_str().expect("无法将路径转换成文件"));
+        let mut manifest_path = String::from(
+            pack_path.as_ref().to_str().expect("无法将路径转换成文件")
+        );
         manifest_path.push_str(".wbm");
         Some(File::create(&manifest_path)?)
     } else {
         None
     };
 
-    Ok(create2(
-        pack_path,
-        cow,
-        pack_file,
-        s_manifest_file,
-        manifest_file,
-        write_lock_file,
-    ))
+    Ok(create2(pack_path, cow, pack_file, s_manifest_file, manifest_file, write_lock_file))
 }
 
 //创建新包实例===
 
 //TODO:未使用函数
 fn _create<P: AsRef<Path>>(pack_path: &P, pack_file: File) -> WBFPManager {
-    create2(
-        pack_path,
-        DEFAULT_COW,
-        pack_file,
-        DEFAULT_S_DATA_FILE,
-        None,
-        None,
-    )
+    create2(pack_path, DEFAULT_COW, pack_file, DEFAULT_S_DATA_FILE, None, None)
 }
 
 fn create2<P: AsRef<Path>>(
@@ -983,7 +1005,7 @@ fn create2<P: AsRef<Path>>(
     pack_file: File,
     s_manifest_file: bool,
     manifest_file: Option<File>,
-    write_lock_file: Option<File>,
+    write_lock_file: Option<File>
 ) -> WBFPManager {
     WBFPManager::new(
         pack_path,
@@ -1008,6 +1030,6 @@ fn create2<P: AsRef<Path>>(
         },
         pack_file,
         s_manifest_file,
-        write_lock_file,
+        write_lock_file
     )
 }

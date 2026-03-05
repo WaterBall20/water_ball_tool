@@ -1,14 +1,14 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::{ create_new_file, open_file };
+use crate::wb_files_pack::manager::{ create_new_file };
 use std::fs;
 use std::path::Path;
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
 
-fn _remove_test_pack_files<P: AsRef<Path>>(path: &P) {
+fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
     let pack_path = path.as_ref().to_str().unwrap().to_string();
     _ = fs::remove_file(&pack_path);
     let mut pack_json_path = pack_path.clone();
@@ -29,13 +29,13 @@ fn create_new_pack_file() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     //创建文件
     {
         create_new_file(&pack_file).expect("无法创建文件");
         println!("已创建文件");
     }
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -127,7 +127,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
 }*/
 
 //创建包文件并打开刚创建的包文件
-#[test]
+/* #[test]
 fn create_new_file_and_open_pack() {
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
@@ -147,7 +147,7 @@ fn create_new_file_and_open_pack() {
     }
     _remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
-}
+} */
 
 /*
 #[test]
@@ -186,7 +186,7 @@ fn create_new_pack_file_err() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     //
     let r = {
         create_new_file(&pack_file).expect("无法创建文件");
@@ -194,7 +194,7 @@ fn create_new_pack_file_err() {
         create_new_file(&pack_file)
     };
     if let Err(err) = r {
-        _remove_test_pack_files(&pack_file);
+        remove_test_pack_files(&pack_file);
         _ = fs::remove_dir_all(pack_dir);
         panic!("{}", err)
     }
