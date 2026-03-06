@@ -34,7 +34,7 @@ fn pack_struct_to_bytes_vec_and_load() {
         pack_file_metadata: None,
     });
     let data = ps.to_bytes_vec();
-    let ps_load = PackStruct::load(0, &data).unwrap();
+    let ps_load = PackStruct::load(0, &data, ManifestDataBlock::default()).unwrap();
     assert_eq!(ps, ps_load);
 }
 #[test]
@@ -52,8 +52,8 @@ fn pack_struct_item_to_bytes_vec_and_load() {
 
 #[test]
 fn pack_file_metadata_file_to_bytes_vec_and_load() {
-    let mut pfm = PackFileMetadata {
-        data_len: 0,
+    let pfm = PackFileMetadata {
+        data_block: ManifestDataBlock::default(),
         cow: true,
         len: 53124,
         modified: 5715,
@@ -61,32 +61,32 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
             hash_type: 0,
             hash: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
             data_pos_list: DataPosList {
-                data_len: 0,
+                data_block: None,
                 list: vec![(0, 100), (10, 1), (223, 5890)],
             },
         }),
     };
     let data = pfm.to_bytes_vec();
-    let pfm_load = PackFileMetadata::load(&data).unwrap();
+    let pfm_load = PackFileMetadata::load(&data, ManifestDataBlock::default()).unwrap();
     assert_eq!(pfm, pfm_load);
 }
 #[test]
 fn pack_file_metadata_dir_to_bytes_vec_and_load() {
-    let mut pfm = PackFileMetadata {
-        data_len: 0,
+    let pfm = PackFileMetadata {
+        data_block: ManifestDataBlock::default(),
         cow: true,
         len: 52035,
         modified: 294,
         file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
     };
     let data = pfm.to_bytes_vec();
-    let pfm_load = PackFileMetadata::load(&data).unwrap();
+    let pfm_load = PackFileMetadata::load(&data, ManifestDataBlock::default()).unwrap();
     assert_eq!(pfm, pfm_load);
 }
 
 #[test]
 fn pack_file_metadata_data_block_save_and_load() {
-    let mut a = Attribute::default();
+    let a = Attribute::default();
     let a_data = a.to_bytes_vec();
     let mut data_block = vec![0u8; ManifestDataBlock::get_block_len_us(a_data.len())];
     //Save
@@ -96,7 +96,7 @@ fn pack_file_metadata_data_block_save_and_load() {
     let a_load = Attribute::load(save_load_data).unwrap();
     assert_eq!(a, a_load);
     //Save2
-    let mut b = Attribute {
+    let b = Attribute {
         cow: true,
         root_struct_pos: 231,
         empty_data_pos_list_pos: 255,

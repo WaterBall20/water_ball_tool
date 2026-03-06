@@ -334,6 +334,16 @@ impl DataPosList {
         }
         data
     }
+
+    fn update_get_block_data(&mut self) -> Option<Vec<u8>> {
+        let up_data = self.to_bytes_vec();
+        if let Some(data_block) = &mut self.data_block {
+            data_block.update(&up_data);
+            Some(data_block.get_block_data().to_vec())
+        } else {
+            None
+        }
+    }
 }
 
 static PACK_STRUCT_DATA_LEN_LEN: usize = 8;
@@ -429,6 +439,13 @@ impl PackStruct {
             data.push(items_datum);
         }
         data
+    }
+
+    fn get_data_block_data(&mut self) -> Vec<u8> {
+        let updata = self.to_bytes_vec();
+        let data_block = &mut self.run_data.data_block;
+        data_block.update(&updata);
+        data_block.get_block_data().to_vec()
     }
 }
 //长度
@@ -638,7 +655,7 @@ static PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
 
 #[derive(PartialEq, Debug)]
 pub struct PackFileMetadata {
-    //数据长度
+    //数据块
     data_block: ManifestDataBlock,
     //写时复制
     cow: bool,
@@ -751,6 +768,13 @@ impl PackFileMetadata {
         //更新大小
         data
     }
+
+    fn get_block_data(&mut self) -> &[u8] {
+        let up_data = self.to_bytes_vec();
+        let data_block = &mut self.data_block;
+        data_block.update(&up_data);
+        data_block.get_block_data()
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -790,7 +814,7 @@ impl PackFileMetadataFile {
                 PACK_METADATA_FILE_HASH_INDEX..PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize)
             ].to_vec();
         let data_pos_list_count_index = PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize);
-        let data_pos_list = DataPosList::load(&data[data_pos_list_count_index..]);
+        let data_pos_list = DataPosList::load(&data[data_pos_list_count_index..], None);
         Ok(Self {
             hash_type,
             hash,
@@ -902,11 +926,27 @@ impl ManifestDataBlock {
         Ok(Self { run_block_data })
     }
 
+    fn get_block_data(&self) -> &[u8] {
+        &self.run_block_data
+    }
+
+    fn get_this_data_len(&self) -> u64 {
+        Self::get_data_len(&self.run_block_data)
+    }
+
     fn get_data_len(data: &[u8]) -> u64 {
         u64::from_le_bytes(data[..MANIFEST_DATA_BLOCK_DATA_LEN_LEN].try_into().unwrap())
     }
 
-    fn get_load_len(data: &[u8]) -> io::Result<u64> {
+    fn get_this_block_len_u64(&self) -> u64 {
+        self.run_block_data.len() as u64
+    }
+
+    fn get_this_block_len_us(&self) -> usize {
+        self.run_block_data.len()
+    }
+
+    fn get_block_len(data: &[u8]) -> io::Result<u64> {
         if data.len() < MANIFEST_DATA_BLOCK_DATA_LEN_LEN {
             Err(Error::other("提供的数据不完整"))
         } else {
@@ -917,6 +957,17 @@ impl ManifestDataBlock {
                 MANIFEST_DATA_BLOCK_DATA_VER_LEN;
             //2倍4k对齐大小计算
             Ok(u64::try_from((data_len / DATA_BLOCK_LEN) * DATA_BLOCK_LEN * 2).unwrap())
+        }
+    }
+
+    fn get_this_ver(&self) -> u32 {
+        let block_len_2 = self.get_this_block_len_us() / 2;
+        let a_ver = Self::get_ver(&self.run_block_data[..block_len_2]).unwrap();
+        let b_ver = Self::get_ver(&self.run_block_data[block_len_2..]).unwrap();
+        if a_ver > b_ver {
+            a_ver
+        } else {
+            b_ver
         }
     }
 
@@ -937,6 +988,10 @@ impl ManifestDataBlock {
         } else {
             Err(Error::other("快速完整性验证失败"))
         }
+    }
+
+    fn get_this_data(&self) -> &[u8] {
+        Self::get_data(&self.run_block_data).unwrap()
     }
 
     fn get_data(data: &[u8]) -> io::Result<&[u8]> {
@@ -991,45 +1046,63 @@ impl ManifestDataBlock {
         }
     }
 
+    fn update(&mut self, data: &[u8]) {
+        let block_len = Self::get_block_len_us(data.len());
+        let this_len = self.get_this_block_len_us();
+        if block_len == this_len {
+            Self::save_data_to_block_data2(data, &mut self.run_block_data, block_len).unwrap();
+        } else {
+            let new_block_add_len = (block_len as isize) - (this_len as isize);
+            if new_block_add_len > 0 {
+                //附加
+                for _ in 0..new_block_add_len {
+                    self.run_block_data.push(0);
+                }
+            } else {
+                //减少
+                let new_block_add_len = -new_block_add_len;
+                for _ in 0..new_block_add_len {
+                    self.run_block_data.pop();
+                }
+            }
+            Self::save_data_to_block_data_new2(data, &mut self.run_block_data, block_len);
+        }
+    }
+
     fn save_data_to_block_data(data: &[u8], block_data: &mut [u8]) -> io::Result<()> {
         //大小检查
         let block_len = Self::get_block_len_us(data.len());
-        let block_len_2 = block_len / 2;
         if block_data.len() == block_len {
-            let a_block_data = &block_data[..block_len_2];
-            let b_block_data = &block_data[block_len_2..];
-            //获取A/B版本
-            let a_data_ver = Self::get_ver(a_block_data);
-            let a_err = a_data_ver.is_err();
-            let b_data_ver = Self::get_ver(b_block_data);
-            let b_err = b_data_ver.is_err();
-            //
-            if !a_err && !b_err {
-                let a_data_ver = a_data_ver.unwrap();
-                let b_data_ver = b_data_ver.unwrap();
-                if a_data_ver < b_data_ver {
-                    //更新A
-                    Self::save_data_to_ab_block_data(
-                        data,
-                        &mut block_data[..block_len_2],
-                        b_data_ver + 1
-                    );
-                    Ok(())
-                } else {
-                    //更新B
-                    Self::save_data_to_ab_block_data(
-                        data,
-                        &mut block_data[block_len_2..],
-                        a_data_ver + 1
-                    );
-                    Ok(())
-                }
-            } else if a_err {
+            Self::save_data_to_block_data2(data, block_data, block_len)
+        } else {
+            Err(Error::other("提供的缓冲区的大小和需要的块大小不一致"))
+        }
+    }
+
+    fn save_data_to_block_data2(
+        data: &[u8],
+        block_data: &mut [u8],
+        block_len: usize
+    ) -> io::Result<()> {
+        let block_len_2 = block_len / 2;
+
+        let a_block_data = &block_data[..block_len_2];
+        let b_block_data = &block_data[block_len_2..];
+        //获取A/B版本
+        let a_data_ver = Self::get_ver(a_block_data);
+        let a_err = a_data_ver.is_err();
+        let b_data_ver = Self::get_ver(b_block_data);
+        let b_err = b_data_ver.is_err();
+        //
+        if !a_err && !b_err {
+            let a_data_ver = a_data_ver.unwrap();
+            let b_data_ver = b_data_ver.unwrap();
+            if a_data_ver < b_data_ver {
                 //更新A
                 Self::save_data_to_ab_block_data(
                     data,
                     &mut block_data[..block_len_2],
-                    b_data_ver? + 1
+                    b_data_ver + 1
                 );
                 Ok(())
             } else {
@@ -1037,12 +1110,18 @@ impl ManifestDataBlock {
                 Self::save_data_to_ab_block_data(
                     data,
                     &mut block_data[block_len_2..],
-                    a_data_ver? + 1
+                    a_data_ver + 1
                 );
                 Ok(())
             }
+        } else if a_err {
+            //更新A
+            Self::save_data_to_ab_block_data(data, &mut block_data[..block_len_2], b_data_ver? + 1);
+            Ok(())
         } else {
-            Err(Error::other("提供的缓冲区的大小和需要的块大小不一致"))
+            //更新B
+            Self::save_data_to_ab_block_data(data, &mut block_data[block_len_2..], a_data_ver? + 1);
+            Ok(())
         }
     }
 
@@ -1050,11 +1129,13 @@ impl ManifestDataBlock {
         //大小检查
         let block_len = Self::get_block_len_us(data.len());
         if block_data.len() == block_len {
-            Self::save_data_to_ab_block_data(data, &mut block_data[..block_len / 2], 1);
-            Ok(())
+            Ok(Self::save_data_to_block_data_new2(data, block_data, block_len))
         } else {
             Err(Error::other("提供的块数据缓冲区大小和所需大小不一致"))
         }
+    }
+    fn save_data_to_block_data_new2(data: &[u8], block_data: &mut [u8], block_len: usize) {
+        Self::save_data_to_ab_block_data(data, &mut block_data[..block_len / 2], 1);
     }
 
     fn save_data_to_ab_block_data(data: &[u8], ab_block_data: &mut [u8], var: u32) {

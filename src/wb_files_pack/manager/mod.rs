@@ -201,9 +201,7 @@ impl WBFPManager {
     }
 
     fn init_save_root_pack_struct(&mut self) -> io::Result<()> {
-        let data = self.manifest.root_struct.to_bytes_vec();
-        let mut block_data = vec![0; DATA_BLOCK_LEN];
-        ManifestDataBlock::save_data_to_block_data_new(&data, &mut block_data)?;
+        let block_data  =self.manifest.root_struct.get_data_block_data();
         if self.s_manifest_file {
             let (pos, _) = self.get_manifest_file_pos(DATA_BLOCK_LEN as u64)?;
             self.set_manifest_file_pos(pos)?;
@@ -219,9 +217,7 @@ impl WBFPManager {
     }
 
     fn init_save_empty_data_list(&mut self) -> io::Result<()> {
-        let data = self.manifest.attribute.to_bytes_vec();
-        let mut block_data = vec![0; DATA_BLOCK_LEN];
-        ManifestDataBlock::save_data_to_block_data_new(&data, &mut block_data)?;
+        let block_data = self.manifest.empty_data_list.update_get_block_data().unwrap();
         if self.s_manifest_file {
             let (pos, _) = self.get_manifest_file_pos(DATA_BLOCK_LEN as u64)?;
             self.set_manifest_file_pos(pos)?;
@@ -429,7 +425,7 @@ impl WBFPManager {
     //保存所有数据
     fn save_and_up_all(&mut self) -> io::Result<()> {
         self.save_pack_length()?;
-        self.save_manifest()?;
+        //self.save_manifest()?;
         Ok(())
     }
 
@@ -452,7 +448,8 @@ impl WBFPManager {
     //保存结构
     fn save_pack_struct_and_metadata(&mut self) -> io::Result<()> {
         //TODO:未完成递归
-        //保存根结构
+        todo!()
+        /* //保存根结构
         //当前位置
         let pos = self.manifest.attribute.root_struct_pos;
         //当前数据大小
@@ -467,7 +464,7 @@ impl WBFPManager {
         self.manifest.attribute.root_struct_pos = new_pos;
         self.manifest.root_struct.run_data.data_len = new_len;
         self.manifest.root_struct.run_data.this_file_pos = new_pos;
-        Ok(())
+        Ok(()) */
     }
 
     fn save_pack_struct_write(
@@ -475,7 +472,8 @@ impl WBFPManager {
         pack_struct: PackStruct,
         this_pos: u64
     ) -> io::Result<(u64, u64)> {
-        //当前大小
+        todo!()
+        /* //当前大小
         let this_len = pack_struct.run_data.data_len;
         //转换数据
         let data = pack_struct.to_bytes_vec();
@@ -500,7 +498,7 @@ impl WBFPManager {
             //提交垃圾回收
             self.file_gc_add(vec![(this_pos, this_len)]);
             Ok((pos, len))
-        }
+        } */
     }
 
     /*fn s_pack_struct(&mut self, pack_struct: &mut PackStruct, pack_struct_pos: u64) -> io::Result<
@@ -536,7 +534,8 @@ impl WBFPManager {
 
     //保存空数据位置列表
     fn save_empty_data_pos_list(&mut self) -> io::Result<()> {
-        //保存前GC处理
+        todo!()
+        /* //保存前GC处理
         self.file_gc();
         //当前文件位置
         let this_pos = self.manifest.attribute.empty_data_pos_list_pos;
@@ -573,7 +572,7 @@ impl WBFPManager {
             //GC处理
             self.file_gc();
             Ok(())
-        }
+        } */
     }
     //保存
 
@@ -1031,7 +1030,10 @@ fn create2<P: AsRef<Path>>(
                 ..Attribute::default()
             },
             root_struct: PackStruct::default(),
-            empty_data_list: DataPosList::default(),
+            empty_data_list: DataPosList {
+                data_block: Some(ManifestDataBlock::default()),
+                list: Vec::new()
+            },
             this_empty_data_list: if s_manifest_file {
                 Some(DataPosList::default())
             } else {
