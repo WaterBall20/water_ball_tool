@@ -335,11 +335,11 @@ impl DataPosList {
         data
     }
 
-    fn update_get_block_data(&mut self) -> Option<Vec<u8>> {
+    fn update_get_block_data(&mut self) -> Option<(Vec<u8>, bool)> {
         let up_data = self.to_bytes_vec();
         if let Some(data_block) = &mut self.data_block {
-            data_block.update(&up_data);
-            Some(data_block.get_block_data().to_vec())
+            let new_block = data_block.update(&up_data);
+            Some((data_block.get_block_data().to_vec(), new_block))
         } else {
             None
         }
@@ -441,11 +441,11 @@ impl PackStruct {
         data
     }
 
-    fn get_data_block_data(&mut self) -> Vec<u8> {
+    fn get_block_data(&mut self) -> (Vec<u8>, bool) {
         let updata = self.to_bytes_vec();
         let data_block = &mut self.run_data.data_block;
-        data_block.update(&updata);
-        data_block.get_block_data().to_vec()
+        let new_block = data_block.update(&updata);
+        (data_block.get_block_data().to_vec(), new_block)
     }
 }
 //长度
@@ -475,6 +475,15 @@ pub struct PackStructItem {
     pack_file_metadata: Option<PackFileMetadata>,
 } //包结构项
 impl PackStructItem {
+    fn get_empty() -> Self {
+        Self {
+            name: String::new(),
+            metadata_file_pos: 0,
+            item_type: PackStructItemType::File,
+            pack_file_metadata: None,
+        }
+    }
+
     pub fn name(&self) -> &String {
         &self.name
     }
@@ -667,6 +676,19 @@ pub struct PackFileMetadata {
     file_type: PackFileMetadataType,
 } //包文件元数据
 impl PackFileMetadata {
+    fn get_empty() -> Self {
+        Self {
+            data_block: ManifestDataBlock::default(),
+            cow: false,
+            len: 0,
+            modified: 0,
+            file_type: PackFileMetadataType::Dir(PackFileMetadataDir {
+                file_count: 0,
+                dir_count: 0,
+            }),
+        }
+    }
+
     pub fn cow(&self) -> bool {
         self.cow
     }
@@ -769,11 +791,11 @@ impl PackFileMetadata {
         data
     }
 
-    fn get_block_data(&mut self) -> &[u8] {
+    fn get_block_data(&mut self) -> (Vec<u8>, bool) {
         let up_data = self.to_bytes_vec();
         let data_block = &mut self.data_block;
-        data_block.update(&up_data);
-        data_block.get_block_data()
+        let new_block = data_block.update(&up_data);
+        (data_block.get_block_data().to_vec(), new_block)
     }
 }
 
@@ -908,22 +930,24 @@ static MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
 */
 #[derive(Default, Debug, PartialEq)]
 struct ManifestDataBlock {
+    block_file_pos: u64,
     run_block_data: Vec<u8>,
 }
 impl Clone for ManifestDataBlock {
     fn clone(&self) -> Self {
         Self {
+            block_file_pos: self.block_file_pos,
             run_block_data: Vec::new(),
         }
     }
 }
 
 impl ManifestDataBlock {
-    fn from_new(data: &[u8]) -> io::Result<Self> {
+    fn from_new(data: &[u8], block_file_pos: u64) -> io::Result<Self> {
         let block_len = Self::get_block_len_us(data.len());
         let mut run_block_data = vec![0; block_len];
         Self::save_data_to_block_data_new(data, &mut run_block_data)?;
-        Ok(Self { run_block_data })
+        Ok(Self { run_block_data, block_file_pos })
     }
 
     fn get_block_data(&self) -> &[u8] {
@@ -1046,11 +1070,12 @@ impl ManifestDataBlock {
         }
     }
 
-    fn update(&mut self, data: &[u8]) {
+    fn update(&mut self, data: &[u8]) -> bool {
         let block_len = Self::get_block_len_us(data.len());
         let this_len = self.get_this_block_len_us();
         if block_len == this_len {
             Self::save_data_to_block_data2(data, &mut self.run_block_data, block_len).unwrap();
+            false
         } else {
             let new_block_add_len = (block_len as isize) - (this_len as isize);
             if new_block_add_len > 0 {
@@ -1066,6 +1091,7 @@ impl ManifestDataBlock {
                 }
             }
             Self::save_data_to_block_data_new2(data, &mut self.run_block_data, block_len);
+            true
         }
     }
 

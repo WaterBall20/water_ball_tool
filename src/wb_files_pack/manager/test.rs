@@ -39,6 +39,28 @@ fn create_new_pack_file() {
     _ = fs::remove_dir_all(pack_dir);
 }
 
+//创建文件并创建虚拟目录
+#[test]
+fn create_new_pack_file_and_create_dir() {
+    //测试目录
+    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
+    pack_dir.push_str("/create_new_file_and_create_dir");
+    let pack_dir: &Path = pack_dir.as_ref();
+    fs::create_dir_all(pack_dir).unwrap();
+    let pack_file = pack_dir.join("pack");
+    remove_test_pack_files(&pack_file);
+    //创建文件
+    {
+        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let test_pack_path = "Test/Test2";
+        pack.create_dir(test_pack_path).expect("创建虚假目录失败");
+        pack.get_dir(test_pack_path).expect("获取虚拟目录失败");
+        println!("已创建文件");
+    }
+    remove_test_pack_files(&pack_file);
+    _ = fs::remove_dir_all(pack_dir);
+}
+
 //创建包文件同时创建虚拟文件并测试读写
 /*
 #[test]
