@@ -4,7 +4,7 @@
 use super::WBFPManager;
 use crate::wb_files_pack::DataPosList;
 use std::io;
-use std::io::{Error, Read, Seek, SeekFrom, Write};
+use std::io::{ Error, Read, Seek, SeekFrom, Write };
 
 pub struct PackFileWR<'a> {
     //管理器实例
@@ -12,7 +12,7 @@ pub struct PackFileWR<'a> {
     //文件位置
     file_pos: u64,
     //文件分配的位置
-    file_pos_list: &'a mut DataPosList,
+    file_pos_list: DataPosList,
     //缓存_文件分配的位置当前索引
     temp_pos_index: usize,
     //缓存_文件分配的当前位置已占用大小
@@ -21,7 +21,7 @@ pub struct PackFileWR<'a> {
 impl PackFileWR<'_> {
     pub(in crate::wb_files_pack) fn new<'a>(
         manager: &'a mut WBFPManager,
-        file_pos_list: &'a mut DataPosList,
+        file_pos_list: DataPosList
     ) -> PackFileWR<'a> {
         PackFileWR {
             manager,
@@ -39,19 +39,14 @@ impl PackFileWR<'_> {
 
     //获取追加位置列表
     fn get_add_pos_s(&self, add_pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
-        self.get_add_pos_s2(
-            self.temp_pos_index,
-            self.temp_pos_this_len,
-            add_pos,
-            is_read,
-        )
+        self.get_add_pos_s2(self.temp_pos_index, self.temp_pos_this_len, add_pos, is_read)
     }
     fn get_add_pos_s2(
         &self,
         start_pos_index: usize,
         start_pos_len: u64,
         add_pos: u64,
-        is_read: bool,
+        is_read: bool
     ) -> io::Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
@@ -66,18 +61,17 @@ impl PackFileWR<'_> {
                 len -= start_pos_len;
             }
             //计算
-            if (add_pos - m_add_len) <= len {
+            if add_pos - m_add_len <= len {
                 //小于等于直接添加并直接返回
                 r_pos.push((pos, add_pos));
                 return Ok(r_pos);
-            } else {
-                //大于就添加完所有空闲块
-                r_pos.push((pos, len));
-                //增值
-                m_add_len += len;
-                //附加索引
-                pos_index += 1
             }
+            //大于就添加完所有空闲块
+            r_pos.push((pos, len));
+            //增值
+            m_add_len += len;
+            //附加索引
+            pos_index += 1;
         }
         if is_read {
             Ok(r_pos)
@@ -111,9 +105,10 @@ impl PackFileWR<'_> {
     //追加文件位置
     fn add_pos(&mut self, length: u64) -> io::Result<()> {
         //获取需要添加的块列表
-        self.add_pos2(length, self.get_add_pos_s(length, false)?)
+        self.add_pos2(length, self.get_add_pos_s(length, false)?);
+        Ok(())
     }
-    fn add_pos2(&mut self, length: u64, add_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
+    fn add_pos2(&mut self, length: u64, add_pos_s: Vec<(u64, u64)>) {
         //需要添加的索引数
         let add_pos_index = add_pos_s.len() - 1;
         //缓存_当前块添加的大小
@@ -129,7 +124,6 @@ impl PackFileWR<'_> {
         }
         //更新位置
         self.file_pos += length;
-        Ok(())
     }
 
     //减少文件位置
@@ -138,12 +132,12 @@ impl PackFileWR<'_> {
     }
     fn sub_pos2(&mut self, length: u64, _sub_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
         //TODO：暂时使用从头计算，可能存在性能损失，部分功能未实现
-        let r_pos = self.file_pos as i64 - length as i64;
+        let r_pos = self.file_pos.cast_signed() - length.cast_signed();
         if r_pos < 0 {
             self.set_pos(0)?;
             Ok(())
         } else {
-            self.set_pos(r_pos as u64)?;
+            self.set_pos(r_pos.cast_unsigned())?;
             Ok(())
         }
     }
@@ -156,27 +150,29 @@ impl Seek for PackFileWR<'_> {
                 self.set_pos(pos)?;
                 Ok(pos)
             }
-            SeekFrom::Current(pos) => {
-                if pos == 0 {
-                    Ok(self.file_pos)
-                } else if pos > 0 {
-                    self.add_pos(pos as u64)?;
-                    Ok(self.file_pos)
-                } else {
-                    self.sub_pos(-pos as u64)?;
-                    Ok(self.file_pos)
+            SeekFrom::Current(pos) =>
+                match pos {
+                    0 => { Ok(self.file_pos) }
+                    //大于0
+                    1.. => {
+                        self.add_pos(pos.cast_unsigned())?;
+                        Ok(self.file_pos)
+                    }
+                    //小于0
+                    ..0 => {
+                        self.sub_pos((-pos).cast_unsigned())?;
+                        Ok(self.file_pos)
+                    }
                 }
-            }
-            SeekFrom::End(pos) => {
-                if pos == 0 {
-                    Ok(self.file_pos)
-                } else if pos < 0 {
-                    self.sub_pos(-pos as u64)?;
-                    Ok(self.file_pos)
-                } else {
-                    Err(Error::other("未实现动态扩容"))
+            SeekFrom::End(pos) =>
+                match pos {
+                    0 => { Ok(self.file_pos) }
+                    1.. => {
+                        self.sub_pos((-pos).cast_unsigned())?;
+                        Ok(self.file_pos)
+                    }
+                    ..0 => { Err(Error::other("未实现动态扩容")) }
                 }
-            }
         }
     }
 }
@@ -189,10 +185,10 @@ impl Read for PackFileWR<'_> {
         let mut read_len = 0;
         //读取
         for (pos, len) in pos_s {
-            let len = len as usize;
-            let this_buf = &mut buf[read_len..(read_len + len)];
+            let len = usize::try_from(len).unwrap();
+            let this_buf = &mut buf[read_len..read_len + len];
             //更改文件位置
-            self.manager.set_pack_file_pos(pos)?;
+            self.manager.set_pack_file_pos_read(pos)?;
             //读取数据
             self.manager.pack_file_read_root(this_buf)?;
             read_len += len;
@@ -211,10 +207,10 @@ impl Write for PackFileWR<'_> {
         let mut write_len = 0;
         //写入
         for (pos, len) in pos_s {
-            let len = len as usize;
-            let this_data = &buf[write_len..(write_len + len)];
+            let len = usize::try_from(len).unwrap();
+            let this_data = &buf[write_len..write_len + len];
             //更改文件位置
-            self.manager.set_pack_file_pos(pos)?;
+            self.manager.set_pack_file_pos_write(pos)?;
             //写入数据
             self.manager.pack_file_write_root(this_data)?;
             write_len += len;

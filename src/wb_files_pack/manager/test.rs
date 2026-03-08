@@ -1,8 +1,9 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::{ create_new_file };
+use crate::wb_files_pack::manager::{ create_new_file, create_new_file2 };
 use std::fs;
+use std::io::{ Read, Seek, SeekFrom, Write };
 use std::path::Path;
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
@@ -53,7 +54,7 @@ fn create_new_pack_file_and_create_dir() {
     {
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         let test_pack_path = "Test/Test2";
-        pack.create_dir(test_pack_path).expect("创建虚假目录失败");
+        pack.create_dir_all(test_pack_path).expect("创建虚假目录失败");
         pack.get_dir(test_pack_path).expect("获取虚拟目录失败");
         println!("已创建文件");
     }
@@ -62,9 +63,10 @@ fn create_new_pack_file_and_create_dir() {
 }
 
 //创建包文件同时创建虚拟文件并测试读写
-/*
+
 #[test]
 fn create_new_pack_file_and_create_file_wr() {
+    const LENGTH: usize = 10;
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
     pack_dir.push_str("/create_new_pack_file_and_create_file_wr");
@@ -72,40 +74,36 @@ fn create_new_pack_file_and_create_file_wr() {
     fs::create_dir_all(pack_dir).unwrap();
     //测试文件
     let pack_file = pack_dir.join("pack");
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         let modified_time = 0;
-        const LENGTH: usize = 10;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw2 = pack
-            .create_file_new(&"Test/Test1", modified_time, LENGTH as u64)
-            .unwrap();
-        rw2.write(&mut pack, &write_data1[..]).unwrap();
+        let mut rw2 = pack.create_file_new("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        _ = rw2.write(&write_data1[..]).unwrap();
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
-        rw2.read(&mut pack, &mut read_data1[..]).unwrap();
+        _ = rw2.read(&mut read_data1[..]).unwrap();
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack
-            .create_file_new(&"Test/Test2", modified_time, LENGTH as u64)
-            .unwrap();
-        rw2.write(&mut pack, &write_data2[..]).unwrap();
+        let mut rw2 = pack.create_file_new("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        _ = rw2.write(&write_data2[..]).unwrap();
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
-        rw2.read(&mut pack, &mut read_data2[..]).unwrap();
+        _ = rw2.read(&mut read_data2[..]).unwrap();
         assert_eq!(write_data2, read_data2);
         assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
 //创建包文化并写入虚拟文件，不分离数据文件
 #[test]
 fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
+    const LENGTH: usize = 10;
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
     pack_dir.push_str("/create_new_pack_file_no_s_data_file_and_create_file_wr");
@@ -113,40 +111,35 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
     fs::create_dir_all(pack_dir).unwrap();
     //测试文件
     let pack_file = pack_dir.join("pack");
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = create_new_file2(&pack_file, false, false).expect("无法创建文件");
         let modified_time = 0;
-        const LENGTH: usize = 10;
+        //file1
         //w
-        //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw1 = pack
-            .create_file_new(&"Test/Test1", modified_time, LENGTH as u64)
-            .unwrap();
-        rw1.write(&mut pack, &write_data1[..]).unwrap();
-        //file2
-        let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack
-            .create_file_new(&"Test/Test2", modified_time, LENGTH as u64)
-            .unwrap();
-        rw2.write(&mut pack, &write_data2[..]).unwrap();
+        let mut rw1 = pack.create_file_new("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        _ = rw1.write(&write_data1[..]).unwrap();
         //r
-        //file1
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw1.seek(SeekFrom::Start(0)).unwrap();
-        rw1.read(&pack, &mut read_data1[..]).unwrap();
+        _ = rw1.read(&mut read_data1[..]).unwrap();
         //file2
+        //w
+        let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
+        let mut rw2 = pack.create_file_new("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        _ = rw2.write(&write_data2[..]).unwrap();
+        //r
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
-        rw2.read(&pack, &mut read_data2[..]).unwrap();
+        _ = rw2.read(&mut read_data2[..]).unwrap();
         assert_eq!(write_data2, read_data2);
         assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    _remove_test_pack_files(&pack_file);
+    remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
-}*/
+}
 
 //创建包文件并打开刚创建的包文件
 /* #[test]

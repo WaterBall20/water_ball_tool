@@ -109,18 +109,12 @@ pub struct FileFinder;
 
 impl FileFinder {
     fn get_file_name(path_buf: &PathBuf) -> Option<&str> {
-        match path_buf.file_name() {
-            Some(name) => match name.to_str() {
-                Some(name) => Some(name),
-                None => {
-                    warn!("无法将OsStr:{name:?} 转换成Str");
-                    None
-                }
-            },
-            None => {
-                warn!("目录:（{path_buf:?}）无法获取文件名。");
-                None
-            }
+        if let Some(name) = path_buf.file_name() { if let Some(name) = name.to_str() { Some(name) } else {
+            warn!("无法将OsStr:{name:?} 转换成Str");
+            None
+        } } else {
+            warn!("目录:（{path_buf:?}）无法获取文件名。");
+            None
         }
     }
     fn get_file_modified(metadata: &Metadata) -> u128 {
@@ -166,7 +160,7 @@ impl FileFinder {
             } else if path_buf.is_file() {
                 file_count += 1;
                 if let Some(ref mut cb) = callback {
-                    cb(1, 0)
+                    cb(1, 0);
                 }
                 //文件
                 let name = Self::get_file_name(&path_buf);
@@ -204,9 +198,9 @@ impl FileFinder {
                     {
                         //判断链接的目标路径是否为父路径
                         if path.starts_with(link_path)
-                            || (link_path.starts_with(".") && link_path.ends_with("."))
+                            || (link_path.starts_with('.') && link_path.ends_with('.'))
                         {
-                            warn!(r#"检测到符号链接循环，已跳过:"{path}" 链接到 “{link_path}"#);
+                            warn!(r#"检测到符号链接循环，已跳过:"{path}" 链接到 "{link_path}""#);
                             continue;
                         }
                     }
@@ -219,7 +213,7 @@ impl FileFinder {
                         Ok(metadata) => {
                             dir_count += 1;
                             if let Some(ref mut cb) = callback {
-                                cb(0, 1)
+                                cb(0, 1);
                             }
                             let mut files_list = HashMap::new();
                             let modified_time = Self::get_file_modified(&metadata);
@@ -253,7 +247,7 @@ impl FileFinder {
                     }
                 }
             } else if path_buf.is_symlink() {
-                warn!("符号链接 {path_buf:?} 已断。")
+                warn!("符号链接 {path_buf:?} 已断。");
             } else {
                 error!(" {path_buf:?} 无法访问");
             }

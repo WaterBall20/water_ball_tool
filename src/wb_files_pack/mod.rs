@@ -8,7 +8,7 @@ mod test;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::{ clone, io };
+use std::{ clone, io, u16 };
 use std::io::Error;
 
 //当前解析器版本
@@ -259,7 +259,7 @@ impl Attribute {
 
 static DATA_POS_LIST_COUNT_LEN: usize = 8;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 struct DataPosList {
     data_block: Option<ManifestDataBlock>,
     list: Vec<(u64, u64)>,
@@ -297,8 +297,8 @@ impl DataPosList {
             list.push((pos, len));
         }
         Self {
-            list,
             data_block,
+            list,
         }
     }
 
@@ -348,7 +348,7 @@ impl DataPosList {
 
 static PACK_STRUCT_DATA_LEN_LEN: usize = 8;
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct PackStruct {
     //结构项列表
     items: HashMap<String, PackStructItem>,
@@ -463,7 +463,7 @@ static PACK_STRUCT_ITEM_NAME_INDEX: usize =
 //虚拟文件元数据的文件指针位置
 static PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN: usize = 8;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct PackStructItem {
     //名称
     name: String,
@@ -567,7 +567,7 @@ impl PackStructItem {
         //类型
         data.push(type_data.0);
         //名称长度
-        for to_le_byte in (name_len as u16).to_le_bytes() {
+        for to_le_byte in u16::try_from(name_len).unwrap().to_le_bytes() {
             data.push(to_le_byte);
         }
         //名称
@@ -586,7 +586,7 @@ impl PackStructItem {
     }
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub enum PackStructItemType {
     #[default]
     File,
@@ -603,7 +603,7 @@ impl PackStructItemType {
 
 static PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN: usize = 8;
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct PackStructItemDir {
     //结构的文件指针位置
     struct_file_pos: u64,
@@ -662,7 +662,7 @@ static PACK_FILE_METADATA_MODIFIED_LEM: usize = 16;
 static PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
     PACK_FILE_METADATA_MODIFIED_INDEX + PACK_FILE_METADATA_MODIFIED_LEM;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct PackFileMetadata {
     //数据块
     data_block: ManifestDataBlock,
@@ -734,7 +734,7 @@ impl PackFileMetadata {
         );
         let type_data = &data[PACK_FILE_METADATA_TYPE_DATA_INDEX..];
         let file_type = match this_type {
-            0 => PackFileMetadataType::File(PackFileMetadataFile::load(type_data)?),
+            0 => PackFileMetadataType::File(PackFileMetadataFile::load(type_data)),
             1 => PackFileMetadataType::Dir(PackFileMetadataDir::load(type_data)?),
             _ => Err(Error::other("未知类型"))?,
         };
@@ -742,8 +742,8 @@ impl PackFileMetadata {
         Ok(Self {
             data_block,
             cow,
-            modified,
             len,
+            modified,
             file_type,
         })
     }
@@ -799,7 +799,7 @@ impl PackFileMetadata {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum PackFileMetadataType {
     File(PackFileMetadataFile),
     Dir(PackFileMetadataDir),
@@ -818,7 +818,7 @@ static PACK_METADATA_FILE_HASH_INDEX: usize =
 //已分配数据列表数量
 static PACK_METADATA_FILE_DATA_POS_S_COUNT_LEN: usize = 8;
 
-#[derive(Default, PartialEq, Debug)]
+#[derive(Default, PartialEq, Debug, Clone)]
 pub struct PackFileMetadataFile {
     //哈希算法类型
     hash_type: u8,
@@ -828,7 +828,7 @@ pub struct PackFileMetadataFile {
     data_pos_list: DataPosList,
 } //包文件元数据文件
 impl PackFileMetadataFile {
-    fn load(data: &[u8]) -> io::Result<Self> {
+    fn load(data: &[u8]) -> Self {
         let hash_type = data[PACK_METADATA_FILE_HASH_TYPE_INDEX];
         let hash_len = data[PACK_METADATA_FILE_HASH_LEN_INDEX];
         let hash =
@@ -837,18 +837,18 @@ impl PackFileMetadataFile {
             ].to_vec();
         let data_pos_list_count_index = PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize);
         let data_pos_list = DataPosList::load(&data[data_pos_list_count_index..], None);
-        Ok(Self {
+        Self {
             hash_type,
             hash,
             data_pos_list,
-        })
+        }
     }
     fn to_bytes_vec(&self) -> Vec<u8> {
         let mut data = Vec::new();
         //哈希算法类型
         data.push(self.hash_type);
         //哈希值长度
-        let hash_len = self.hash.len() as u8;
+        let hash_len = u8::try_from(self.hash.len()).expect("哈希值长度值过大");
         data.push(hash_len);
         //哈希
         for hash in &self.hash {
@@ -869,7 +869,7 @@ static PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
 static PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
 static PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
 
-#[derive(Default, PartialEq, Debug)]
+#[derive(Default, PartialEq, Debug, Clone)]
 pub struct PackFileMetadataDir {
     file_count: u64,
     dir_count: u64,
@@ -947,7 +947,7 @@ impl ManifestDataBlock {
         let block_len = Self::get_block_len_us(data.len());
         let mut run_block_data = vec![0; block_len];
         Self::save_data_to_block_data_new(data, &mut run_block_data)?;
-        Ok(Self { run_block_data, block_file_pos })
+        Ok(Self { block_file_pos, run_block_data })
     }
 
     fn get_block_data(&self) -> &[u8] {
@@ -976,7 +976,7 @@ impl ManifestDataBlock {
         } else {
             //实际占用大小
             let data_len =
-                (Self::get_data_len(data) as usize) +
+                usize::try_from(Self::get_data_len(data)).unwrap() +
                 MANIFEST_DATA_BLOCK_DATA_LEN_LEN +
                 MANIFEST_DATA_BLOCK_DATA_VER_LEN;
             //2倍4k对齐大小计算
@@ -1077,7 +1077,7 @@ impl ManifestDataBlock {
             Self::save_data_to_block_data2(data, &mut self.run_block_data, block_len).unwrap();
             false
         } else {
-            let new_block_add_len = (block_len as isize) - (this_len as isize);
+            let new_block_add_len = block_len.cast_signed() - this_len.cast_signed();
             if new_block_add_len > 0 {
                 //附加
                 for _ in 0..new_block_add_len {
@@ -1155,7 +1155,8 @@ impl ManifestDataBlock {
         //大小检查
         let block_len = Self::get_block_len_us(data.len());
         if block_data.len() == block_len {
-            Ok(Self::save_data_to_block_data_new2(data, block_data, block_len))
+            Self::save_data_to_block_data_new2(data, block_data, block_len);
+            Ok(())
         } else {
             Err(Error::other("提供的块数据缓冲区大小和所需大小不一致"))
         }
