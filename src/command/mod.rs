@@ -11,6 +11,7 @@ use std::{fs, io};
 use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
 use water_ball_tool::wb_files_pack::manager::WBFPManager;
+use water_ball_tool::wb_files_pack::{PackFileMetadata, PackStructItem, PackStructItemType};
 //use water_ball_tool::wb_files_pack::{PackFileInfo, PackFileKind};
 
 #[cfg(test)]
@@ -100,14 +101,16 @@ fn m_search(path: &str, skip_symlink: bool, pb: &Option<ProgressBar>) -> io::Res
 pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     let arg = args.first().expect("参数不足");
     match arg.as_str() {
-        //"-s" => wbfp_s(&args[1..], mp),
+        "-s" => wbfp_s(&args[1..], mp),
         "-m" => wbfp_m(&args[1..], mp),
-        _ => panic!("未知的路由参数: {arg}\\
+        _ => panic!(
+            "未知的路由参数: {arg}\\
     提示：
         -s  :  解包文件 | <包文件路径> <输出目录>
         -m  :  打包文件 | <输入目录> <包文件路径> [-f]
                         -f  :   不分离数据到单独的文件
-"),
+"
+        ),
     }
 }
 
@@ -248,8 +251,8 @@ fn write_pack(
         };
         //尝试创建虚拟文件
         let mut out_file =
-            match pack_man.create_file_new_wr(&this_pack_path, info.modified_time(), info.length
-            ()) {
+            match pack_man.create_file_new_wr(&this_pack_path, info.modified_time(), info.length())
+            {
                 Ok(file_wr) => file_wr,
                 Err(err) => {
                     error!("无法创建虚拟文件{this_pack_path:?},将跳过，err：{err}");
@@ -331,7 +334,7 @@ fn write_pack(
     Ok(())
 }
 
-/*//水球包文件解包
+//水球包文件解包
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
     if args.len() < 2 {
@@ -351,72 +354,85 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备解包");
     info!("打开包文件");
-    let pack =
+    let mut pack =
         water_ball_tool::wb_files_pack::manager::open_file(pack_path).expect("打开包文件错误");
     //逻辑实现=== ===
     info!("开始复制数据");
-    read_pack(&pack, &pb, out_dir_path.as_ref()).expect("写入包文件错误");
+    read_pack(&mut pack, &pb, out_dir_path.as_ref()).expect("写入文件错误");
     info!("操作已完成,文件保存到目录{out_dir_path}")
 }
 
 fn read_pack(
-    pack_man: &WBFPManager,
+    pack_man: &mut WBFPManager,
     pb: &Option<ProgressBar>,
     out_dir_path: &Path,
 ) -> io::Result<()> {
     fn s_read_pack<'a>(
-        pack_man: &WBFPManager,
+        pack_man: &mut WBFPManager,
         mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
-        info_list: &HashMap<String, PackFileInfo>,
+        pack_struct_items: &HashMap<String, PackStructItem>,
         out_s_path_buf: &Path,
         pack_s_path_buf: &Path,
         run_buf: &mut [u8],
     ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64)>> {
-        for (name, info) in info_list {
+        for (name, item) in pack_struct_items {
             let this_out_path = out_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
-            match info.file_kind() {
-                PackFileKind::File(_) => write_read_file(
-                    pack_man,
-                    &mut pb_c,
-                    run_buf,
-                    info,
-                    &this_out_path,
-                    &this_pack_path,
-                ),
-                PackFileKind::Dir(dir) => {
-                    //创建目录
-                    fs::create_dir_all(&this_out_path)?;
-                    //目录仅递归处理
-                    pb_c = s_read_pack(
-                        pack_man,
-                        pb_c,
-                        dir.files_list(),
-                        &this_out_path,
-                        &this_pack_path,
-                        run_buf,
-                    )?;
+            //确保结构和元数据被加载
+            pack_man.load_pack_struct_metadata_path(&this_pack_path)?;
+            match item.item_type() {
+                PackStructItemType::File => {
+                    if let Some(metadata) = item.metadata() {
+                        write_read_file(
+                            pack_man,
+                            &mut pb_c,
+                            run_buf,
+                            metadata,
+                            &this_out_path,
+                            &this_pack_path,
+                        )
+                    } else {
+                        error!("虚拟路径{this_pack_path:?}文件的元数据没有被加载")
+                    }
                 }
-                PackFileKind::None => (),
+                PackStructItemType::Dir(dir) => {
+                    if let Some(pack_struct) = dir.pack_struct() {
+                        //尝试获取结构项
+                        //创建目录
+                        fs::create_dir_all(&this_out_path)?;
+                        //目录仅递归处理
+                        pb_c = s_read_pack(
+                            pack_man,
+                            pb_c,
+                            pack_struct.items(),
+                            &this_out_path,
+                            &this_pack_path,
+                            run_buf,
+                        )?;
+                    } else {
+                        error!("虚拟路径{this_pack_path:?}目录的结构没有被加载")
+                    }
+                }
             }
         }
         Ok(pb_c)
     }
+
     fn write_read_file(
-        pack_man: &WBFPManager,
+        pack_man: &mut WBFPManager,
         pb_c: &mut Option<&mut dyn FnMut(u64, u64)>,
         run_buf: &mut [u8],
-        info: &PackFileInfo,
+        metadata: &PackFileMetadata,
         this_out_path: &PathBuf,
         this_pack_path: &PathBuf,
     ) {
         //更新进度
         let mut lase_up_pb_c_write_len = 0;
-        if info.length() > 1024 * 1024 * 512 {
+        if metadata.len() > 1024 * 1024 * 512 {
             //TODO:需要自动单位转换函数
             let mut msg = format!(
                 "正在从包文件虚拟路径{this_pack_path:?}复制大文件到{this_out_path:?}，大小:{}",
-                info.length()
+                metadata.len()
             );
             #[cfg(debug_assertions)]
             msg.push_str("([仅调试附加]TODO:需要自动单位转换函数)");
@@ -426,7 +442,7 @@ fn read_pack(
             pb_c(0, 1)
         }
         //尝试打开虚拟文件
-        let mut in_file = match info.get_rw(pack_man) {
+        let mut in_file = match metadata.get_rw(pack_man) {
             Ok(file) => file,
             Err(err) => {
                 error!("无法打开虚拟文件{this_pack_path:?}，将跳过，err:{err}");
@@ -442,14 +458,14 @@ fn read_pack(
             }
         };
         //分配空间
-        if let Err(err) = out_file.set_len(info.length()) {
+        if let Err(err) = out_file.set_len(metadata.len()) {
             warn!("无法对输出文件{this_out_path:?}进行预分配空间，将继续, err:{err}")
         }
         //写入操作
         let mut write_len = 0;
-        while write_len < info.length() {
+        while write_len < metadata.len() {
             //读
-            match in_file.read(pack_man, run_buf) {
+            match in_file.read(run_buf) {
                 Ok(this_read_len) => {
                     match out_file.write(&run_buf[..this_read_len]) {
                         Ok(this_write_len) => {
@@ -486,22 +502,24 @@ fn read_pack(
         }
         //不论是否写入成功都对齐进度条
         if let Some(pb_c) = pb_c {
-            pb_c(info.length() - write_len, 0)
+            pb_c(metadata.len() - write_len, 0)
         }
     }
 
-    //获取列表
-    let pack_file_list = pack_man.get_files_list();
-    let mut buf = [0u8; BUF_LEN];
+    //获取根列表
+    let root_struct_list = pack_man.get_root_struct_items().clone();
+    let mut buf = vec![0; BUF_LEN];
     let mut this_all_write_len = 0;
     let mut this_all_write_file_count = 0;
-    let all_file_count = pack_file_list.file_count();
+    let attribute = pack_man.get_manifest_attribute();
+    let all_file_count = attribute.file_count();
+    let data_len = attribute.data_len();
     let mut binding = |add_len, add_file_count| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
-            let percent = (this_all_write_len as f64 / pack_file_list.data_length() as f64) * 100.0;
+            let percent = (this_all_write_len as f64 / data_len as f64) * 100.0;
             pb.set_message(format!(
                 "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]",
             ));
@@ -513,10 +531,10 @@ fn read_pack(
             Some(_) => Some(&mut binding),
             None => None,
         },
-        pack_file_list.files_list(),
+        &root_struct_list,
         out_dir_path,
         &PathBuf::new(),
         &mut buf,
     )?;
     Ok(())
-}*/
+}

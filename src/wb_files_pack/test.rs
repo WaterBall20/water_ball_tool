@@ -97,13 +97,16 @@ fn pack_file_metadata_data_block_save_and_load() {
     assert_eq!(a, a_load);
     //Save2
     let b = Attribute {
-        cow: true,
-        root_struct_pos: 231,
-        empty_data_pos_list_pos: 255,
-        file_count: 99,
-        dir_count: 877,
         version: 10,
         version_compatible: 10,
+        cow: true,
+        file_count: 99,
+        dir_count: 877,
+        data_len: 231,
+        root_struct_pos: 231,
+        empty_data_pos_list_pos: 255,
+        manifest_empty_data_pos_list_pos: 241,
+        manifest_file_len: 123,
     };
     ManifestDataBlock::save_data_to_block_data(&b.to_bytes_vec(), &mut data_block).unwrap();
     //Load

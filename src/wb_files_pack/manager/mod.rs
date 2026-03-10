@@ -4,7 +4,13 @@ use core::slice::Iter;
 开始时间：26/2/11 15：51
  */
 //use crate::wb_files_pack::manager::file::PackFileWR;
-use crate::wb_files_pack::{Attribute, DATA_BLOCK_LEN, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataDir, PackFileMetadataFile, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemDir, PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE};
+use crate::wb_files_pack::{
+    Attribute, DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_LEN, MANIFEST_VERSION,
+    MANIFEST_VERSION_COMPATIBLE, ManifestDataBlock, PackFileMetadata, PackFileMetadataDir,
+    PackFileMetadataFile, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemDir,
+    PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun,
+};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -24,38 +30,41 @@ mod new_test;*/
 
 //文件头===
 //文件头-文件名:WPFilesPack
-pub static FILE_HEADER_TYPE_NAME: [u8; 11] = [
+pub const FILE_HEADER_TYPE_NAME: [u8; 11] = [
     0x57u8, 0x42, 0x46, 0x69, 0x6c, 0x65, 0x73, 0x50, 0x61, 0x63, 0x6b,
 ];
 //文件头版本
-static FILE_HEADER_VERSION: [u8; 2] = [0, 2];
-
+const FILE_HEADER_VERSION_INDEX: usize = FILE_HEADER_TYPE_NAME.len();
+const FILE_HEADER_VERSION: [u8; 2] = [0, 2];
 //文件头标签位长度
-static FILE_HEADER_BOOL_DATA_LENGTH: usize = 1;
-
-//文件头清单数据属性起始位置的位置
-static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS: u64 =
-    (FILE_HEADER_TYPE_NAME.len() + FILE_HEADER_VERSION.len() + FILE_HEADER_BOOL_DATA_LENGTH) as u64;
-//文件头清单数据属性起始位置数据段长度
-static FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS_LENGTH: u64 = 8;
+const FILE_HEADER_BOOL_DATA_INDEX: usize = FILE_HEADER_VERSION_INDEX + FILE_HEADER_VERSION.len();
+const FILE_HEADER_BOOL_DATA_LENGTH: usize = 1;
 
 //文件头数据长度位置
-static FILE_HEADER_DATA_LENGTH_POS: u64 =
-    FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS + FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS_LENGTH;
+const FILE_HEADER_DATA_LENGTH_INDEX: u64 =
+    (FILE_HEADER_BOOL_DATA_INDEX + FILE_HEADER_BOOL_DATA_LENGTH) as u64;
 
 //文件头数据长度长度
-static FILE_HEADER_DATA_LENGTH_LENGTH: u64 = 8;
+const FILE_HEADER_DATA_LENGTH_LENGTH: u64 = 8;
+
+//文件头清单属性
+const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: u64 =
+    FILE_HEADER_DATA_LENGTH_INDEX + FILE_HEADER_DATA_LENGTH_LENGTH;
+
 //文件头长度
-static FILE_HEADER_DATA_LENGTH: u64 =
-    FILE_HEADER_MANIFEST_ATTRIBUTE_POS_POS + FILE_HEADER_DATA_LENGTH_LENGTH;
+const FILE_HEADER_DATA_LENGTH: u64 = (FILE_HEADER_TYPE_NAME.len()
+    + FILE_HEADER_VERSION.len()
+    + FILE_HEADER_BOOL_DATA_LENGTH
+    + MANIFEST_ATTRIBUTE_LEN) as u64
+    + FILE_HEADER_DATA_LENGTH_LENGTH;
 
 //文件头块长度
-static FILE_HEADER_BLOCK_LEN: usize = DATA_BLOCK_LEN;
+const FILE_HEADER_BLOCK_LEN: usize = DATA_BLOCK_LEN;
 //默认写实复制
-pub static DEFAULT_COW: bool = false;
+pub const DEFAULT_COW: bool = false;
 
 //默认分离数据为单独文件
-pub static DEFAULT_S_DATA_FILE: bool = true;
+pub const DEFAULT_S_DATA_FILE: bool = true;
 
 pub struct WBFPManager {
     // 清单实例
@@ -129,7 +138,6 @@ impl WBFPManager {
             s_manifest_file,
             write_lock_file,
             0,
-            0,
         )
     }
 
@@ -139,7 +147,6 @@ impl WBFPManager {
         pack_file: File,
         s_manifest_file: bool,
         write_lock_file: Option<File>,
-        root_struct_pos: u64,
         pack_file_length: u64,
     ) -> Self {
         let cow = manifest.attribute().cow();
@@ -160,7 +167,7 @@ impl WBFPManager {
     //初始化新包
     fn init_new_pack(&mut self) {
         //文件头缓存
-        let mut file_header_buf = Vec::with_capacity(DATA_BLOCK_LEN);
+        let mut file_header_buf = Vec::with_capacity(FILE_HEADER_BLOCK_LEN);
         //写出文件头
         //类型名称
         for value in FILE_HEADER_TYPE_NAME {
@@ -185,6 +192,19 @@ impl WBFPManager {
         file_header_buf.push(header_tag);
         //===
 
+        //文件大小
+        for to_le_byte in (FILE_HEADER_BLOCK_LEN as u64).to_le_bytes() {
+            file_header_buf.push(to_le_byte);
+        }
+        //清单属性
+        for byte in self.manifest.attribute.to_bytes_vec() {
+            file_header_buf.push(byte);
+        }
+
+        for _ in 0..(FILE_HEADER_BLOCK_LEN - file_header_buf.len()) {
+            file_header_buf.push(0)
+        }
+
         self.pack_file_write(&file_header_buf)
             .expect("无法写入文件头");
 
@@ -197,15 +217,8 @@ impl WBFPManager {
             .expect("初始化和保存空数据列表失败");
 
         //初始化并保存根结构
-        //self.save_pack_struct_and_metadata().expect("保存根结构失败");
         self.init_save_root_pack_struct()
             .expect("初始化和保存根结构失败");
-
-        //初始化并保存清单属性
-        self.save_manifest_attribute().expect("写入清单属性失败");
-
-        //初始化并保存大小
-        self.save_pack_length().expect("无法保存有效大小属性");
     }
 
     fn init_save_root_pack_struct(&mut self) -> io::Result<()> {
@@ -242,6 +255,45 @@ impl WBFPManager {
 
     //读取===
 
+    //获取属性数据
+    pub fn get_manifest_attribute(&self) -> &Attribute {
+        self.manifest.attribute()
+    }
+
+    //获取根结构列表
+    pub fn get_root_struct_items(&self) -> &HashMap<String, PackStructItem> {
+        &self.manifest.root_struct.items
+    }
+
+    //获取根结构的名称列表
+    pub fn get_root_struct_item_name_list(&self) -> Vec<String> {
+        let mut name_list = Vec::with_capacity(self.manifest.root_struct.items.len());
+        for name in self.manifest.root_struct.items.keys() {
+            name_list.push(name.clone())
+        }
+        name_list
+    }
+
+    pub fn get_struct_item_name_list<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> io::Result<Vec<String>> {
+        let item = self.get_pack_struct_item_load(path)?;
+        if let PackStructItemType::Dir(dir) = &item.item_type {
+            if let Some(pack_struct) = &dir.pack_struct {
+                let mut name_list = Vec::with_capacity(pack_struct.items.len());
+                for name in pack_struct.items.keys() {
+                    name_list.push(name.clone());
+                }
+                Ok(name_list)
+            } else {
+                Err(Error::other("结构实例没有被加载"))
+            }
+        } else {
+            Err(Error::new(ErrorKind::NotADirectory, "提供的路径不是目录"))
+        }
+    }
+
     //包文件读取
     fn pack_file_read(&self, data: &mut [u8]) -> io::Result<()> {
         let mut file = &self.pack_file;
@@ -264,12 +316,12 @@ impl WBFPManager {
         &mut self,
         path: P,
     ) -> io::Result<&PackStructItem> {
-        self.load_pack_struct_path_metadata(&path)?;
+        self.load_pack_struct_metadata_path(&path)?;
         self.get_pack_struct_item(path)
     }
 
     //获取结构项
-    fn get_pack_struct_item<P: AsRef<Path>>(&self, path: P) -> io::Result<&PackStructItem> {
+    pub fn get_pack_struct_item<P: AsRef<Path>>(&self, path: P) -> io::Result<&PackStructItem> {
         let pack_list = Self::path_to_string_vec(path);
         if pack_list.len() > 1 {
             let mut name_list = pack_list.iter();
@@ -305,7 +357,32 @@ impl WBFPManager {
         }
     }
 
-    fn load_pack_struct_path_metadata<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+    //获取目录结构项列表
+    pub fn get_dir_pack_struct_items_load<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> io::Result<&HashMap<String, PackStructItem>> {
+        //
+        self.load_pack_struct_metadata_path(&path)?;
+        self.get_dir_pack_struct_items(path)
+    }
+    pub fn get_dir_pack_struct_items<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> io::Result<&HashMap<String, PackStructItem>> {
+        let path_pack_struct_item = self.get_pack_struct_item(path)?;
+        if let PackStructItemType::Dir(dir) = &path_pack_struct_item.item_type {
+            if let Some(pack_struct) = &dir.pack_struct {
+                Ok(&pack_struct.items)
+            } else {
+                Err(Error::other("实例没有加载"))
+            }
+        } else {
+            Err(Error::new(ErrorKind::NotADirectory, "提供的路径不是目录"))
+        }
+    }
+
+    pub fn load_pack_struct_metadata_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
         let mut pack_list = Self::path_to_string_vec(path).into_iter();
         let two_name = pack_list.next().unwrap();
         //移出二级目录
@@ -412,7 +489,7 @@ impl WBFPManager {
     }
 
     //写入===
-    fn get_file_rw<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR<'_>> {
+    pub fn get_file_rw<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR<'_>> {
         let item = self.get_pack_struct_item_load(&path)?;
         if let Some(metadata) = &item.pack_file_metadata {
             if let PackFileMetadataType::File(file) = &metadata.file_type {
@@ -445,90 +522,6 @@ impl WBFPManager {
     ) -> io::Result<DataPosList> {
         let cow = self.cow;
         self.create_file_new2(path, modified, len, cow)
-    }
-
-    fn s_create_file_new(
-        s_pack_struct: &mut PackStruct,
-        dir_path_list: &[String],
-        dir_path_list_index: usize,
-        file_name: &str,
-        pack_struct_item: PackStructItem,
-    ) -> io::Result<(PackStructItem, MutDirAddReturn)> {
-        let dir_name = &dir_path_list[dir_path_list_index];
-        //判断目录是否存在
-        if let Some(item) = s_pack_struct.items.get_mut(dir_name) {
-            if let PackStructItemType::Dir(dir) = &mut item.item_type {
-                if dir.pack_struct.is_none() {
-                    //TODO:需要实现加载结构
-                    todo!();
-                }
-                if let Some(pack_struct) = &mut dir.pack_struct {
-                    //递归
-                    let r = if dir_path_list_index + 1 < dir_path_list.len() {
-                        let (p, r) = Self::s_create_file_new(
-                            pack_struct,
-                            dir_path_list,
-                            dir_path_list_index + 1,
-                            dir_name,
-                            pack_struct_item,
-                        )?;
-                        let dir_name = &dir_path_list[dir_path_list_index + 1];
-                        pack_struct.items.insert(dir_name.clone(), p);
-                        r
-                    } else {
-                        if let Some(v) = pack_struct.items.get(file_name) {
-                            return match &v.item_type {
-                                PackStructItemType::Dir(_) => {
-                                    Err(Error::new(ErrorKind::IsADirectory, "存在同名目录"))
-                                }
-                                PackStructItemType::File => {
-                                    Err(Error::new(ErrorKind::AlreadyExists, "文件已存在"))
-                                }
-                            };
-                        }
-                        pack_struct
-                            .items
-                            .insert(file_name.to_string(), pack_struct_item);
-                        MutDirAddReturn {
-                            dir_count: 0,
-                            file_count: 1,
-                            length: 0,
-                        }
-                    };
-                    //更新元数据
-                    if item.pack_file_metadata.is_none() {
-                        //TODO:需要实现加载元数据
-                        todo!();
-                    }
-                    if let Some(metadata) = &mut item.pack_file_metadata {
-                        if let PackFileMetadataType::Dir(dir) = &mut metadata.file_type {
-                            dir.dir_count += r.dir_count;
-                            Ok((
-                                PackStructItem::get_empty(),
-                                MutDirAddReturn {
-                                    dir_count: r.dir_count,
-                                    file_count: 0,
-                                    length: 0,
-                                },
-                            ))
-                        } else {
-                            panic!("存在逻辑错误")
-                        }
-                    } else {
-                        panic!("元数据没有被加载")
-                    }
-                } else {
-                    panic!("结构没有被加载")
-                }
-            } else {
-                Err(Error::new(
-                    ErrorKind::NotADirectory,
-                    "提供的目录已存在非目录的文件",
-                ))
-            }
-        } else {
-            Err(Error::new(ErrorKind::DirectoryNotEmpty, "目录不存在"))
-        }
     }
 
     pub fn create_file_new2_wr<P: AsRef<Path>>(
@@ -573,36 +566,35 @@ impl WBFPManager {
             pack_file_metadata: Some(pack_file_metadata),
         };
         if path_list.len() > 1 {
-            //尝试创建目录
-            self.create_dir_all2(&mut path_list[..path_list.len() - 1].iter())?;
-            Self::s_create_file_new(
-                &mut self.manifest.root_struct,
-                &path_list[..&path_list.len() - 1],
-                0,
-                &path_list[path_list.len() - 1],
-                pack_struct_item,
+            //创建目录和文件
+            self.create_dir_all_and_file(
+                &mut path_list[..path_list.len() - 1].iter(),
+                Some(pack_struct_item),
             )?;
         } else {
             self.manifest
                 .root_struct
                 .items
                 .insert(path_list[0].clone(), pack_struct_item);
+            self.manifest.attribute.file_count += 1;
+            self.manifest.attribute.data_len += len;
         }
-        self.save_pack_struct_and_metadata()?;
+        self.low_save_all()?;
         Ok(wr_data_pos_list)
     }
 
     //创建目录(结构)
     pub fn create_dir_all<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
-        self.create_dir_all2(&mut Self::path_to_string_vec(path).iter())
+        self.create_dir_all_and_file(&mut Self::path_to_string_vec(path).iter(), None)
     }
 
-    fn s_create_dir_all(
+    fn s_create_dir_all_and_file(
         &mut self,
         s_pack_struct: &mut PackStruct,
         path_list: &mut Iter<String>,
         cow: bool,
-    ) -> io::Result<(MutDirAddReturn)> {
+        mut file_struct_item: Option<PackStructItem>,
+    ) -> io::Result<MutDirAddReturn> {
         if let Some(name) = path_list.next() {
             //判断目录是否存在
             if let Some(item) = s_pack_struct.items.get_mut(name) {
@@ -613,7 +605,12 @@ impl WBFPManager {
                     }
                     if let Some(pack_struct) = &mut dir.pack_struct {
                         //递归
-                        let r = self.s_create_dir_all(pack_struct, path_list, cow)?;
+                        let r = self.s_create_dir_all_and_file(
+                            pack_struct,
+                            path_list,
+                            cow,
+                            file_struct_item,
+                        )?;
                         //更新元数据
                         if item.pack_file_metadata.is_none() {
                             //加载元数据
@@ -623,10 +620,12 @@ impl WBFPManager {
                         if let Some(metadata) = &mut item.pack_file_metadata {
                             if let PackFileMetadataType::Dir(dir) = &mut metadata.file_type {
                                 dir.dir_count += r.dir_count;
+                                dir.file_count += r.file_count;
+                                metadata.len += r.length;
                                 Ok(MutDirAddReturn {
                                     dir_count: r.dir_count,
-                                    file_count: 0,
-                                    length: 0,
+                                    file_count: r.file_count,
+                                    length: r.length,
                                 })
                             } else {
                                 panic!("存在逻辑错误")
@@ -645,34 +644,64 @@ impl WBFPManager {
                 }
             } else {
                 //创建
-                let item = PackStructItem {
-                    name: name.clone(),
-                    metadata_file_pos: 0,
-                    pack_file_metadata: Some(PackFileMetadata {
-                        len: 0,
-                        data_block: ManifestDataBlock::default(),
-                        file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
+                let mut item =
+                    PackStructItem::new_empty_dir(name, Some(PackFileMetadata::new_empty_dir(cow)));
+                //递归
+                let r = if let PackStructItemType::Dir(dir) = &mut item.item_type
+                    && let Some(pack_struct) = &mut dir.pack_struct
+                {
+                    let r = self.s_create_dir_all_and_file(
+                        pack_struct,
+                        path_list,
                         cow,
-                        modified: 0,
-                    }),
-                    item_type: PackStructItemType::Dir(PackStructItemDir {
-                        struct_file_pos: 0,
-                        pack_struct: Some(PackStruct::default()),
-                    }),
+                        file_struct_item,
+                    )?;
+                    if let Some(metadata) = &mut item.pack_file_metadata
+                        && let PackFileMetadataType::Dir(dir) = &mut metadata.file_type
+                    {
+                        dir.dir_count += r.dir_count;
+                        dir.file_count += r.file_count;
+                        metadata.len += r.length;
+                    } else {
+                        panic!("逻辑错误")
+                    }
+                    r
+                } else {
+                    panic!("逻辑错误")
                 };
                 s_pack_struct.items.insert(name.clone(), item);
                 Ok(MutDirAddReturn {
-                    length: 0,
-                    file_count: 0,
-                    dir_count: 1,
+                    length: r.length,
+                    file_count: r.file_count,
+                    dir_count: r.dir_count + 1,
                 })
             }
         } else {
-            Ok(MutDirAddReturn::new_empty())
+            if let Some(file_struct_item) = file_struct_item.take() {
+                let len = if let Some(metadata) = &file_struct_item.pack_file_metadata {
+                    metadata.len
+                } else {
+                    panic!("逻辑错误")
+                };
+                s_pack_struct
+                    .items
+                    .insert(file_struct_item.name.clone(), file_struct_item);
+                Ok(MutDirAddReturn {
+                    dir_count: 0,
+                    file_count: 1,
+                    length: len,
+                })
+            } else {
+                Ok(MutDirAddReturn::new_empty())
+            }
         }
     }
 
-    fn create_dir_all2(&mut self, path_list: &mut Iter<String>) -> io::Result<()> {
+    fn create_dir_all_and_file(
+        &mut self,
+        path_list: &mut Iter<String>,
+        file_struct_item: Option<PackStructItem>,
+    ) -> io::Result<()> {
         //移动或创建二级目录实例，通过二级递归，避免借用问题
         let root_struct = &mut self.manifest.root_struct;
         let two_name = path_list.next().unwrap();
@@ -709,8 +738,15 @@ impl WBFPManager {
         //子目录处理
         if let PackStructItemType::Dir(dir) = &mut two_pack_struct_item.item_type {
             if let Some(two_pack_struct) = &mut dir.pack_struct {
-                let r = self.s_create_dir_all(two_pack_struct, path_list, self.cow)?;
+                let r = self.s_create_dir_all_and_file(
+                    two_pack_struct,
+                    path_list,
+                    self.cow,
+                    file_struct_item,
+                )?;
                 two_r.dir_count += r.dir_count;
+                two_r.file_count += r.file_count;
+                two_r.length += r.length;
             } else {
                 Err(Error::other("没有结构实例"))?
             }
@@ -722,7 +758,10 @@ impl WBFPManager {
             .items
             .insert(two_name.clone(), two_pack_struct_item);
         self.manifest.attribute.dir_count += two_r.dir_count;
-        self.save_pack_struct_and_metadata()?;
+        self.manifest.attribute.file_count += two_r.file_count;
+        self.manifest.attribute.data_len += two_r.length;
+        self.run_data.all_cr_file_count += two_r.file_count;
+        self.low_save_all()?;
         Ok(())
     }
 
@@ -743,6 +782,18 @@ impl WBFPManager {
 
     //核心代码===
 
+    //慢保存代码
+    fn low_save_all(&mut self) -> io::Result<()> {
+        if (self.run_data.all_write_len - self.run_data.last_all_write_len)
+            > (DATA_BLOCK_LEN as u64 * 1024)
+            && (self.run_data.all_cr_file_count + self.run_data.last_all_cr_file_count) > 10_000
+        {
+            self.run_data.last_all_write_len = self.run_data.all_write_len;
+            self.run_data.last_all_cr_file_count = self.run_data.all_cr_file_count;
+            self.save_all()?;
+        }
+        Ok(())
+    }
     //加载结构
     fn load_pack_struct(&self, file_pos: u64) -> io::Result<PackStruct> {
         let data_block = self.manifest_data_block_read(file_pos)?;
@@ -835,7 +886,6 @@ impl WBFPManager {
                 .items
                 .insert(item.name.clone(), item);
         }
-        self.save_root_pack_struct()?;
         Ok(())
     }
 
@@ -860,56 +910,16 @@ impl WBFPManager {
     }
 
     fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
-        let mut block_data_buf = vec![0; DATA_BLOCK_LEN];
-        //判断是否分离
-        let block_data = if self.s_manifest_file {
-            //设置文件指针
-            self.set_manifest_file_pos(file_pos)?;
-            //读取
-            self.manifest_file_read(&mut block_data_buf)?;
-            //分析是否需要再加载
-            let block_len = ManifestDataBlock::get_block_len(&block_data_buf)?;
-            let l_len = usize::try_from(block_len).unwrap() - DATA_BLOCK_LEN;
-            if l_len > 0 {
-                let mut l_block_buf = vec![0; l_len];
-                self.manifest_file_read(&mut l_block_buf)?;
-                //合并
-                let mut block_data = Vec::with_capacity(usize::try_from(block_len).unwrap());
-                for byte in block_data_buf {
-                    block_data.push(byte);
-                }
-                for byte in l_block_buf {
-                    block_data.push(byte);
-                }
-                block_data
-            } else {
-                block_data_buf
-            }
+        let data_file = if self.s_manifest_file {
+            &self.pack_file
         } else {
-            //设置文件位置
-            self.set_pack_file_pos_read(file_pos)?;
-            //读取
-            self.pack_file_read(&mut block_data_buf)?;
-            //分析是否需要再加载
-            let block_len = ManifestDataBlock::get_block_len(&block_data_buf)?;
-            let l_len = usize::try_from(block_len).unwrap() - DATA_BLOCK_LEN;
-            if l_len > 0 {
-                let mut l_block_buf = vec![0; l_len];
-                self.pack_file_read(&mut l_block_buf)?;
-                //合并
-                let mut block_data = Vec::with_capacity(usize::try_from(block_len).unwrap());
-                for byte in block_data_buf {
-                    block_data.push(byte);
-                }
-                for byte in l_block_buf {
-                    block_data.push(byte);
-                }
-                block_data
+            if let Some(manified_file) = &self.manifest.file {
+                manified_file
             } else {
-                block_data_buf
+                Err(Error::other("已启用清单分离文件，但清单文件实例不存在"))?
             }
         };
-        ManifestDataBlock::from_block_data_new(block_data, file_pos)
+        manifest_data_block_read(data_file, file_pos)
     }
 
     fn manifest_data_block_write(
@@ -924,7 +934,7 @@ impl WBFPManager {
                 let (new_pos, _) = self.get_manifest_file_pos(block_data.len() as u64)?;
                 self.set_manifest_file_pos(new_pos)?;
                 self.manifest_file_write(block_data)?;
-                self.file_gc_add(vec![(old_pos, old_block_len)]);
+                self.manifest_file_gc_add(vec![(old_pos, old_block_len)]);
                 new_pos
             } else {
                 let (new_pos, _) = self.get_file_pos(block_data.len() as u64);
@@ -959,20 +969,21 @@ impl WBFPManager {
         }
     }
     //垃圾回收
-    fn file_gc(&mut self) {
+    fn file_gc(&mut self) -> io::Result<()> {
         Self::from_gc(
             &mut self.run_data.gc_data_pos_list,
             &mut self.manifest.empty_data_list,
         );
+        self.save_empty_data_pos_list()
     }
 
     //清单文件垃圾回收
     fn manifest_file_gc(&mut self) -> io::Result<()> {
         if let Some(to_list) = &mut self.manifest.this_empty_data_list {
             Self::from_gc(&mut self.manifest.run_data.gc_data_pos_list, to_list);
-            Ok(())
+            self.save_manifest_empty_data_pos_list()
         } else {
-            Err(Error::other("没有清单文件空数据列表实例"))
+            Ok(())
         }
     }
 
@@ -993,7 +1004,9 @@ impl WBFPManager {
                 }
                 j += 1;
             }
-            pos_list.push((*gc_pos, *gc_len));
+            if *gc_pos != 0 && *gc_len != 0 {
+                pos_list.push((*gc_pos, *gc_len));
+            }
         }
         //清空缓存
         gc_data_pos_list.list.clear();
@@ -1003,15 +1016,18 @@ impl WBFPManager {
         let mut index = 0;
         //如果有下一个则循环
         while let Some(v) = pos_list.get(index + 1) {
-            let (next_pos, next_len) = *v;
+            let (next_pos, next_len) = *v; //移除(0,0)
+
             //当前索引内容
             if let Some((this_pos, this_len)) = pos_list.get_mut(index) {
+                //移除(0,0)
+
                 let this_end_pos = *this_pos + *this_len;
                 //检查，判断当前位置加当前长度是否等于下一个位置
                 if this_end_pos == next_pos {
                     //合并，将下一个占用的大小加到当前大小
                     *this_len += next_pos + next_len;
-                    pos_list.remove(1);
+                    pos_list.remove(index + 1);
                 } else {
                     //否则什么都不做，并附加索引
                     index += 1;
@@ -1024,6 +1040,14 @@ impl WBFPManager {
     fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
         //优先使用空隙
         let empty_data_pos = &mut self.manifest.empty_data_list.list;
+        if let Some(value) = Self::get_pos_gc(length, empty_data_pos) {
+            return value;
+        }
+        //扩容处理
+        (self.pack_file_length, length)
+    }
+
+    fn get_pos_gc(length: u64, empty_data_pos: &mut Vec<(u64, u64)>) -> Option<(u64, u64)> {
         //优先使用空数据，但必须完整一块
         let index = 0;
         while !empty_data_pos.is_empty() {
@@ -1031,7 +1055,7 @@ impl WBFPManager {
             let (pos, len) = empty_data_pos.get_mut(index).unwrap();
             //判断是否能占用完
             //剩余大小
-            return if length == *len {
+            return Some(if length == *len {
                 //能占用完，但必须等于
                 let r = (*pos, *len);
                 empty_data_pos.remove(0);
@@ -1045,11 +1069,11 @@ impl WBFPManager {
                 r
             } else {
                 continue;
-            };
+            });
         }
-        //扩容处理
-        (self.pack_file_length, length)
+        None
     }
+
     //获取连续的清单空间
     fn get_manifest_file_pos(&mut self, length: u64) -> io::Result<(u64, u64)> {
         //尝试获取空数据列表
@@ -1057,29 +1081,11 @@ impl WBFPManager {
             let empty_data_pos = &mut empty_data_pos.list;
             //优先使用空数据，但必须完整一块
             let index = 0;
-            while !empty_data_pos.is_empty() {
-                //从第一个开始
-                let (pos, len) = empty_data_pos.get_mut(index).unwrap();
-                //判断是否能占用完
-                //剩余大小
-                return Ok(if length == *len {
-                    //能占用完，但必须等于
-                    let r = (*pos, *len);
-                    empty_data_pos.remove(0);
-                    r
-                } else if *len > length {
-                    //不能则切出
-                    let r = (*pos, *len - length);
-                    //修改，位置加大小使其向后移动，长度减大小使其边界不变
-                    *pos += length;
-                    *len -= length;
-                    r
-                } else {
-                    continue;
-                });
+            if let Some(value) = Self::get_pos_gc(length, empty_data_pos) {
+                return Ok(value);
             }
             //扩容处理
-            Ok((self.manifest.file_len, length))
+            Ok((self.manifest.attribute.manifest_file_len, length))
         } else {
             Err(Error::other("清单文件空数据列表不存在"))
         }
@@ -1090,16 +1096,19 @@ impl WBFPManager {
         self.save_pack_struct_and_metadata()?;
         self.save_root_pack_struct()?;
         self.save_manifest_attribute()?;
+        self.save_empty_data_pos_list()?;
+        self.save_manifest_empty_data_pos_list()?;
         self.save_pack_length()?;
         Ok(())
     }
 
     //保存数据长度
     fn save_pack_length(&mut self) -> io::Result<()> {
+        self.up_pack_length();
         //上锁
         self.write_lock()?;
         //修改包文件位置
-        self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH_POS)?;
+        self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH_INDEX)?;
         //写入数据
         self.pack_file_write(self.pack_file_length.to_le_bytes().as_slice())?;
         Ok(())
@@ -1113,7 +1122,7 @@ impl WBFPManager {
         let data = attribute.to_bytes_vec();
         //写入数据
         //设置文件指针位置,从文件头后面写
-        self.set_pack_file_pos_write(FILE_HEADER_DATA_LENGTH)?;
+        self.set_pack_file_pos_write(FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX)?;
         //写入数据
         self.pack_file_write(&data)?;
         Ok(())
@@ -1132,6 +1141,22 @@ impl WBFPManager {
         let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_len)?;
         if new_block {
             self.manifest.attribute.empty_data_pos_list_pos = pos;
+        }
+        Ok(())
+    }
+    //保存清单空数据位置列表
+    fn save_manifest_empty_data_pos_list(&mut self) -> io::Result<()> {
+        if let Some(empty_data_pos_list) = &mut self.manifest.this_empty_data_list {
+            let old_pos = self.manifest.attribute.manifest_empty_data_pos_list_pos;
+            let old_len = empty_data_pos_list
+                .get_data_block_mut()
+                .unwrap()
+                .get_this_block_len_u64();
+            let (block_data, new_block) = empty_data_pos_list.get_block_data().unwrap();
+            let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_len)?;
+            if new_block {
+                self.manifest.attribute.empty_data_pos_list_pos = pos;
+            }
         }
         Ok(())
     }
@@ -1201,8 +1226,8 @@ impl WBFPManager {
     //更新清单文件大小
     fn up_manifest_length(&mut self) {
         //判断是否需要设置
-        if self.manifest.run_data.file_pos > self.manifest.file_len {
-            self.manifest.file_len = self.manifest.run_data.file_pos;
+        if self.manifest.run_data.file_pos > self.manifest.attribute.manifest_file_len {
+            self.manifest.attribute.manifest_file_len = self.manifest.run_data.file_pos;
         }
     }
 
@@ -1228,6 +1253,7 @@ impl WBFPManager {
         file.write_all(data)?;
         let len = data.len() as u64;
         self.run_data.pack_file_pos += len;
+        self.run_data.all_write_len += len;
         self.up_pack_length();
         Ok(())
     }
@@ -1259,7 +1285,7 @@ impl WBFPManager {
             file.write_all(data)?;
             let len = data.len() as u64;
             self.manifest.run_data.file_pos += len;
-            self.up_manifest_length();
+            self.low_save_all()?;
             Ok(())
         } else {
             Err(Error::other("清单文件实例不存在"))
@@ -1279,14 +1305,14 @@ impl WBFPManager {
 impl Drop for WBFPManager {
     fn drop(&mut self) {
         //确保文件完全写入
-        _ = self.pack_file.sync_all();
+        self.pack_file.sync_all().expect("文件写入错误");
         //运行垃圾回收
-        self.file_gc();
-        _ = self.manifest_file_gc();
+        self.file_gc().expect("文件GC错误");
+        self.manifest_file_gc().expect("清单文件GC错误");
         //强制写入索引数据
-        _ = self.save_all();
+        self.save_all().expect("保存数据错误");
         //释放写入锁
-        _ = self.write_unlock();
+        self.write_unlock().expect("无法解除写入锁");
     }
 }
 
@@ -1322,7 +1348,35 @@ struct PackLockInfo {
     //文件锁存储的pid进程在运行
     file_lock_pid_run: Option<bool>,
 }
-
+//获取清单块数据
+fn manifest_data_block_read(data_file: &File, file_pos: u64) -> io::Result<ManifestDataBlock> {
+    let mut file = data_file;
+    let block_data_buf = vec![0; DATA_BLOCK_LEN];
+    let mut block_data_buf = block_data_buf;
+    //设置文件指针
+    file.seek(SeekFrom::Start(file_pos))?;
+    //读取
+    file.read_exact(&mut block_data_buf)?;
+    //分析是否需要再加载
+    let block_len = ManifestDataBlock::get_block_len(&block_data_buf)?;
+    let l_len = usize::try_from(block_len).unwrap() - DATA_BLOCK_LEN;
+    let block_data = if l_len > 0 {
+        let mut l_block_buf = vec![0; l_len];
+        file.read_exact(&mut l_block_buf)?;
+        //合并
+        let mut block_data = Vec::with_capacity(usize::try_from(block_len).unwrap());
+        for byte in block_data_buf {
+            block_data.push(byte);
+        }
+        for byte in l_block_buf {
+            block_data.push(byte);
+        }
+        block_data
+    } else {
+        block_data_buf
+    };
+    ManifestDataBlock::from_block_data_new(block_data, file_pos)
+}
 //获取锁信息
 fn write_lock_info(run_lock: bool, path: &PathBuf) -> PackLockInfo {
     //判断进程是否存在
@@ -1414,37 +1468,23 @@ fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
 }
 //打开
 pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
-    fn load_manifest_attribute(data: &[u8]) -> io::Result<Attribute> {
-        let attribute = Attribute::load(data)?;
-        //兼容性判断
-        //文件版本
-        if attribute.version != MANIFEST_VERSION {
-            warn!("清单数据版本不一致");
-            //兼容性判断
-            if attribute.version < MANIFEST_VERSION_COMPATIBLE {
-                //版本低于解析器最低兼容版本
-                error!("清单版本过低，低于实例最低兼容版本");
-                return Err(Error::other("Json版本过低"));
-            } else if attribute.version_compatible > MANIFEST_VERSION {
-                //版本过高
-                error!("清单版本过高，实例版本低于文件指定的兼容版本");
-                return Err(Error::other("Json版本过高"));
-            }
-        }
-        Ok(attribute)
-    }
+    const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
+    let pack_path = pack_path
+        .as_ref()
+        .to_str()
+        .ok_or(Error::other("无法将路径转换成文本"))?
+        .to_string();
 
     //打开水球包文件
-    let mut pack_file = File::options().read(true).write(true).open(pack_path)?;
+    let mut pack_file = File::options().read(true).write(true).open(&pack_path)?;
     //读取完整的文件头块
     let mut header_block_data = vec![0; DATA_BLOCK_LEN];
     let header_block_r_len = pack_file.read(&mut header_block_data)?;
     if header_block_r_len < DATA_BLOCK_LEN {
-        return Err(Error::other("无法读取完整的文件头"))
+        return Err(Error::other("无法读取完整的文件头"));
     }
-    let mut header = &header_block_data[..FILE_HEADER_DATA_LENGTH as usize];
+    let header = &header_block_data[..FILE_HEADER_DATA_LENGTH as usize];
     //判断文件类型
-    const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
     let he_type = &header[..HEADER_TYPE_LEN];
     if he_type != FILE_HEADER_TYPE_NAME {
         return Err(Error::other("文件类型不是水球包文件"));
@@ -1457,56 +1497,96 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
         ));
     }
     //读取布尔数据位
-    let bool_data = header[FILE_HEADER_BOOL_DATA_LENGTH];
+    let bool_data = header[FILE_HEADER_BOOL_DATA_INDEX];
     //写时复制 TODO:未使用变量
     let _cow = bool_data >> 7 == 1;
-    let s_data_file = bool_data >> 6 == 1;
+    let s_manifest_file = (bool_data << 1) >> 7 == 1;
     let pack_len = u64::from_le_bytes(
-        header[FILE_HEADER_DATA_LENGTH_POS as usize
-            ..(FILE_HEADER_DATA_LENGTH_POS + FILE_HEADER_DATA_LENGTH_LENGTH) as usize]
+        header[FILE_HEADER_DATA_LENGTH_INDEX as usize
+            ..(FILE_HEADER_DATA_LENGTH_INDEX + FILE_HEADER_DATA_LENGTH_LENGTH) as usize]
             .try_into()
             .unwrap(),
     );
+    //获取清单属性数据
+    //获取属性
+    let attribute_data = &header[FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as usize
+        ..FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as usize + MANIFEST_ATTRIBUTE_LEN];
+    let attribute = Attribute::load(attribute_data)?;
+    //锁文件
+    let mut write_lock_file_path = pack_path.clone();
+    write_lock_file_path.push_str(".lock");
+    let write_lock_file = write_lock_file(&PathBuf::from(write_lock_file_path))?;
     //如果分离数据文件
-    if s_data_file {
-        //获取属性
-        let mut attribute_data = [0u8; MANIFEST_ATTRIBUTE_LEN];
-        if pack_file.read(&mut attribute_data)? < MANIFEST_ATTRIBUTE_LEN {
-            return Err(Error::other("无法完整的读取清单属性，文件可能破损"));
-        }
-        let attribute = load_manifest_attribute(&attribute_data)?;
+    if s_manifest_file {
+        //尝试加载分离数据文件
+        let mut manifest_path = pack_path.clone();
+        manifest_path.push_str(".wbm");
+        let manified_file = File::options().read(true).write(true).open(manifest_path)?;
         //空数据列表===
-        let mut data = Vec::new();
-        //文件指针位置
-        let empty_pos = attribute.empty_data_pos_list_pos;
-        //获取数量数据以确定大小
-        let mut pos_count_data = [0u8; DATA_POS_LIST_COUNT_LEN];
-        //设置文件位置
-        pack_file.seek(SeekFrom::Start(empty_pos))?;
-        //读取
-        if pack_file.read(&mut pos_count_data)? < DATA_POS_LIST_COUNT_LEN {
-            error!("无法读取空数据列表数据，将会导致游离数据")
-        } else {
-            let pos_count = u64::from_le_bytes(pos_count_data.try_into().unwrap());
-            //复制数量数据到用于解析的动态数组
-            for pos_count_datum in pos_count_data {
-                data.push(pos_count_datum)
-            }
-            //列表项数据大小
-            let empty_pos_items_len = pos_count as usize * DATA_POS_LIST_ITEM_LEN;
-            //列表项数据动态数组
-            let mut empty_pos_items_data = Vec::with_capacity(empty_pos_items_len);
-            //读取
-            pack_file.take(empty_pos_items_len as u64).read_to_end(&mut empty_pos_items_data)?;
-            //合并数据
-            for empty_pos_items_datum in empty_pos_items_data {
-                data.push(empty_pos_items_datum)
-            }
-            //读取数据2
-        }
-        todo!()
+        let empty_pos_data_block =
+            manifest_data_block_read(&manified_file, attribute.empty_data_pos_list_pos)?;
+        let empty_pos_data = empty_pos_data_block.get_this_data().to_vec();
+        let empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
+        //清单文件空数据
+        let manified_empty_pos_data_block =
+            manifest_data_block_read(&manified_file, attribute.manifest_empty_data_pos_list_pos)?;
+        let manifest_empty_pos_data = manified_empty_pos_data_block.get_this_data().to_vec();
+        let manifest_empty_data_pos_list = DataPosList::load(
+            &manifest_empty_pos_data,
+            Some(manified_empty_pos_data_block),
+        );
+        //加载根结构
+        let root_struct_block_data =
+            manifest_data_block_read(&manified_file, attribute.root_struct_pos)?;
+        let root_struct = PackStruct::load(root_struct_block_data)?;
+        let manifest = WBFilesPackManifest {
+            attribute,
+            this_empty_data_list: Some(manifest_empty_data_pos_list),
+            root_struct,
+            empty_data_list,
+            file: Some(manified_file),
+            run_data: WBFilesPackManifestRun {
+                file_pos: 0,
+                gc_data_pos_list: DataPosList::default(),
+            },
+        };
+        Ok(WBFPManager::new2(
+            pack_path,
+            manifest,
+            pack_file,
+            s_manifest_file,
+            Some(write_lock_file),
+            pack_len,
+        ))
     } else {
-        todo!()
+        //空数据列表===
+        let empty_pos_data_block =
+            manifest_data_block_read(&pack_file, attribute.empty_data_pos_list_pos)?;
+        let empty_pos_data = empty_pos_data_block.get_this_data().to_vec();
+        let empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
+        //加载根结构
+        let root_struct_block_data =
+            manifest_data_block_read(&pack_file, attribute.root_struct_pos)?;
+        let root_struct = PackStruct::load(root_struct_block_data)?;
+        let manifest = WBFilesPackManifest {
+            attribute,
+            this_empty_data_list: None,
+            root_struct,
+            empty_data_list,
+            file: None,
+            run_data: WBFilesPackManifestRun {
+                file_pos: 0,
+                gc_data_pos_list: DataPosList::default(),
+            },
+        };
+        Ok(WBFPManager::new2(
+            pack_path,
+            manifest,
+            pack_file,
+            s_manifest_file,
+            Some(write_lock_file),
+            pack_len,
+        ))
     }
 }
 
@@ -1611,12 +1691,14 @@ fn create2<P: AsRef<Path>>(
                 list: Vec::new(),
             },
             this_empty_data_list: if s_manifest_file {
-                Some(DataPosList::default())
+                Some(DataPosList {
+                    data_block: Some(ManifestDataBlock::default()),
+                    list: Vec::new(),
+                })
             } else {
                 None
             },
             file: manifest_file,
-            file_len: 0,
             run_data: WBFilesPackManifestRun {
                 file_pos: 0,
                 gc_data_pos_list: DataPosList::default(),

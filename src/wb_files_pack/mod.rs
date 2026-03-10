@@ -6,26 +6,28 @@ pub mod manager;
 #[cfg(test)]
 mod test;
 
+use crate::wb_files_pack::manager::WBFPManager;
+use crate::wb_files_pack::manager::file::PackFileWR;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Error;
-use std::{clone, io, u16};
+use std::io;
+use std::io::{Error, ErrorKind};
 
 //当前解析器版本
-pub static MANIFEST_VERSION: u16 = 10;
+pub const MANIFEST_VERSION: u16 = 10;
 
 //当前解析器兼任版本
-pub static MANIFEST_VERSION_COMPATIBLE: u16 = 10;
+pub const MANIFEST_VERSION_COMPATIBLE: u16 = 10;
 //数据格式
 //已分配数据列表项
 //位置
-static DATA_POS_LIST_ITEM_POS_LEN: usize = 8;
+const DATA_POS_LIST_ITEM_POS_LEN: usize = 8;
 //长度
-static DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
+const DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
 //总大小
-static DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
+const DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
 //数据块大小
-static DATA_BLOCK_LEN: usize = 4096;
+const DATA_BLOCK_LEN: usize = 4096;
 
 #[derive(Debug)]
 pub struct WBFilesPackManifest {
@@ -33,14 +35,12 @@ pub struct WBFilesPackManifest {
     attribute: Attribute,
     //根结构
     root_struct: PackStruct,
+    //清单文件实例
+    file: Option<File>,
     //空数据列表
     empty_data_list: DataPosList,
     //清单空数据列表
     this_empty_data_list: Option<DataPosList>,
-    //清单文件实例
-    file: Option<File>,
-    //清单文件大小
-    file_len: u64,
     //运行时数据
     run_data: WBFilesPackManifestRun,
 } //包文件数据
@@ -65,38 +65,54 @@ struct WBFilesPackManifestRun {
 }
 
 //格式版本
-static MANIFEST_ATTRIBUTE_VERSION_LEN: usize = 2;
+const MANIFEST_ATTRIBUTE_VERSION_LEN: usize = 2;
 //格式兼容版本
-static MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX: usize = MANIFEST_ATTRIBUTE_VERSION_LEN;
-static MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN: usize = 2;
+const MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX: usize = MANIFEST_ATTRIBUTE_VERSION_LEN;
+const MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN: usize = 2;
 //布尔数据
-static MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX: usize =
+const MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX: usize =
     MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN;
-static MANIFEST_ATTRIBUTE_BOOL_DATA_LEN: usize = 1;
+const MANIFEST_ATTRIBUTE_BOOL_DATA_LEN: usize = 1;
 //空数据列表的文件指针位置
-static MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX: usize =
+const MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX: usize =
     MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN;
-static MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN: usize = 8;
-//根结构的文件指针位置
-static MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX: usize =
+const MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN: usize = 8;
+//清单..
+const MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX: usize =
     MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN;
-static MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN: usize = 8;
+const MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN: usize = 8;
+//清单文件大小
+const MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX: usize =
+    MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
+        + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN;
+const MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN: usize = 8;
+//根结构的文件指针位置
+const MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX: usize =
+    MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN;
+const MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN: usize = 8;
 //所有文件数
-static MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX: usize =
+const MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX: usize =
     MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN;
-static MANIFEST_ATTRIBUTE_FILE_COUNT_LEN: usize = 8;
+const MANIFEST_ATTRIBUTE_FILE_COUNT_LEN: usize = 8;
 //所有目录数
-static MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX: usize =
+const MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX: usize =
     MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN;
-static MANIFEST_ATTRIBUTE_DIR_COUNT_LEN: usize = 8;
+const MANIFEST_ATTRIBUTE_DIR_COUNT_LEN: usize = 8;
+//数据大小
+const MANIFEST_ATTRIBUTE_DATA_LEN_INDEX: usize =
+    MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN;
+const MANIFEST_ATTRIBUTE_DATA_LEN_LEN: usize = 8;
 
-static MANIFEST_ATTRIBUTE_LEN: usize = MANIFEST_ATTRIBUTE_VERSION_LEN
+const MANIFEST_ATTRIBUTE_LEN: usize = MANIFEST_ATTRIBUTE_VERSION_LEN
     + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN
     + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN
     + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN
+    + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN
+    + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN
     + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN
     + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN
-    + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN;
+    + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN
+    + MANIFEST_ATTRIBUTE_DATA_LEN_LEN;
 #[derive(Debug, PartialEq)]
 pub struct Attribute {
     //格式版本
@@ -105,14 +121,20 @@ pub struct Attribute {
     version_compatible: u16,
     //写时复制
     cow: bool,
-    //空数据列表的文件指针位置
-    empty_data_pos_list_pos: u64,
-    // 根结构位置
-    root_struct_pos: u64,
     //文件数，不含目录
     file_count: u64,
     //目录数
     dir_count: u64,
+    //数据大小
+    data_len: u64,
+    //空数据列表的文件指针位置
+    empty_data_pos_list_pos: u64,
+    //清单..
+    manifest_empty_data_pos_list_pos: u64,
+    //清单文件大小
+    manifest_file_len: u64,
+    // 根结构位置
+    root_struct_pos: u64,
 } //包文件属性
 impl Default for Attribute {
     fn default() -> Self {
@@ -120,10 +142,13 @@ impl Default for Attribute {
             version: MANIFEST_VERSION,
             version_compatible: MANIFEST_VERSION_COMPATIBLE,
             cow: manager::DEFAULT_COW,
-            empty_data_pos_list_pos: 0,
-            root_struct_pos: 0,
             file_count: 0,
             dir_count: 0,
+            data_len: 0,
+            empty_data_pos_list_pos: 0,
+            manifest_empty_data_pos_list_pos: 0,
+            manifest_file_len: 0,
+            root_struct_pos: 0,
         }
     }
 }
@@ -138,6 +163,18 @@ impl Attribute {
 
     pub fn cow(&self) -> bool {
         self.cow
+    }
+
+    pub fn file_count(&self) -> u64 {
+        self.file_count
+    }
+
+    pub fn dir_count(&self) -> u64 {
+        self.dir_count
+    }
+
+    pub fn data_len(&self) -> u64 {
+        self.data_len
     }
 
     fn load(data: &[u8]) -> io::Result<Self> {
@@ -161,7 +198,7 @@ impl Attribute {
                 if version < MANIFEST_VERSION_COMPATIBLE {
                     //版本过低
                     Err(Error::other("版本过低，无法解析"))?;
-                } else {
+                } else if version_compatible > MANIFEST_VERSION {
                     //版本过高
                     Err(Error::other("版本过高，无法解析"))?;
                 }
@@ -174,6 +211,22 @@ impl Attribute {
                 data[MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
                     ..MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
                         + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
+            //清单空数据列表文件指针位置
+            let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
+                data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
+                    ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
+                        + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
+            //清单文件大小
+            let manifest_file_len = u64::from_le_bytes(
+                data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
+                    ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
+                        + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
                     .try_into()
                     .unwrap(),
             );
@@ -199,14 +252,24 @@ impl Attribute {
                     .try_into()
                     .unwrap(),
             );
+            //数据大小
+            let data_len = u64::from_le_bytes(
+                data[MANIFEST_ATTRIBUTE_DATA_LEN_INDEX
+                    ..MANIFEST_ATTRIBUTE_DATA_LEN_INDEX + MANIFEST_ATTRIBUTE_DATA_LEN_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
             Ok(Self {
                 version,
                 version_compatible,
                 cow,
                 empty_data_pos_list_pos,
+                manifest_empty_data_pos_list_pos,
+                manifest_file_len,
                 root_struct_pos,
                 file_count,
                 dir_count,
+                data_len,
             })
         }
     }
@@ -232,6 +295,14 @@ impl Attribute {
         for to_le_byte in self.empty_data_pos_list_pos.to_le_bytes() {
             data.push(to_le_byte);
         }
+        //清单空数据列表的文件指针位置
+        for to_le_byte in self.manifest_empty_data_pos_list_pos.to_le_bytes() {
+            data.push(to_le_byte);
+        }
+        //清单文件大小
+        for to_le_byte in self.manifest_file_len.to_le_bytes() {
+            data.push(to_le_byte);
+        }
         //根结构的文件指针位置
         for to_le_byte in self.root_struct_pos.to_le_bytes() {
             data.push(to_le_byte);
@@ -244,11 +315,15 @@ impl Attribute {
         for to_le_byte in self.dir_count.to_le_bytes() {
             data.push(to_le_byte);
         }
+        //数据大小
+        for to_le_byte in self.data_len.to_le_bytes() {
+            data.push(to_le_byte);
+        }
         data
     }
 }
 
-static DATA_POS_LIST_COUNT_LEN: usize = 8;
+const DATA_POS_LIST_COUNT_LEN: usize = 8;
 
 #[derive(Debug, Default, PartialEq, Clone)]
 struct DataPosList {
@@ -373,28 +448,25 @@ impl PackStruct {
     fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
         let data = data_block.get_this_data();
         let data_len = data.len();
-        if data.len() < 8 {
-            Err(Error::other("提供的数据大小不够"))
-        } else {
-            //已读取大小
-            let mut read_len = 0;
-            let all_read_len = data_len;
-            let mut items = HashMap::new();
-            while read_len < all_read_len {
-                let item_data_len = usize::from_le_bytes(
-                    data[read_len..read_len + PACK_STRUCT_ITEM_LEN_LEN]
-                        .try_into()
-                        .unwrap(),
-                );
-                let item = PackStructItem::load(&data[read_len..read_len + item_data_len])?;
-                items.insert(item.name.clone(), item);
-                read_len += item_data_len;
-            }
-            Ok(Self {
-                items,
-                run_data: PackStructRun { data_block },
-            })
+
+        //已读取大小
+        let mut read_len = 0;
+        let all_read_len = data_len;
+        let mut items = HashMap::new();
+        while read_len < all_read_len {
+            let item_data_len = usize::from_le_bytes(
+                data[read_len..read_len + PACK_STRUCT_ITEM_LEN_LEN]
+                    .try_into()
+                    .unwrap(),
+            );
+            let item = PackStructItem::load(&data[read_len..read_len + item_data_len])?;
+            items.insert(item.name.clone(), item);
+            read_len += item_data_len;
         }
+        Ok(Self {
+            items,
+            run_data: PackStructRun { data_block },
+        })
     }
 
     fn to_bytes_vec(&self) -> Vec<u8> {
@@ -416,26 +488,26 @@ impl PackStruct {
     }
 
     fn get_block_data(&mut self) -> (Vec<u8>, bool) {
-        let updata = self.to_bytes_vec();
+        let update = self.to_bytes_vec();
         let data_block = &mut self.run_data.data_block;
-        let new_block = data_block.update(&updata);
+        let new_block = data_block.update(&update);
         (data_block.get_block_data().to_vec(), new_block)
     }
 }
 //长度
-static PACK_STRUCT_ITEM_LEN_LEN: usize = 8;
+const PACK_STRUCT_ITEM_LEN_LEN: usize = 8;
 //类型
-static PACK_STRUCT_ITEM_TYPE_INDEX: usize = PACK_STRUCT_ITEM_LEN_LEN;
-static PACK_STRUCT_ITEM_TYPE_LEN: usize = 1;
+const PACK_STRUCT_ITEM_TYPE_INDEX: usize = PACK_STRUCT_ITEM_LEN_LEN;
+const PACK_STRUCT_ITEM_TYPE_LEN: usize = 1;
 //名称长度
-static PACK_STRUCT_ITEM_NAME_LEN_INDEX: usize =
+const PACK_STRUCT_ITEM_NAME_LEN_INDEX: usize =
     PACK_STRUCT_ITEM_TYPE_INDEX + PACK_STRUCT_ITEM_TYPE_LEN;
-static PACK_STRUCT_ITEM_NAME_LEN_LEN: usize = 2;
+const PACK_STRUCT_ITEM_NAME_LEN_LEN: usize = 2;
 //名称
-static PACK_STRUCT_ITEM_NAME_INDEX: usize =
+const PACK_STRUCT_ITEM_NAME_INDEX: usize =
     PACK_STRUCT_ITEM_NAME_LEN_INDEX + PACK_STRUCT_ITEM_NAME_LEN_LEN;
 //虚拟文件元数据的文件指针位置
-static PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN: usize = 8;
+const PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN: usize = 8;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct PackStructItem {
@@ -583,7 +655,7 @@ impl PackStructItemType {
     }
 }
 
-static PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN: usize = 8;
+const PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN: usize = 8;
 
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct PackStructItemDir {
@@ -627,20 +699,20 @@ impl PackStructItemDir {
 //数据格式常量
 //数据长度
 
-static PACK_FILE_METADATA_TYPE_LEN: usize = 1;
-static PACK_FILE_METADATA_BOOL_DATA_INDEX: usize = PACK_FILE_METADATA_TYPE_LEN;
+const PACK_FILE_METADATA_TYPE_LEN: usize = 1;
+const PACK_FILE_METADATA_BOOL_DATA_INDEX: usize = PACK_FILE_METADATA_TYPE_LEN;
 //布尔数据
-static PACK_FILE_METADATA_BOOL_DATA_LEN: usize = 1;
-static PACK_FILE_METADATA_LEN_INDEX: usize =
+const PACK_FILE_METADATA_BOOL_DATA_LEN: usize = 1;
+const PACK_FILE_METADATA_LEN_INDEX: usize =
     PACK_FILE_METADATA_BOOL_DATA_INDEX + PACK_FILE_METADATA_BOOL_DATA_LEN;
 //大小
-static PACK_FILE_METADATA_LEN_LEN: usize = 8;
-static PACK_FILE_METADATA_MODIFIED_INDEX: usize =
+const PACK_FILE_METADATA_LEN_LEN: usize = 8;
+const PACK_FILE_METADATA_MODIFIED_INDEX: usize =
     PACK_FILE_METADATA_LEN_INDEX + PACK_FILE_METADATA_LEN_LEN;
 //修改时间
-static PACK_FILE_METADATA_MODIFIED_LEM: usize = 16;
+const PACK_FILE_METADATA_MODIFIED_LEM: usize = 16;
 //类型数据
-static PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
+const PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
     PACK_FILE_METADATA_MODIFIED_INDEX + PACK_FILE_METADATA_MODIFIED_LEM;
 
 #[derive(PartialEq, Debug, Clone)]
@@ -695,6 +767,14 @@ impl PackFileMetadata {
 
     pub fn file_type(&self) -> &PackFileMetadataType {
         &self.file_type
+    }
+
+    pub fn get_rw<'a>(&self, wbfp_manager: &'a mut WBFPManager) -> io::Result<PackFileWR<'a>> {
+        if let PackFileMetadataType::File(file) = &self.file_type {
+            Ok(PackFileWR::new(wbfp_manager, file.data_pos_list.clone()))
+        } else {
+            Err(Error::new(ErrorKind::IsADirectory, "类型不是文件"))
+        }
     }
 
     fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
@@ -780,16 +860,14 @@ pub enum PackFileMetadataType {
 
 //数据格式常量
 //哈希算法值类型
-static PACK_METADATA_FILE_HASH_TYPE_INDEX: usize = 0;
-static PACK_METADATA_FILE_HASH_TYPE_LEN: usize = 1;
+const PACK_METADATA_FILE_HASH_TYPE_INDEX: usize = 0;
+const PACK_METADATA_FILE_HASH_TYPE_LEN: usize = 1;
 //哈希值长度
-static PACK_METADATA_FILE_HASH_LEN_INDEX: usize = 1;
-static PACK_METADATA_FILE_HASH_LEN_LEN: usize = 1;
+const PACK_METADATA_FILE_HASH_LEN_INDEX: usize = 1;
+const PACK_METADATA_FILE_HASH_LEN_LEN: usize = 1;
 //哈希值
-static PACK_METADATA_FILE_HASH_INDEX: usize =
+const PACK_METADATA_FILE_HASH_INDEX: usize =
     PACK_METADATA_FILE_HASH_TYPE_LEN + PACK_METADATA_FILE_HASH_LEN_LEN;
-//已分配数据列表数量
-static PACK_METADATA_FILE_DATA_POS_S_COUNT_LEN: usize = 8;
 
 #[derive(Default, PartialEq, Debug, Clone)]
 pub struct PackFileMetadataFile {
@@ -836,10 +914,10 @@ impl PackFileMetadataFile {
 
 //数据格式字段
 //文件数量
-static PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
+const PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
 //目录数量
-static PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
-static PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
+const PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
+const PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
 
 #[derive(Default, PartialEq, Debug, Clone)]
 pub struct PackFileMetadataDir {
@@ -888,10 +966,10 @@ impl PackFileMetadataDir {
 }
 
 //清单数据块实际占用大小
-static MANIFEST_DATA_BLOCK_DATA_LEN_LEN: usize = 8;
+const MANIFEST_DATA_BLOCK_DATA_LEN_LEN: usize = 8;
 //清单数据块版本号占用
-static MANIFEST_DATA_BLOCK_DATA_VER_INDEX: usize = MANIFEST_DATA_BLOCK_DATA_LEN_LEN;
-static MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
+const MANIFEST_DATA_BLOCK_DATA_VER_INDEX: usize = MANIFEST_DATA_BLOCK_DATA_LEN_LEN;
+const MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
 
 //清单数据块
 /*
@@ -965,7 +1043,7 @@ impl ManifestDataBlock {
                 + MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                 + MANIFEST_DATA_BLOCK_DATA_VER_LEN;
             //2倍4k对齐大小计算
-            Ok(u64::try_from((data_len / DATA_BLOCK_LEN) * DATA_BLOCK_LEN * 2).unwrap())
+            Ok(Self::get_block_len_us(data_len) as u64)
         }
     }
 
@@ -1094,8 +1172,8 @@ impl ManifestDataBlock {
         let b_err = b_data_ver.is_err();
         //
         if !a_err && !b_err {
-            let a_data_ver = a_data_ver.unwrap();
-            let b_data_ver = b_data_ver.unwrap();
+            let a_data_ver = a_data_ver?;
+            let b_data_ver = b_data_ver?;
             if a_data_ver < b_data_ver {
                 //更新A
                 Self::save_data_to_ab_block_data(
@@ -1151,20 +1229,37 @@ impl ManifestDataBlock {
         }
         //数据
         for (index, value) in data.iter().enumerate() {
-            ab_block_data
-                [MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN + index] =
-                *value;
+            let data_index =
+                MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN + index;
+            if data_index == ab_block_data.len() {
+                panic!("逻辑错误")
+            }
+            ab_block_data[data_index] = *value;
         }
     }
 
     fn get_block_len_us(data_len: usize) -> usize {
-        ((data_len + MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN)
-            / DATA_BLOCK_LEN
-            + 1)
-            * DATA_BLOCK_LEN
+        let block_ab_len =
+            data_len + MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN;
+        let block_len = block_ab_len * 2;
+        let block_ab_len = block_len / DATA_BLOCK_LEN;
+        let block_len = block_ab_len + 1;
+        block_len * DATA_BLOCK_LEN
     }
 
     fn get_block_len_u64(data_len: u64) -> u64 {
         Self::get_block_len_us(usize::try_from(data_len).unwrap()) as u64
     }
+}
+#[test]
+fn get_block_len_us() {
+    assert_eq!(
+        ManifestDataBlock::get_block_len_us(
+            DATA_BLOCK_LEN / 2
+                - MANIFEST_DATA_BLOCK_DATA_LEN_LEN
+                - MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                + 1
+        ),
+        DATA_BLOCK_LEN * 2
+    )
 }

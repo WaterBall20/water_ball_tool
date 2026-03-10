@@ -118,7 +118,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
     wbfp(args.as_slice(), None);
     _ = fs::remove_dir_all(&out_file_path);
 }
-/*
+
 // 水球包文件解包===
 // 不分离数据打包
 #[test]
@@ -152,7 +152,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
         wbfp(args.as_slice(), None);
     }
     _ = fs::remove_dir_all(&out_file_path);
-} */
+}
 
 //ERR===
 //文件查找器输出文件跳过符号链接，但文件不存在
@@ -174,7 +174,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     _ = fs::remove_file(&out_file_path);
 }
 //水球包文件打包，但输入路径不存在
-/* #[test]
+#[test]
 #[should_panic(expected = "NotFound")]
 fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_ERR_DIR_PATH);
@@ -191,4 +191,4 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     ];
     wbfp(args.as_slice(), None);
     _ = fs::remove_dir_all(&out_file_path);
-} */
+}
