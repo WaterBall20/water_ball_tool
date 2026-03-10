@@ -190,7 +190,7 @@ impl Read for PackFileWR<'_> {
             //更改文件位置
             self.manager.set_pack_file_pos_read(pos)?;
             //读取数据
-            self.manager.pack_file_read_root(this_buf)?;
+            self.manager.pack_file_read(this_buf)?;
             read_len += len;
         }
         self.add_pos(read_len as u64)?;
@@ -212,7 +212,7 @@ impl Write for PackFileWR<'_> {
             //更改文件位置
             self.manager.set_pack_file_pos_write(pos)?;
             //写入数据
-            self.manager.pack_file_write_root(this_data)?;
+            self.manager.pack_file_write(this_data)?;
             write_len += len;
             //TODO:未来功能：写入优化、写时复制
         }

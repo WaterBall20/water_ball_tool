@@ -1,7 +1,7 @@
 /*
 创建时间：2026/02/24 08:45
 */
-use crate::command::{ff};
+use crate::command::{ff, wbfp};
 use std::fs;
 
 //TEST===
@@ -20,11 +20,7 @@ fn ff_out_file_skip_symlink() {
     out_file_path.push_str("/test_ff_skip_symlink.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("."),
-        out_file_path.clone(),
-        String::from("-s"),
-    ];
+    let args: Vec<String> = vec![String::from("."), out_file_path.clone(), String::from("-s")];
     ff(args.as_slice(), None);
     _ = fs::remove_file(&out_file_path);
 }
@@ -37,10 +33,7 @@ fn ff_out_file() {
     out_file_path.push_str("/test_ff.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("."),
-        out_file_path.clone(),
-    ];
+    let args: Vec<String> = vec![String::from("."), out_file_path.clone()];
     ff(args.as_slice(), None);
     _ = fs::remove_file(&out_file_path);
 }
@@ -68,7 +61,7 @@ fn ff_no_out_file() {
     let args: Vec<String> = vec![String::from(".")];
     ff(args.as_slice(), None);
 }
-/* 
+
 //水球包文件打包===
 #[test]
 fn wbfp_create_new_pack_m() {
@@ -125,7 +118,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
     wbfp(args.as_slice(), None);
     _ = fs::remove_dir_all(&out_file_path);
 }
-
+/*
 // 水球包文件解包===
 // 不分离数据打包
 #[test]
@@ -160,7 +153,6 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
     }
     _ = fs::remove_dir_all(&out_file_path);
 } */
-
 
 //ERR===
 //文件查找器输出文件跳过符号链接，但文件不存在

@@ -81,14 +81,14 @@ fn create_new_pack_file_and_create_file_wr() {
         let modified_time = 0;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw2 = pack.create_file_new("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack.create_file_new_wr("Test/Test1", modified_time, LENGTH as u64).unwrap();
         _ = rw2.write(&write_data1[..]).unwrap();
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
         _ = rw2.read(&mut read_data1[..]).unwrap();
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack.create_file_new("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack.create_file_new_wr("Test/Test2", modified_time, LENGTH as u64).unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
@@ -119,7 +119,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         //file1
         //w
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw1 = pack.create_file_new("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        let mut rw1 = pack.create_file_new_wr("Test/Test1", modified_time, LENGTH as u64).unwrap();
         _ = rw1.write(&write_data1[..]).unwrap();
         //r
         let mut read_data1: [u8; LENGTH] = [0; 10];
@@ -128,7 +128,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         //file2
         //w
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack.create_file_new("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack.create_file_new_wr("Test/Test2", modified_time, LENGTH as u64).unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         //r
         let mut read_data2: [u8; LENGTH] = [0; 10];

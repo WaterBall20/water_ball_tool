@@ -33,8 +33,8 @@ fn pack_struct_to_bytes_vec_and_load() {
         }),
         pack_file_metadata: None,
     });
-    let data = ps.to_bytes_vec();
-    let ps_load = PackStruct::load(0, &data, ManifestDataBlock::default()).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(ps.get_block_data().0, 0).unwrap();
+    let ps_load = PackStruct::load(block_data).unwrap();
     assert_eq!(ps, ps_load);
 }
 #[test]
@@ -52,7 +52,7 @@ fn pack_struct_item_to_bytes_vec_and_load() {
 
 #[test]
 fn pack_file_metadata_file_to_bytes_vec_and_load() {
-    let pfm = PackFileMetadata {
+    let mut pfm = PackFileMetadata {
         data_block: ManifestDataBlock::default(),
         cow: true,
         len: 53124,
@@ -66,21 +66,21 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
             },
         }),
     };
-    let data = pfm.to_bytes_vec();
-    let pfm_load = PackFileMetadata::load(&data, ManifestDataBlock::default()).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
+    let pfm_load = PackFileMetadata::load(block_data).unwrap();
     assert_eq!(pfm, pfm_load);
 }
 #[test]
 fn pack_file_metadata_dir_to_bytes_vec_and_load() {
-    let pfm = PackFileMetadata {
+    let mut pfm = PackFileMetadata {
         data_block: ManifestDataBlock::default(),
         cow: true,
         len: 52035,
         modified: 294,
         file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
     };
-    let data = pfm.to_bytes_vec();
-    let pfm_load = PackFileMetadata::load(&data, ManifestDataBlock::default()).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
+    let pfm_load = PackFileMetadata::load(block_data).unwrap();
     assert_eq!(pfm, pfm_load);
 }
 

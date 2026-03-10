@@ -95,12 +95,12 @@ fn m_search(path: &str, skip_symlink: bool, pb: &Option<ProgressBar>) -> io::Res
         ff.search(path.as_ref(), skip_symlink, None)
     }
 }
-/* 
+
 //水球包文件
 pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     let arg = args.first().expect("参数不足");
     match arg.as_str() {
-        "-s" => wbfp_s(&args[1..], mp),
+        //"-s" => wbfp_s(&args[1..], mp),
         "-m" => wbfp_m(&args[1..], mp),
         _ => panic!("未知的路由参数: {arg}\\
     提示：
@@ -125,12 +125,12 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     let s_data_file = match args.get(2) {
         Some(value) => {
             if value.contains("-f") {
-                !water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE
+                !water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE
             } else {
-                water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE
+                water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE
             }
         }
-        None => water_ball_tool::wb_files_pack::DEFAULT_S_DATA_FILE,
+        None => water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE,
     };
 
     //进度条
@@ -248,7 +248,8 @@ fn write_pack(
         };
         //尝试创建虚拟文件
         let mut out_file =
-            match pack_man.create_file_new(&this_pack_path, info.modified_time(), info.length()) {
+            match pack_man.create_file_new_wr(&this_pack_path, info.modified_time(), info.length
+            ()) {
                 Ok(file_wr) => file_wr,
                 Err(err) => {
                     error!("无法创建虚拟文件{this_pack_path:?},将跳过，err：{err}");
@@ -261,7 +262,7 @@ fn write_pack(
             //读
             match in_file.read(run_buf) {
                 Ok(this_read_len) => {
-                    match out_file.write(pack_man, &run_buf[..this_read_len]) {
+                    match out_file.write(&run_buf[..this_read_len]) {
                         Ok(this_write_len) => {
                             if this_read_len == 0 {
                                 warn!("文件{this_in_path:?}读取的大小为0, 将跳过。");
@@ -330,7 +331,7 @@ fn write_pack(
     Ok(())
 }
 
-//水球包文件解包
+/*//水球包文件解包
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
     if args.len() < 2 {
@@ -518,5 +519,4 @@ fn read_pack(
         &mut buf,
     )?;
     Ok(())
-}
- */
+}*/
