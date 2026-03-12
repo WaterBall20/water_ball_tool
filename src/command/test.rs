@@ -82,7 +82,7 @@ fn wbfp_create_new_pack_m() {
 }
 // 长时间
 #[test]
-#[ignore]
+#[ignore = "长时间"]
 fn wbfp_create_new_pack_m_longtime() {
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
     out_dir_path.push_str("/create_new_pack_m");
@@ -93,12 +93,13 @@ fn wbfp_create_new_pack_m_longtime() {
     //命令行参数处理
     let args: Vec<String> = vec![
         String::from("-m"),
-        String::from("/home/waterball/Documents"),
+        // String::from("/home/waterball/Documents/Dev/JavaRust/MC-MMD-rust/rust_engine/src/animation/"),
+        String::from("/usr/bin"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), None);
-    _ = fs::remove_dir_all(&out_file_path);
 }
+
 // 不分离数据
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file() {
@@ -120,7 +121,27 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
 }
 
 // 水球包文件解包===
-// 不分离数据打包
+//分离
+// 长时间
+#[test]
+#[ignore = "长时间"]
+fn wbfp_create_new_pack_s_longtime() {
+    let mut in_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
+    in_dir_path.push_str("/create_new_pack_m");
+    _ = fs::create_dir_all(&in_dir_path);
+    let mut in_file_path = in_dir_path.clone();
+    in_file_path.push_str("/pack");
+    //命令行参数处理
+    let args: Vec<String> = vec![String::from("-s"), in_file_path.clone(), {
+        let mut out_dir_path = in_dir_path.clone();
+        out_dir_path.push_str("/s_pack");
+        _ = fs::create_dir_all(&out_dir_path);
+        out_dir_path
+    }];
+    wbfp(args.as_slice(), None);
+    _ = fs::remove_dir_all(&in_file_path);
+}
+// 不分离数据打包和解包
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file_s() {
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
@@ -147,7 +168,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
         let args: Vec<String> = vec![
             String::from("-s"),
             out_file_path.clone(),
-            out_dir_path.clone()
+            out_dir_path.clone(),
         ];
         wbfp(args.as_slice(), None);
     }

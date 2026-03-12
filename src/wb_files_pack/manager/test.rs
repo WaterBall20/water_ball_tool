@@ -3,7 +3,7 @@
 */
 use crate::wb_files_pack::manager::{create_new_file, create_new_file2, open_file};
 use std::fs;
-use std::io::{ Read, Seek, SeekFrom, Write };
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
@@ -54,7 +54,8 @@ fn create_new_pack_file_and_create_dir() {
     {
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         let test_pack_path = "Test/Test2";
-        pack.create_dir_all(test_pack_path).expect("创建虚假目录失败");
+        pack.create_dir_all(test_pack_path)
+            .expect("创建虚假目录失败");
         pack.get_dir(test_pack_path).expect("获取虚拟目录失败");
         println!("已创建文件");
     }
@@ -81,14 +82,18 @@ fn create_new_pack_file_and_create_file_wr() {
         let modified_time = 0;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw2 = pack.create_file_new_wr("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack
+            .create_file_new_wr("Test/Test1", modified_time, LENGTH as u64)
+            .unwrap();
         _ = rw2.write(&write_data1[..]).unwrap();
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
         _ = rw2.read(&mut read_data1[..]).unwrap();
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack.create_file_new_wr("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack
+            .create_file_new_wr("Test/Test2", modified_time, LENGTH as u64)
+            .unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
@@ -119,7 +124,9 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         //file1
         //w
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let mut rw1 = pack.create_file_new_wr("Test/Test1", modified_time, LENGTH as u64).unwrap();
+        let mut rw1 = pack
+            .create_file_new_wr("Test/Test1", modified_time, LENGTH as u64)
+            .unwrap();
         _ = rw1.write(&write_data1[..]).unwrap();
         //r
         let mut read_data1: [u8; LENGTH] = [0; 10];
@@ -128,7 +135,9 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         //file2
         //w
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let mut rw2 = pack.create_file_new_wr("Test/Test2", modified_time, LENGTH as u64).unwrap();
+        let mut rw2 = pack
+            .create_file_new_wr("Test/Test2", modified_time, LENGTH as u64)
+            .unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         //r
         let mut read_data2: [u8; LENGTH] = [0; 10];
@@ -142,7 +151,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
 }
 
 //创建包文件并打开刚创建的包文件
- #[test]
+#[test]
 fn create_new_file_and_open_pack() {
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
@@ -151,19 +160,34 @@ fn create_new_file_and_open_pack() {
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
     remove_test_pack_files(&pack_file);
+    let test_file_path = "/Test/Test2/Test3";
+    let test_data = vec![51, 31, 55, 6, 7, 8, 3, 67, 93];
     //
-    {
+    let attribute = {
         //创建文件
-        create_new_file(&pack_file).expect("无法创建文件");
-    }
+        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut rw = pack
+            .create_file_new_wr(test_file_path, 0, test_data.len() as u64)
+            .expect("无法创建虚拟文件");
+        _ = rw.write(&test_data).expect("无法写入虚拟文件");
+        pack.save_all().unwrap();
+        pack.manifest.attribute.clone()
+    };
     //打开已创建并关闭的文件
     {
-        open_file(&pack_file).expect("无法打开包文件");
+        let mut pack = open_file(&pack_file).expect("无法打开包文件");
+        let mut rw = pack
+            .get_file_rw(test_file_path)
+            .expect("无法打开虚拟文件读写器");
+        let mut test_data_read = vec![0; test_data.len()];
+        let len = rw.read(&mut test_data_read).expect("无法读取虚拟文件");
+        assert_eq!(len, test_data.len());
+        assert_eq!(test_data, test_data_read);
+        assert_eq!(&attribute, pack.manifest.attribute())
     }
     remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
-
 
 #[test]
 fn create_new_file_and_open_pack_manifest_ver() {
@@ -179,15 +203,15 @@ fn create_new_file_and_open_pack_manifest_ver() {
         //创建文件
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::MANIFEST_VERSION + 1;
-        pack.manifest.attribute.version_compatible = super::MANIFEST_VERSION_COMPATIBLE - 1;
+        pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
+        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
     //打开已创建并关闭的文件
     {
         open_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir)
+    _ = fs::remove_dir_all(pack_dir);
 }
 
 //ERR===
@@ -229,15 +253,15 @@ fn create_new_file_and_open_pack_err_manifest_ver1() {
         //创建文件
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::MANIFEST_VERSION + 1;
-        pack.manifest.attribute.version_compatible = super::MANIFEST_VERSION + 1;
+        pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
+        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
     }
     //打开已创建并关闭的文件
     {
         open_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir)
+    _ = fs::remove_dir_all(pack_dir);
 }
 
 #[test]
@@ -255,14 +279,13 @@ fn create_new_file_and_open_pack_err_manifest_ver2() {
         //创建文件
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::MANIFEST_VERSION_COMPATIBLE - 1;
-        pack.manifest.attribute.version_compatible = super::MANIFEST_VERSION_COMPATIBLE - 1;
+        pack.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
     //打开已创建并关闭的文件
     {
         open_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir)
+    _ = fs::remove_dir_all(pack_dir);
 }
-

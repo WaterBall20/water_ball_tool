@@ -251,7 +251,7 @@ fn write_pack(
         };
         //尝试创建虚拟文件
         let mut out_file =
-            match pack_man.create_file_new_wr(&this_pack_path, info.modified_time(), info.length())
+            match pack_man.create_file_new_wr(this_pack_path, info.modified_time(), info.length())
             {
                 Ok(file_wr) => file_wr,
                 Err(err) => {
@@ -378,8 +378,6 @@ fn read_pack(
         for (name, item) in pack_struct_items {
             let this_out_path = out_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
-            //确保结构和元数据被加载
-            pack_man.load_pack_struct_metadata_path(&this_pack_path)?;
             match item.item_type() {
                 PackStructItemType::File => {
                     if let Some(metadata) = item.metadata() {
@@ -505,6 +503,8 @@ fn read_pack(
             pb_c(metadata.len() - write_len, 0)
         }
     }
+    //加载所有结构和元数据
+    pack_man.load_all_data(false)?;
 
     //获取根列表
     let root_struct_list = pack_man.get_root_struct_items().clone();

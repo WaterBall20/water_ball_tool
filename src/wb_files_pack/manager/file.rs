@@ -4,13 +4,15 @@
 use super::WBFPManager;
 use crate::wb_files_pack::DataPosList;
 use std::io;
-use std::io::{ Error, Read, Seek, SeekFrom, Write };
+use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 pub struct PackFileWR<'a> {
     //管理器实例
     manager: &'a mut WBFPManager,
     //文件位置
-    file_pos: u64,
+    pos: u64,
+    //文件实际大小
+    len: u64,
     //文件分配的位置
     file_pos_list: DataPosList,
     //缓存_文件分配的位置当前索引
@@ -19,14 +21,16 @@ pub struct PackFileWR<'a> {
     temp_pos_this_len: u64,
 }
 impl PackFileWR<'_> {
-    pub(in crate::wb_files_pack) fn new<'a>(
-        manager: &'a mut WBFPManager,
-        file_pos_list: DataPosList
-    ) -> PackFileWR<'a> {
+    pub(in crate::wb_files_pack) fn new(
+        manager: &'_ mut WBFPManager,
+        file_pos_list: DataPosList,
+        file_len: u64,
+    ) -> PackFileWR<'_> {
         PackFileWR {
             manager,
-            file_pos: 0,
+            pos: 0,
             file_pos_list,
+            len: file_len,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
         }
@@ -39,14 +43,19 @@ impl PackFileWR<'_> {
 
     //获取追加位置列表
     fn get_add_pos_s(&self, add_pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
-        self.get_add_pos_s2(self.temp_pos_index, self.temp_pos_this_len, add_pos, is_read)
+        self.get_add_pos_s2(
+            self.temp_pos_index,
+            self.temp_pos_this_len,
+            add_pos,
+            is_read,
+        )
     }
     fn get_add_pos_s2(
         &self,
         start_pos_index: usize,
         start_pos_len: u64,
         add_pos: u64,
-        is_read: bool
+        is_read: bool,
     ) -> io::Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
@@ -98,7 +107,7 @@ impl PackFileWR<'_> {
         self.temp_pos_index = pos_index;
         self.temp_pos_this_len = *pos_len;
 
-        self.file_pos = pos;
+        self.pos = pos;
         Ok(())
     }
 
@@ -123,7 +132,7 @@ impl PackFileWR<'_> {
             self.temp_pos_this_len = *add_pos_len;
         }
         //更新位置
-        self.file_pos += length;
+        self.pos += length;
     }
 
     //减少文件位置
@@ -132,7 +141,7 @@ impl PackFileWR<'_> {
     }
     fn sub_pos2(&mut self, length: u64, _sub_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
         //TODO：暂时使用从头计算，可能存在性能损失，部分功能未实现
-        let r_pos = self.file_pos.cast_signed() - length.cast_signed();
+        let r_pos = self.pos.cast_signed() - length.cast_signed();
         if r_pos < 0 {
             self.set_pos(0)?;
             Ok(())
@@ -150,29 +159,27 @@ impl Seek for PackFileWR<'_> {
                 self.set_pos(pos)?;
                 Ok(pos)
             }
-            SeekFrom::Current(pos) =>
-                match pos {
-                    0 => { Ok(self.file_pos) }
-                    //大于0
-                    1.. => {
-                        self.add_pos(pos.cast_unsigned())?;
-                        Ok(self.file_pos)
-                    }
-                    //小于0
-                    ..0 => {
-                        self.sub_pos((-pos).cast_unsigned())?;
-                        Ok(self.file_pos)
-                    }
+            SeekFrom::Current(pos) => match pos {
+                0 => Ok(self.pos),
+                //大于0
+                1.. => {
+                    self.add_pos(pos.cast_unsigned())?;
+                    Ok(self.pos)
                 }
-            SeekFrom::End(pos) =>
-                match pos {
-                    0 => { Ok(self.file_pos) }
-                    1.. => {
-                        self.sub_pos((-pos).cast_unsigned())?;
-                        Ok(self.file_pos)
-                    }
-                    ..0 => { Err(Error::other("未实现动态扩容")) }
+                //小于0
+                ..0 => {
+                    self.sub_pos((-pos).cast_unsigned())?;
+                    Ok(self.pos)
                 }
+            },
+            SeekFrom::End(pos) => match pos {
+                0 => Ok(self.pos),
+                1.. => {
+                    self.sub_pos((-pos).cast_unsigned())?;
+                    Ok(self.pos)
+                }
+                ..0 => Err(Error::other("未实现动态扩容")),
+            },
         }
     }
 }
@@ -185,7 +192,11 @@ impl Read for PackFileWR<'_> {
         let mut read_len = 0;
         //读取
         for (pos, len) in pos_s {
-            let len = usize::try_from(len).unwrap();
+            let len = if (read_len as u64 + len) <= self.len {
+                usize::try_from(len).unwrap()
+            } else {
+                usize::try_from(self.len).unwrap() - read_len
+            };
             let this_buf = &mut buf[read_len..read_len + len];
             //更改文件位置
             self.manager.set_pack_file_pos_read(pos)?;
