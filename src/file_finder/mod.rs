@@ -109,10 +109,14 @@ pub struct FileFinder;
 
 impl FileFinder {
     fn get_file_name(path_buf: &PathBuf) -> Option<&str> {
-        if let Some(name) = path_buf.file_name() { if let Some(name) = name.to_str() { Some(name) } else {
-            warn!("无法将OsStr:{name:?} 转换成Str");
-            None
-        } } else {
+        if let Some(name) = path_buf.file_name() {
+            if let Some(name) = name.to_str() {
+                Some(name)
+            } else {
+                warn!("无法将OsStr:{name:?} 转换成Str");
+                None
+            }
+        } else {
             warn!("目录:（{path_buf:?}）无法获取文件名。");
             None
         }
@@ -180,8 +184,8 @@ impl FileFinder {
                             hash_map.insert(name, file_info);
                             data_length += len;
                         }
-                        Err(_) => {
-                            error!("无法获取文件:{path_buf:?}的元数据");
+                        Err(err) => {
+                            error!("无法获取文件:{path_buf:?}的元数据, err: {err}");
                         }
                     }
                 }
@@ -241,15 +245,15 @@ impl FileFinder {
                             file_count += r.add_file_count;
                             dir_count += r.add_dir_count;
                         }
-                        Err(_) => {
-                            error!("无法获取目录: {path_buf:?}的元数据");
+                        Err(err) => {
+                            error!("无法获取目录: {path_buf:?}的元数据, err: {err}");
                         }
                     }
                 }
             } else if path_buf.is_symlink() {
                 warn!("符号链接 {path_buf:?} 已断。");
             } else {
-                error!(" {path_buf:?} 无法访问");
+                error!("{path_buf:?} 无法访问");
             }
         }
         MSearchReturn {

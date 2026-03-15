@@ -3,7 +3,7 @@ use std::io::Write;
 use std::{env, io};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 // 开始时间:2026-02-08 22:37
 
 mod command;
