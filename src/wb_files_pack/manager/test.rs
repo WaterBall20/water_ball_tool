@@ -89,6 +89,7 @@ fn create_new_pack_file_and_create_file_wr() {
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
         _ = rw2.read(&mut read_data1[..]).unwrap();
+        drop(rw2);
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
         let mut rw2 = pack
@@ -132,6 +133,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         let mut read_data1: [u8; LENGTH] = [0; 10];
         rw1.seek(SeekFrom::Start(0)).unwrap();
         _ = rw1.read(&mut read_data1[..]).unwrap();
+        drop(rw1);
         //file2
         //w
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
@@ -163,15 +165,29 @@ fn create_new_file_and_open_pack() {
     let test_file_path = "/Test/Test2/Test3";
     let test_data = vec![51, 31, 55, 6, 7, 8, 3, 67, 93];
     //
-    let attribute = {
+    let (attribute, root_struct, other_name_list) = {
         //创建文件
         let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        //随机创建文件
+        let mut other_name_list = Vec::new();
+        for _ in 0..10 {
+            let name = rand::random_range(0..100_000_000).to_string();
+            let len = rand::random_range(0..1_000_100);
+            let modified = rand::random_range(0..100_000_000_000);
+            other_name_list.push(name.clone());
+            pack.create_file_new2(&name, modified, len, false, false)
+                .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
+        }
         let mut rw = pack
             .create_file_new_wr(test_file_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
         _ = rw.write(&test_data).expect("无法写入虚拟文件");
-        pack.save_all().unwrap();
-        pack.manifest.attribute.clone()
+        drop(rw);
+        (
+            pack.manifest.attribute.clone(),
+            pack.manifest.root_struct.clone(),
+            other_name_list,
+        )
     };
     //打开已创建并关闭的文件
     {
@@ -181,9 +197,17 @@ fn create_new_file_and_open_pack() {
             .expect("无法打开虚拟文件读写器");
         let mut test_data_read = vec![0; test_data.len()];
         let len = rw.read(&mut test_data_read).expect("无法读取虚拟文件");
+        drop(rw);
+        pack.load_all_data(false).expect("无法加载所有元数据");
         assert_eq!(len, test_data.len());
         assert_eq!(test_data, test_data_read);
-        assert_eq!(&attribute, pack.manifest.attribute())
+        //assert_eq!(&attribute, pack.manifest.attribute());
+        //细分判断
+        for name in other_name_list {
+            let a_item = root_struct.items.get(&name).unwrap();
+            let b_item = pack.manifest.root_struct.items.get(&name).unwrap();
+            assert_eq!(a_item, b_item);
+        }
     }
     remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
@@ -193,7 +217,7 @@ fn create_new_file_and_open_pack() {
 fn create_new_file_and_open_pack_manifest_ver() {
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_open_pack_json_ver");
+    pack_dir.push_str("/create_new_file_and_open_pack_manifest_ver");
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");

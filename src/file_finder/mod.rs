@@ -109,10 +109,16 @@ pub struct FileFinder;
 
 impl FileFinder {
     fn get_file_name(path_buf: &PathBuf) -> Option<&str> {
-        if let Some(name) = path_buf.file_name() { if let Some(name) = name.to_str() { Some(name) } else {
-            warn!("无法将OsStr:{name:?} 转换成Str");
-            None
-        } } else {
+        if let Some(name) = path_buf.file_name() {
+            if let Some(name) = name.to_str() {
+                Some(name)
+            } else {
+                panic!("无法将OsStr:{name:?} 转换成Str");
+                warn!("无法将OsStr:{name:?} 转换成Str");
+                None
+            }
+        } else {
+            panic!("目录:（{path_buf:?}）无法获取文件名。");
             warn!("目录:（{path_buf:?}）无法获取文件名。");
             None
         }
@@ -141,6 +147,7 @@ impl FileFinder {
         for entry in match path.read_dir() {
             Ok(rd) => rd,
             Err(err) => {
+                panic!("获取目录迭代器错误:path:{path:?},err:{err}");
                 error!("获取目录迭代器错误:path:{path:?},err:{err}");
                 return MSearchReturn {
                     callback,
@@ -150,7 +157,7 @@ impl FileFinder {
                 };
             }
         }
-            .flatten()
+        .flatten()
         {
             let path_buf = entry.path();
             //println!("[消息]找到: '{path_buf:?}' ");
@@ -181,6 +188,7 @@ impl FileFinder {
                             data_length += len;
                         }
                         Err(_) => {
+                            panic!("无法获取文件:{path_buf:?}的元数据");
                             error!("无法获取文件:{path_buf:?}的元数据");
                         }
                     }
@@ -242,6 +250,7 @@ impl FileFinder {
                             dir_count += r.add_dir_count;
                         }
                         Err(_) => {
+                            panic!("无法获取目录: {path_buf:?}的元数据");
                             error!("无法获取目录: {path_buf:?}的元数据");
                         }
                     }
@@ -249,7 +258,8 @@ impl FileFinder {
             } else if path_buf.is_symlink() {
                 warn!("符号链接 {path_buf:?} 已断。");
             } else {
-                error!(" {path_buf:?} 无法访问");
+                panic!("{path_buf:?} 无法访问");
+                error!("{path_buf:?} 无法访问");
             }
         }
         MSearchReturn {
@@ -285,7 +295,7 @@ impl FileFinder {
             Err(Error::new(
                 ErrorKind::NotADirectory,
                 "提供的路径是文件不是目录",
-            ))
+            )).unwrap()
         } else if path.is_symlink() {
             Err(Error::new(
                 ErrorKind::NotADirectory,
@@ -295,7 +305,7 @@ impl FileFinder {
             Err(Error::new(
                 ErrorKind::NotFound,
                 "未找到目录，提供的路径不存在或拒绝访问",
-            ))
+            )).unwrap()
         }
     }
 

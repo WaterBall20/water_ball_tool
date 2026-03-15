@@ -1,65 +1,74 @@
 use crate::wb_files_pack::{
-    Attribute,
-    DataPosList,
-    ManifestDataBlock,
-    PackFileMetadata,
-    PackFileMetadataDir,
-    PackFileMetadataFile,
-    PackFileMetadataType,
-    PackStruct,
-    PackStructItem,
-    PackStructItemDir,
-    PackStructItemType,
+    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataDir,
+    PackFileMetadataFile, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
+    PackStructItemDir, PackStructItemType,
 };
 
 #[test]
 fn pack_struct_to_bytes_vec_and_load() {
     let mut ps = PackStruct::default();
-    ps.items.insert("test".to_string(), PackStructItem {
-        name: "test".to_string(),
-        metadata_file_pos: 5867,
-        item_type: PackStructItemType::Dir(PackStructItemDir {
-            struct_file_pos: 2894,
-            pack_struct: None,
-        }),
-        pack_file_metadata: None,
-    });
-    ps.items.insert("test2".to_string(), PackStructItem {
-        name: "test2".to_string(),
-        metadata_file_pos: 2941,
-        item_type: PackStructItemType::Dir(PackStructItemDir {
-            struct_file_pos: 2984,
-            pack_struct: None,
-        }),
-        pack_file_metadata: None,
-    });
+    ps.items.insert(
+        "test".to_string(),
+        PackStructItem {
+            name: "test".to_string(),
+            metadata_file_pos: 5867,
+            item_type: PackStructItemType::Dir(PackStructItemDir {
+                struct_file_pos: 2894,
+                pack_struct: None,
+            }),
+            metadata: PackFileMetadataRun::NoLoad,
+        },
+    );
+    ps.items.insert(
+        "test2".to_string(),
+        PackStructItem {
+            name: "test2".to_string(),
+            metadata_file_pos: 2941,
+            item_type: PackStructItemType::Dir(PackStructItemDir {
+                struct_file_pos: 2984,
+                pack_struct: None,
+            }),
+            metadata: PackFileMetadataRun::NoLoad,
+        },
+    );
     let block_data = ManifestDataBlock::from_block_data_new(ps.get_block_data().0, 0).unwrap();
     let ps_load = PackStruct::load(block_data).unwrap();
     assert_eq!(ps, ps_load);
 }
 #[test]
-fn pack_struct_item_to_bytes_vec_and_load() {
+fn pack_struct_item_dir_to_bytes_vec_and_load() {
     let psi = PackStructItem {
         name: String::new(),
-        pack_file_metadata: None,
+        metadata: PackFileMetadataRun::NoLoad,
         item_type: PackStructItemType::Dir(PackStructItemDir::default()),
-        metadata_file_pos: 0,
+        metadata_file_pos: 7_766_735_636,
     };
     let data = psi.to_bytes_vec();
     let psi_load = PackStructItem::load(&data).unwrap();
     assert_eq!(psi, psi_load);
 }
-
+#[test]
+fn pack_struct_item_file_to_bytes_vec_and_load() {
+    let psi = PackStructItem {
+        name: String::new(),
+        metadata: PackFileMetadataRun::NoLoad,
+        item_type: PackStructItemType::File,
+        metadata_file_pos: 689_669,
+    };
+    let data = psi.to_bytes_vec();
+    let psi_load = PackStructItem::load(&data).unwrap();
+    assert_eq!(psi, psi_load);
+}
 #[test]
 fn pack_file_metadata_file_to_bytes_vec_and_load() {
     let mut pfm = PackFileMetadata {
         data_block: ManifestDataBlock::default(),
-        cow: true,
+        cow: false,
         len: 53124,
         modified: 5715,
         file_type: PackFileMetadataType::File(PackFileMetadataFile {
             hash_type: 0,
-            hash: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            hash: vec![0],
             data_pos_list: DataPosList {
                 data_block: None,
                 list: vec![(0, 100), (10, 1), (223, 5890)],

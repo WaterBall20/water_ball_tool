@@ -180,7 +180,7 @@ impl Attribute {
     fn load(data: &[u8]) -> io::Result<Self> {
         //大小检查
         if data.len() < MANIFEST_ATTRIBUTE_LEN {
-            Err(Error::other("提供的数据大小不够"))
+            Err(Error::other("提供的数据大小不够")).unwrap()
         } else {
             //格式版本
             let version =
@@ -197,9 +197,11 @@ impl Attribute {
             if version != MANIFEST_VERSION {
                 if version < MANIFEST_VERSION_COMPATIBLE {
                     //版本过低
+                    panic!("版本过低，无法解析");
                     Err(Error::other("版本过低，无法解析"))?;
                 } else if version_compatible > MANIFEST_VERSION {
                     //版本过高
+                    panic!("版本过高，无法解析");
                     Err(Error::other("版本过高，无法解析"))?;
                 }
             }
@@ -319,6 +321,7 @@ impl Attribute {
         for to_le_byte in self.data_len.to_le_bytes() {
             data.push(to_le_byte);
         }
+        assert!(!data.is_empty(), "输出数据为空，但不能为空");
         data
     }
 }
@@ -399,6 +402,7 @@ impl DataPosList {
                 data.push(to_le_byte);
             }
         }
+        assert!(!data.is_empty(), "输出数据为空，但不能为空");
         data
     }
 
@@ -451,7 +455,8 @@ impl PackStruct {
     }
 
     fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
-        let data = data_block.get_this_data()?;
+        let empty_data = Vec::new();
+        let data = data_block.get_this_data().unwrap_or(&empty_data);
         let data_len = data.len();
 
         //已读取大小
@@ -490,6 +495,11 @@ impl PackStruct {
             data.push(items_datum);
         }
         data*/
+        assert_eq!(
+            self.items.is_empty(),
+            items_data.is_empty(),
+            "输出的数据为空，但存在数据，不应为空"
+        );
         items_data
     }
 
@@ -524,10 +534,10 @@ pub struct PackStructItem {
     //结构项类型
     item_type: PackStructItemType,
     //元数据
-    pack_file_metadata: Option<PackFileMetadata>,
+    metadata: PackFileMetadataRun,
 } //包结构项
 impl PackStructItem {
-    fn new_empty_dir(name: &str, pack_file_metadata: Option<PackFileMetadata>) -> Self {
+    fn new_empty_dir(name: &str, metadata: PackFileMetadataRun) -> Self {
         Self {
             name: name.to_string(),
             metadata_file_pos: 0,
@@ -535,7 +545,7 @@ impl PackStructItem {
                 struct_file_pos: 0,
                 pack_struct: Some(PackStruct::default()),
             }),
-            pack_file_metadata,
+            metadata,
         }
     }
 
@@ -544,7 +554,7 @@ impl PackStructItem {
             name: String::new(),
             metadata_file_pos: 0,
             item_type: PackStructItemType::File,
-            pack_file_metadata: None,
+            metadata: PackFileMetadataRun::None,
         }
     }
 
@@ -556,8 +566,8 @@ impl PackStructItem {
         &self.item_type
     }
 
-    pub fn metadata(&self) -> &Option<PackFileMetadata> {
-        &self.pack_file_metadata
+    pub fn metadata(&self) -> &PackFileMetadataRun {
+        &self.metadata
     }
 
     fn l_clone(&self) -> Self {
@@ -565,7 +575,7 @@ impl PackStructItem {
             name: self.name.clone(),
             metadata_file_pos: self.metadata_file_pos,
             item_type: self.item_type.l_clone(),
-            pack_file_metadata: None,
+            metadata: PackFileMetadataRun::None,
         }
     }
 
@@ -594,13 +604,13 @@ impl PackStructItem {
         let item_type = match type_value {
             0 => PackStructItemType::File,
             1 => PackStructItemType::Dir(PackStructItemDir::load(&data[type_data_start_pos..])),
-            _ => Err(Error::other("未知类型"))?,
+            _ => Err(Error::other("未知类型")).unwrap(),
         };
         Ok(Self {
             name,
             metadata_file_pos,
             item_type,
-            pack_file_metadata: None,
+            metadata: PackFileMetadataRun::NoLoad,
         })
     }
 
@@ -643,6 +653,7 @@ impl PackStructItem {
         for type_datum in type_data.1 {
             data.push(type_datum);
         }
+        assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
         data
     }
 }
@@ -699,7 +710,52 @@ impl PackStructItemDir {
         for to_le_byte in self.struct_file_pos.to_le_bytes() {
             data.push(to_le_byte);
         }
+        assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
         data
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PackFileMetadataRun {
+    None,
+    NoLoad,
+    Loaded(PackFileMetadata),
+    Locked,
+}
+impl PackFileMetadataRun {
+    fn take(&mut self, this_type: Self) -> Option<PackFileMetadata> {
+        match std::mem::replace(self, this_type) {
+            Self::Loaded(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn try_lock(&mut self) -> Result<PackFileMetadata, Error> {
+        match self {
+            Self::Loaded(_) => Ok(self.take(Self::Locked).expect("行为异常")),
+            Self::NoLoad => Err(Error::other("实例没有被加载")),
+            Self::Locked => Err(Error::other("无法获得锁，已被锁定")),
+            Self::None => Err(Error::other("无法对没有元数据的类型获得锁")),
+        }
+    }
+
+    fn try_to_noload(&mut self) -> Result<Option<PackFileMetadata>, Error> {
+        match self {
+            Self::Loaded(_) => Ok(Some(
+                self.take(PackFileMetadataRun::NoLoad).expect("行为异常"),
+            )),
+            Self::Locked => Err(Error::other("元数据正在被锁定")),
+            _ => Ok(None),
+        }
+    }
+
+    fn unlock(&mut self) -> () {
+        match self {
+            Self::Locked => {
+                self.take(PackFileMetadataRun::NoLoad);
+            }
+            _ => panic!("逻辑错误"),
+        }
     }
 }
 
@@ -776,20 +832,8 @@ impl PackFileMetadata {
         &self.file_type
     }
 
-    pub fn get_rw<'a>(&self, wbfp_manager: &'a mut WBFPManager) -> io::Result<PackFileWR<'a>> {
-        if let PackFileMetadataType::File(file) = &self.file_type {
-            Ok(PackFileWR::new(
-                wbfp_manager,
-                file.data_pos_list.clone(),
-                self.len,
-            ))
-        } else {
-            Err(Error::new(ErrorKind::IsADirectory, "类型不是文件"))
-        }
-    }
-
     fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
-        let data = data_block.get_this_data()?;
+        let data = data_block.get_this_data().unwrap();
         //类型
         let this_type = data[0];
         //布尔值
@@ -812,7 +856,7 @@ impl PackFileMetadata {
         let file_type = match this_type {
             0 => PackFileMetadataType::File(PackFileMetadataFile::load(type_data)),
             1 => PackFileMetadataType::Dir(PackFileMetadataDir::load(type_data)),
-            _ => Err(Error::other("未知类型"))?,
+            _ => Err(Error::other("未知类型")).unwrap(),
         };
 
         Ok(Self {
@@ -856,6 +900,7 @@ impl PackFileMetadata {
         for type_datum in type_data {
             data.push(type_datum);
         }
+        assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
         data
     }
 
@@ -996,53 +1041,54 @@ const MANIFEST_DATA_BLOCK_DATA_VER_LEN: usize = 4;
 
 //清单数据块
 /*
-清单数据块是4k对其的，
-清单数据块采用A/B机制尽量实现原子化更新和备份，
+清单数据块是对其的，
+清单数据块采用A/B机制尽量实现原地原子化更新和备份，
 由于A/B机制，所以内部分成两块，每块的前面版本和末尾的版本应是对应的，如果不对应则说明数据很可能损坏。
-数据块格式：4字节32位占用大小+4字节32位版本
+数据块格式：8个字节64位占用大小+4个字节32位版本
 */
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 struct ManifestDataBlock {
     file_pos: u64,
-    run_block_data: Vec<u8>,
-}
-impl Clone for ManifestDataBlock {
-    fn clone(&self) -> Self {
-        Self {
-            file_pos: self.file_pos,
-            run_block_data: Vec::new(),
-        }
-    }
+    block_data: Vec<u8>,
+    is_a_data: bool,
+    data_len: u64,
 }
 
 impl ManifestDataBlock {
     fn from_data_new(data: &[u8], file_pos: u64) -> io::Result<Self> {
         let block_len = Self::get_block_len_us(data.len());
+        let data_len = data.len() as u64;
         let mut run_block_data = vec![0; block_len];
         Self::save_data_to_block_data_new(data, &mut run_block_data)?;
         Ok(Self {
             file_pos,
-            run_block_data,
+            block_data: run_block_data,
+            is_a_data: true,
+            data_len,
         })
     }
 
     fn from_block_data_new(block_data: Vec<u8>, file_pos: u64) -> io::Result<Self> {
         if block_data.len().is_multiple_of(DATA_BLOCK_LEN) {
+            let (is_a_data, data) = Self::get_data2(&block_data)?;
+            let data_len = data.len() as u64;
             Ok(Self {
                 file_pos,
-                run_block_data: block_data,
+                block_data,
+                is_a_data,
+                data_len,
             })
         } else {
-            Err(Error::other("大小不符合要求"))
+            Err(Error::other("大小不符合要求")).unwrap()
         }
     }
 
     fn get_block_data(&self) -> &[u8] {
-        &self.run_block_data
+        &self.block_data
     }
 
     fn get_this_data_len(&self) -> u64 {
-        Self::get_data_len(&self.run_block_data)
+        Self::get_data_len(&self.block_data)
     }
 
     fn get_data_len(data: &[u8]) -> u64 {
@@ -1050,16 +1096,16 @@ impl ManifestDataBlock {
     }
 
     fn get_this_block_len_u64(&self) -> u64 {
-        self.run_block_data.len() as u64
+        self.block_data.len() as u64
     }
 
     fn get_this_block_len_us(&self) -> usize {
-        self.run_block_data.len()
+        self.block_data.len()
     }
 
     fn get_block_len(data: &[u8]) -> io::Result<u64> {
         if data.len() < MANIFEST_DATA_BLOCK_DATA_LEN_LEN {
-            Err(Error::other("提供的数据不完整"))
+            Err(Error::other("提供的数据不完整")).unwrap()
         } else {
             //实际占用大小
             let data_len = usize::try_from(Self::get_data_len(data)).unwrap();
@@ -1070,8 +1116,8 @@ impl ManifestDataBlock {
 
     fn get_this_ver(&self) -> u32 {
         let block_len_2 = self.get_this_block_len_us() / 2;
-        let a_ver = Self::get_ver(&self.run_block_data[..block_len_2]).unwrap();
-        let b_ver = Self::get_ver(&self.run_block_data[block_len_2..]).unwrap();
+        let a_ver = Self::get_ver(&self.block_data[..block_len_2]).unwrap();
+        let b_ver = Self::get_ver(&self.block_data[block_len_2..]).unwrap();
         if a_ver > b_ver { a_ver } else { b_ver }
     }
 
@@ -1090,20 +1136,22 @@ impl ManifestDataBlock {
         if ver == end_ver {
             Ok(ver)
         } else {
-            Err(Error::other("快速完整性验证失败"))
+            Err(Error::other("快速完整性验证失败")).unwrap()
         }
     }
 
     fn get_this_data(&self) -> io::Result<&[u8]> {
-        let data = Self::get_data(&self.run_block_data)?;
-        if data.len() > 0 {
+        let data = Self::get_data(&self.block_data)?;
+        if !data.is_empty() {
             Ok(data)
         } else {
             Err(Error::other("没有数据"))
         }
     }
-
     fn get_data(data: &[u8]) -> io::Result<&[u8]> {
+        Ok(Self::get_data2(data)?.1)
+    }
+    fn get_data2(data: &[u8]) -> io::Result<(bool, &[u8])> {
         //对齐判断
         if data.len().is_multiple_of(DATA_BLOCK_LEN) {
             let ab_block_data_len = data.len() / 2;
@@ -1118,10 +1166,15 @@ impl ManifestDataBlock {
             let b_err = b_ver.is_err();
             //版本判断
             let mut read_a = true;
+
+            if ab_block_data_len == 0 {
+                std::hint::black_box(());
+            }
+
             if a_err {
                 //完全破碎判断
                 if b_err {
-                    return Err(Error::other("解析错误，数据损坏"));
+                    return Err(Error::other("解析错误，数据损坏")).unwrap();
                 }
                 //如果损坏则读取B
                 read_a = false;
@@ -1129,21 +1182,24 @@ impl ManifestDataBlock {
                 //如果A没有损坏了就判断版本
                 read_a = false;
             }
-            Ok(if read_a {
-                let a_data_len = usize::try_from(Self::get_data_len(a_data)).unwrap();
-                &a_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                    ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + a_data_len]
-            } else {
-                let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
-                &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                    ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + b_data_len]
-            })
+            Ok((
+                read_a,
+                if read_a {
+                    let a_data_len = usize::try_from(Self::get_data_len(a_data)).unwrap();
+                    &a_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + a_data_len]
+                } else {
+                    let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
+                    &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + b_data_len]
+                },
+            ))
         } else {
-            Err(Error::other("提供的数据未对齐"))
+            Err(Error::other("提供的数据未对齐")).unwrap()
         }
     }
 
@@ -1151,24 +1207,28 @@ impl ManifestDataBlock {
         let old_len = self.get_this_block_len_us();
         let block_len = Self::get_block_len_us(data.len());
         if block_len == old_len {
-            Self::save_data_to_block_data2(data, &mut self.run_block_data, block_len).unwrap();
+            self.is_a_data =
+                Self::save_data_to_block_data2(data, &mut self.block_data, block_len).unwrap();
+            self.data_len = data.len() as u64;
             false
         } else {
             //重新设置大小
-            self.run_block_data.resize(block_len, 0);
-            self.run_block_data.fill(0);
-            Self::save_data_to_block_data_new2(data, &mut self.run_block_data, block_len);
+            self.block_data.resize(block_len, 0);
+            self.block_data.fill(0);
+            Self::save_data_to_block_data_new2(data, &mut self.block_data, block_len);
+            self.is_a_data = true;
+            self.data_len = data.len() as u64;
             true
         }
     }
 
-    fn save_data_to_block_data(data: &[u8], block_data: &mut [u8]) -> io::Result<()> {
+    fn save_data_to_block_data(data: &[u8], block_data: &mut [u8]) -> io::Result<bool> {
         //大小检查
         let block_len = Self::get_block_len_us(data.len());
         if block_data.len() == block_len {
             Self::save_data_to_block_data2(data, block_data, block_len)
         } else {
-            Err(Error::other("提供的缓冲区的大小和需要的块大小不一致"))
+            Err(Error::other("提供的缓冲区的大小和需要的块大小不一致")).unwrap()
         }
     }
 
@@ -1176,7 +1236,7 @@ impl ManifestDataBlock {
         data: &[u8],
         block_data: &mut [u8],
         block_len: usize,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let block_len_2 = block_len / 2;
 
         let a_block_data = &block_data[..block_len_2];
@@ -1197,7 +1257,7 @@ impl ManifestDataBlock {
                     &mut block_data[..block_len_2],
                     b_data_ver + 1,
                 );
-                Ok(())
+                Ok(true)
             } else {
                 //更新B
                 Self::save_data_to_ab_block_data(
@@ -1205,16 +1265,16 @@ impl ManifestDataBlock {
                     &mut block_data[block_len_2..],
                     a_data_ver + 1,
                 );
-                Ok(())
+                Ok(false)
             }
         } else if a_err {
             //更新A
             Self::save_data_to_ab_block_data(data, &mut block_data[..block_len_2], b_data_ver? + 1);
-            Ok(())
+            Ok(true)
         } else {
             //更新B
             Self::save_data_to_ab_block_data(data, &mut block_data[block_len_2..], a_data_ver? + 1);
-            Ok(())
+            Ok(false)
         }
     }
 
@@ -1225,7 +1285,7 @@ impl ManifestDataBlock {
             Self::save_data_to_block_data_new2(data, block_data, block_len);
             Ok(())
         } else {
-            Err(Error::other("提供的块数据缓冲区大小和所需大小不一致"))
+            Err(Error::other("提供的块数据缓冲区大小和所需大小不一致")).unwrap()
         }
     }
     fn save_data_to_block_data_new2(data: &[u8], block_data: &mut [u8], block_len: usize) {

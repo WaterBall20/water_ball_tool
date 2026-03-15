@@ -2,7 +2,7 @@
 开始时间：26/02/13 11：31
  */
 use super::WBFPManager;
-use crate::wb_files_pack::DataPosList;
+use crate::wb_files_pack::{DataPosList, PackFileMetadata, PackFileMetadataType};
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
@@ -11,28 +11,28 @@ pub struct PackFileWR<'a> {
     manager: &'a mut WBFPManager,
     //文件位置
     pos: u64,
-    //文件实际大小
-    len: u64,
-    //文件分配的位置
-    file_pos_list: DataPosList,
     //缓存_文件分配的位置当前索引
     temp_pos_index: usize,
     //缓存_文件分配的当前位置已占用大小
     temp_pos_this_len: u64,
+    //虚拟路径
+    path_list: Option<Vec<String>>,
+    //元数据
+    metadata: Option<PackFileMetadata>,
 }
 impl PackFileWR<'_> {
     pub(in crate::wb_files_pack) fn new(
         manager: &'_ mut WBFPManager,
-        file_pos_list: DataPosList,
-        file_len: u64,
+        path_list: Vec<String>,
+        metadata: PackFileMetadata,
     ) -> PackFileWR<'_> {
         PackFileWR {
             manager,
             pos: 0,
-            file_pos_list,
-            len: file_len,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
+            path_list: Some(path_list),
+            metadata: Some(metadata),
         }
     }
 
@@ -60,8 +60,11 @@ impl PackFileWR<'_> {
         let mut pos_index = start_pos_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
-        while pos_index < self.file_pos_list.list.len() {
-            let (mut pos, mut len) = *self.file_pos_list.list.get(start_pos_index).unwrap();
+        while let Some(metadata) = &self.metadata
+            && let PackFileMetadataType::File(file) = &metadata.file_type
+            && pos_index < file.data_pos_list.list.len()
+        {
+            let (mut pos, mut len) = *file.data_pos_list.list.get(start_pos_index).unwrap();
             //当前校准
             if pos_index == start_pos_index {
                 //位置偏移
@@ -150,6 +153,24 @@ impl PackFileWR<'_> {
             Ok(())
         }
     }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.finish_mut()
+    }
+    fn finish_mut(&mut self) -> io::Result<()> {
+        if let Some(path_list) = self.path_list.take()
+            && let Some(metadata) = self.metadata.take()
+        {
+            self.manager.file_metadata_unlock(path_list, metadata)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PackFileWR<'_> {
+    fn drop(&mut self) {
+        _ = self.finish_mut()
+    }
 }
 
 impl Seek for PackFileWR<'_> {
@@ -186,26 +207,30 @@ impl Seek for PackFileWR<'_> {
 
 impl Read for PackFileWR<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        //当前大小所需的位置列表
-        let pos_s = self.get_add_pos_s(buf.len() as u64, true)?;
-        //当前已读取大小
-        let mut read_len = 0;
-        //读取
-        for (pos, len) in pos_s {
-            let len = if (read_len as u64 + len) <= self.len {
-                usize::try_from(len).unwrap()
-            } else {
-                usize::try_from(self.len).unwrap() - read_len
-            };
-            let this_buf = &mut buf[read_len..read_len + len];
-            //更改文件位置
-            self.manager.set_pack_file_pos_read(pos)?;
-            //读取数据
-            self.manager.pack_file_read(this_buf)?;
-            read_len += len;
+        if let Some(metadata) = &self.metadata {
+            //当前大小所需的位置列表
+            let pos_s = self.get_add_pos_s(buf.len() as u64, true)?;
+            //当前已读取大小
+            let mut read_len = 0;
+            //读取
+            for (pos, len) in pos_s {
+                let len = if (read_len as u64 + len) <= metadata.len {
+                    usize::try_from(len).unwrap()
+                } else {
+                    usize::try_from(metadata.len).unwrap() - read_len
+                };
+                let this_buf = &mut buf[read_len..read_len + len];
+                //更改文件位置
+                self.manager.set_pack_file_pos_read(pos)?;
+                //读取数据
+                self.manager.pack_file_read(this_buf)?;
+                read_len += len;
+            }
+            self.add_pos(read_len as u64)?;
+            Ok(read_len)
+        } else {
+            Err(Error::other("当前实例的元数据不存在"))
         }
-        self.add_pos(read_len as u64)?;
-        Ok(read_len)
     }
 }
 
