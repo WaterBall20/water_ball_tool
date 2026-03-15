@@ -3,12 +3,14 @@ use core::slice::Iter;
 /*
 开始时间：26/2/11 15：51
  */
+//use crate::wb_files_pack::manager::file::PackFileWR;
 use crate::wb_files_pack::{
-    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataFile,
-    PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
-    WBFilesPackManifest, WBFilesPackManifestRun, DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_LEN,
+    Attribute, DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_LEN, ManifestDataBlock,
+    PackFileMetadata, PackFileMetadataFile, PackFileMetadataRun, PackFileMetadataType, PackStruct,
+    PackStructItem, PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun,
 };
 use std::collections::HashMap;
+use std::fmt::format;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,11 @@ pub mod file;
 
 #[cfg(test)]
 mod test;
+
+/*
+#[cfg(debug_assertions)]
+#[cfg(test)]
+mod new_test;*/
 
 //文件头===
 //文件头-文件名:WPFilesPack
@@ -297,10 +304,10 @@ impl WBFPManager {
                 }
                 Ok(name_list)
             } else {
-                Err(Error::other("结构实例没有被加载"))
+                Err(Error::other("结构实例没有被加载")).unwrap()
             }
         } else {
-            Err(Error::new(ErrorKind::NotADirectory, "提供的路径不是目录"))
+            Err(Error::new(ErrorKind::NotADirectory, "提供的路径不是目录")).unwrap()
         }
     }
 
@@ -774,13 +781,9 @@ impl WBFPManager {
                     }
                 }
                 PackStructItemType::File => {
+                    //
                     if path_list.next().is_none() {
-                        let r = pack_struct_item.metadata.try_lock()?;
-                        self.manifest
-                            .root_struct
-                            .items
-                            .insert(two_pack_struct_name.clone(), pack_struct_item);
-                        r
+                        pack_struct_item.metadata.try_lock()?
                     } else {
                         self.manifest
                             .root_struct
@@ -790,7 +793,7 @@ impl WBFPManager {
                             ErrorKind::NotADirectory,
                             format!(r#"路径"{two_pack_struct_name}是文件不是目录""#),
                         ))
-                            .unwrap()
+                        .unwrap()
                     }
                 }
             }
@@ -987,7 +990,7 @@ impl WBFPManager {
                         ErrorKind::NotADirectory,
                         "提供的目录已存在非目录的文件",
                     ))
-                        .unwrap()
+                    .unwrap()
                 }
             } else {
                 //创建
@@ -1070,6 +1073,7 @@ impl WBFPManager {
                         dir.pack_struct = Some(self.load_pack_struct(dir.struct_file_pos)?);
                     }
                     if dir.pack_struct.is_none() {
+                        panic!("无法加载实例");
                         Err(Error::other("无法加载实例"))?;
                     }
                 } else {
@@ -1131,9 +1135,11 @@ impl WBFPManager {
                 }
             } else {
                 panic!("没有结构实例");
+                Err(Error::other("没有结构实例"))?;
             }
         } else {
             panic!("类型错误，不是目录");
+            Err(Error::other("类型错误，不是目录"))?;
         }
         self.manifest
             .root_struct
@@ -1543,7 +1549,7 @@ impl WBFPManager {
                 ErrorKind::IsADirectory,
                 "无法解锁，锁文件类型是目录",
             ))
-                .unwrap(),
+            .unwrap(),
             PackLockType::Symlink => Err(Error::other("无法解锁，锁文件类型是符号链接")).unwrap(),
             PackLockType::None => Ok(()),
         }
