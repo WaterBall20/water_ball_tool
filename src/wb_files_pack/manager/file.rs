@@ -2,7 +2,7 @@
 开始时间：26/02/13 11：31
  */
 use super::WBFPManager;
-use crate::wb_files_pack::{PackFileMetadata, PackFileMetadataType};
+use crate::wb_files_pack::{DataPosList, PackFileMetadata, PackFileMetadataType};
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
