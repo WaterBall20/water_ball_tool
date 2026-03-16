@@ -923,7 +923,7 @@ impl WBFPManager {
                         ErrorKind::NotADirectory,
                         "提供的目录已存在非目录的文件",
                     ))
-                    .unwrap()
+                        .unwrap()
                 }
             } else {
                 //创建
@@ -944,9 +944,9 @@ impl WBFPManager {
                     )?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                            file_count,
-                            dir_count,
-                        } = &mut metadata.file_type
+                        file_count,
+                        dir_count,
+                    } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1135,8 +1135,8 @@ impl WBFPManager {
         if self.pack_file.run_data.all_write_len - self.pack_file.run_data.last_all_write_len
             > (DATA_BLOCK_LEN as u64) * 1024
             || self.pack_file.run_data.all_cr_file_count
-                - self.pack_file.run_data.last_all_cr_file_count
-                > 10_000
+            - self.pack_file.run_data.last_all_cr_file_count
+            > 10_000
         {
             self.pack_file.run_data.last_all_write_len = self.pack_file.run_data.all_write_len;
             self.pack_file.run_data.last_all_cr_file_count =
@@ -1387,7 +1387,7 @@ impl WBFPManager {
                 ErrorKind::IsADirectory,
                 "无法解锁，锁文件类型是目录",
             ))
-            .unwrap(),
+                .unwrap(),
             PackLockType::Symlink => Err(Error::other("无法解锁，锁文件类型是符号链接")).unwrap(),
             PackLockType::None => Ok(()),
         }
@@ -1561,7 +1561,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             .try_into()
             .unwrap(),
     );
-    let pack_file = PackIO::new2(pack_file, pack_len);
+    let mut pack_file = PackIO::new2(pack_file, pack_len);
     //获取清单属性数据
     //获取属性
     let attribute_data = &header[FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as usize
@@ -1577,7 +1577,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
         let mut manifest_path = pack_path.clone();
         manifest_path.push_str(".wbm");
         let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
-        let manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len);
+        let mut manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len);
         //空数据列表===
         let empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos)?;
@@ -1585,7 +1585,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             .get_this_data()
             .expect("读取空数据列表失败")
             .to_vec();
-        let empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
+        pack_file.empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
         //清单文件空数据
         let manifest_empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.manifest_empty_data_pos_list_pos)?;
@@ -1593,7 +1593,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             .get_this_data()
             .expect("读取清单空数据列表失败")
             .to_vec();
-        let manifest_empty_data_pos_list = DataPosList::load(
+        manifest_file.empty_data_list = DataPosList::load(
             &manifest_empty_pos_data,
             Some(manifest_empty_pos_data_block),
         );
@@ -1622,7 +1622,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             .get_this_data()
             .expect("读取空数据列表失败")
             .to_vec();
-        let empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
+        pack_file.empty_data_list = DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
         //加载根结构
         let root_struct_block_data =
             pack_file.manifest_data_block_read(attribute.root_struct_pos)?;

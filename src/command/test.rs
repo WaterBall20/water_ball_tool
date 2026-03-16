@@ -50,7 +50,7 @@ fn ff_out_file_longtime() {
     #[cfg(not(target_os = "windows"))]
     let args: Vec<String> = vec![String::from("/home"), out_file_path.clone()];
     #[cfg(target_os = "windows")]
-    let args: Vec<String> = vec![String::from("c:/users"), out_file_path.clone()];
+    let args: Vec<String> = vec![String::from("c:/"), out_file_path.clone()];
     ff(args.as_slice(), None);
     _ = fs::remove_file(&out_file_path);
 }

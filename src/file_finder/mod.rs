@@ -146,18 +146,22 @@ impl FileFinder {
         //获取文件列表
         for entry in match path.read_dir() {
             Ok(rd) => rd,
-            Err(err) => {
-                panic!("获取目录迭代器错误:path:{path:?},err:{err}");
-                error!("获取目录迭代器错误:path:{path:?},err:{err}");
-                return MSearchReturn {
-                    callback,
-                    add_length: 0,
-                    add_file_count: 0,
-                    add_dir_count: 0,
-                };
-            }
+            Err(err) => match err.kind() {
+                ErrorKind::PermissionDenied => {
+                    error!("获取目录迭代器错误:path:{path:?},err:{err}");
+                    return MSearchReturn {
+                        callback,
+                        add_length: 0,
+                        add_file_count: 0,
+                        add_dir_count: 0,
+                    };
+                }
+                _ => {
+                    panic!("获取目录迭代器错误:path:{path:?},err:{err:?}");
+                }
+            },
         }
-        .flatten()
+            .flatten()
         {
             let path_buf = entry.path();
             //println!("[消息]找到: '{path_buf:?}' ");
@@ -295,7 +299,7 @@ impl FileFinder {
             Err(Error::new(
                 ErrorKind::NotADirectory,
                 "提供的路径是文件不是目录",
-            )).unwrap()
+            ))
         } else if path.is_symlink() {
             Err(Error::new(
                 ErrorKind::NotADirectory,
@@ -305,7 +309,7 @@ impl FileFinder {
             Err(Error::new(
                 ErrorKind::NotFound,
                 "未找到目录，提供的路径不存在或拒绝访问",
-            )).unwrap()
+            ))
         }
     }
 
