@@ -1,8 +1,9 @@
 /*
 开始时间：26/02/13 11：31
  */
-use super::WBFPManager;
-use crate::wb_files_pack::{DataPosList, PackFileMetadata, PackFileMetadataType};
+use crate::wb_files_pack::manager::WBFPManager;
+use crate::wb_files_pack::{PackFileHash, PackFileMetadata, PackFileMetadataType};
+use blake3::Hasher;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
@@ -19,13 +20,27 @@ pub struct PackFileWR<'a> {
     path_list: Option<Vec<String>>,
     //元数据
     metadata: Option<PackFileMetadata>,
+    //哈希
+    hash: PackFileHash,
 }
+
 impl PackFileWR<'_> {
     pub(in crate::wb_files_pack) fn new(
         manager: &'_ mut WBFPManager,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
     ) -> PackFileWR<'_> {
+        let hash = if let PackFileMetadataType::File { hash_type, .. } = metadata.file_type {
+            match hash_type {
+                1 => PackFileHash::Blake3 {
+                    hasher: Hasher::new(),
+                    is_seek: false,
+                },
+                _ => PackFileHash::None,
+            }
+        } else {
+            PackFileHash::None
+        };
         PackFileWR {
             manager,
             pos: 0,
@@ -33,6 +48,7 @@ impl PackFileWR<'_> {
             temp_pos_this_len: 0,
             path_list: Some(path_list),
             metadata: Some(metadata),
+            hash,
         }
     }
 
@@ -61,10 +77,10 @@ impl PackFileWR<'_> {
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
         while let Some(metadata) = &self.metadata
-            && let PackFileMetadataType::File(file) = &metadata.file_type
-            && pos_index < file.data_pos_list.list.len()
+            && let PackFileMetadataType::File { data_pos_list, .. } = &metadata.file_type
+            && pos_index < data_pos_list.list.len()
         {
-            let (mut pos, mut len) = *file.data_pos_list.list.get(start_pos_index).unwrap();
+            let (mut pos, mut len) = *data_pos_list.list.get(start_pos_index).unwrap();
             //当前校准
             if pos_index == start_pos_index {
                 //位置偏移
@@ -101,16 +117,17 @@ impl PackFileWR<'_> {
     //设置文件位置
     fn set_pos(&mut self, pos: u64) -> io::Result<()> {
         //缓存处理===
-        //获取需要添加的块列表
-        let pos_s = self.get_pos_s(pos, false)?;
-        //块索引
-        let pos_index = pos_s.len() - 1;
-        //块长度
-        let (_, pos_len) = pos_s.get(pos_index).unwrap();
-        self.temp_pos_index = pos_index;
-        self.temp_pos_this_len = *pos_len;
-
-        self.pos = pos;
+        if self.pos != pos {
+            //获取需要添加的块列表
+            let pos_s = self.get_pos_s(pos, false)?;
+            //块索引
+            let pos_index = pos_s.len() - 1;
+            //块长度
+            let (_, pos_len) = pos_s.get(pos_index).unwrap();
+            self.temp_pos_index = pos_index;
+            self.temp_pos_this_len = *pos_len;
+            self.pos = pos;
+        }
         Ok(())
     }
 
@@ -159,8 +176,11 @@ impl PackFileWR<'_> {
     }
     fn finish_mut(&mut self) -> io::Result<()> {
         if let Some(path_list) = self.path_list.take()
-            && let Some(metadata) = self.metadata.take()
+            && let Some(mut metadata) = self.metadata.take()
         {
+            if let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type {
+                *hash_value = self.hash.get_hash_value();
+            }
             self.manager.file_metadata_unlock(path_list, metadata)?;
         }
         Ok(())
@@ -169,12 +189,16 @@ impl PackFileWR<'_> {
 
 impl Drop for PackFileWR<'_> {
     fn drop(&mut self) {
-        _ = self.finish_mut()
+        _ = self.finish_mut();
     }
 }
 
 impl Seek for PackFileWR<'_> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match &mut self.hash {
+            PackFileHash::Blake3 { is_seek, .. } => *is_seek = true,
+            PackFileHash::None => (),
+        }
         match pos {
             SeekFrom::Start(pos) => {
                 self.set_pos(pos)?;
@@ -221,9 +245,9 @@ impl Read for PackFileWR<'_> {
                 };
                 let this_buf = &mut buf[read_len..read_len + len];
                 //更改文件位置
-                self.manager.set_pack_file_pos_read(pos)?;
+                self.manager.pack_file.set_pos_read(pos)?;
                 //读取数据
-                self.manager.pack_file_read(this_buf)?;
+                self.manager.pack_file.read(this_buf)?;
                 read_len += len;
             }
             self.add_pos(read_len as u64)?;
@@ -246,10 +270,13 @@ impl Write for PackFileWR<'_> {
             let len = usize::try_from(len).unwrap();
             let this_data = &buf[write_len..write_len + len];
             //更改文件位置
-            self.manager.set_pack_file_pos_write(pos)?;
+            self.manager.pack_file.set_pos_write(pos)?;
             //写入数据
-            self.manager.pack_file_write(this_data)?;
+            self.manager.pack_file.write(this_data)?;
             write_len += len;
+            //哈希计算
+            self.hash.update(this_data);
+
             //TODO:未来功能：写入优化、写时复制
         }
         self.add_pos(write_len as u64)?;

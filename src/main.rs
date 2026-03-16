@@ -23,7 +23,7 @@ fn main() {
     }
 }
 
-// 创建一个包装类，让 MultiProgress 兼容 io::Write
+// 创建一个包装类，让 MultiProgress 兼容 pack_io::Write
 struct MultiProgressWriter(MultiProgress);
 
 impl Write for MultiProgressWriter {

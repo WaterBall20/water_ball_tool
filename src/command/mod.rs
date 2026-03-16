@@ -362,6 +362,7 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
         water_ball_tool::wb_files_pack::manager::open_file(pack_path).expect("打开包文件错误");
     //逻辑实现=== ===
     info!("开始复制数据");
+    fs::create_dir_all(out_dir_path).expect("无法创建数据路径");
     read_pack(&mut pack, Option::from(&pb), out_dir_path.as_ref()).expect("写入文件错误");
     info!("操作已完成,文件保存到目录{out_dir_path}");
 }

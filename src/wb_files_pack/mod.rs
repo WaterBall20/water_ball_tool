@@ -5,13 +5,13 @@ pub mod manager;
 
 #[cfg(test)]
 mod test;
+mod pack_io;
 
-use crate::wb_files_pack::manager::WBFPManager;
-use crate::wb_files_pack::manager::file::PackFileWR;
+use blake3::Hasher;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io;
-use std::io::{Error, ErrorKind, Read};
+use std::io::{Error, Read};
+use crate::wb_files_pack::pack_io::PackIO;
 
 //当前解析器版本
 pub const MANIFEST_VERSION: u16 = 10;
@@ -36,11 +36,7 @@ pub struct WBFilesPackManifest {
     //根结构
     root_struct: PackStruct,
     //清单文件实例
-    file: Option<File>,
-    //空数据列表
-    empty_data_list: DataPosList,
-    //清单空数据列表
-    this_empty_data_list: Option<DataPosList>,
+    file: Option<PackIO>,
     //运行时数据
     run_data: WBFilesPackManifestRun,
 } //包文件数据
@@ -58,10 +54,6 @@ impl WBFilesPackManifest {
 //清单数据运行数据
 #[derive(Default, Debug)]
 struct WBFilesPackManifestRun {
-    //清单文件位置
-    file_pos: u64,
-    //GC数据列表
-    gc_data_pos_list: DataPosList,
 }
 
 //格式版本
@@ -778,6 +770,26 @@ const PACK_FILE_METADATA_MODIFIED_LEM: usize = 16;
 const PACK_FILE_METADATA_TYPE_DATA_INDEX: usize =
     PACK_FILE_METADATA_MODIFIED_INDEX + PACK_FILE_METADATA_MODIFIED_LEM;
 
+//文件===
+//数据格式常量
+//哈希算法值类型
+const PACK_METADATA_FILE_HASH_TYPE_INDEX: usize = 0;
+const PACK_METADATA_FILE_HASH_TYPE_LEN: usize = 1;
+//哈希值长度
+const PACK_METADATA_FILE_HASH_LEN_INDEX: usize = 1;
+const PACK_METADATA_FILE_HASH_LEN_LEN: usize = 1;
+//哈希值
+const PACK_METADATA_FILE_HASH_INDEX: usize =
+    PACK_METADATA_FILE_HASH_TYPE_LEN + PACK_METADATA_FILE_HASH_LEN_LEN;
+
+//目录===
+//数据格式字段
+//文件数量
+const PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
+//目录数量
+const PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
+const PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
+
 #[derive(PartialEq, Debug, Clone)]
 pub struct PackFileMetadata {
     //数据块
@@ -798,7 +810,10 @@ impl PackFileMetadata {
             cow,
             len: 0,
             modified: 0,
-            file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
+            file_type: PackFileMetadataType::Dir {
+                file_count: 0,
+                dir_count: 0,
+            },
         }
     }
 
@@ -808,7 +823,10 @@ impl PackFileMetadata {
             cow: false,
             len: 0,
             modified: 0,
-            file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
+            file_type: PackFileMetadataType::Dir {
+                file_count: 0,
+                dir_count: 0,
+            },
         }
     }
 
@@ -833,9 +851,12 @@ impl PackFileMetadata {
     }
 
     fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
-        let data = data_block.get_this_data().unwrap();
+        let data = data_block.get_this_data()?;
         //类型
         let this_type = data[0];
+        if this_type > 1 {
+            std::hint::black_box(());
+        }
         //布尔值
         let bool_data = data[PACK_FILE_METADATA_BOOL_DATA_INDEX];
         //写时复制
@@ -854,9 +875,39 @@ impl PackFileMetadata {
         );
         let type_data = &data[PACK_FILE_METADATA_TYPE_DATA_INDEX..];
         let file_type = match this_type {
-            0 => PackFileMetadataType::File(PackFileMetadataFile::load(type_data)),
-            1 => PackFileMetadataType::Dir(PackFileMetadataDir::load(type_data)),
-            _ => Err(Error::other("未知类型")).unwrap(),
+            0 => {
+                let hash_type = type_data[PACK_METADATA_FILE_HASH_TYPE_INDEX];
+                let hash_len = type_data[PACK_METADATA_FILE_HASH_LEN_INDEX];
+                let hash_value = type_data[PACK_METADATA_FILE_HASH_INDEX
+                    ..PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize)]
+                    .to_vec();
+                let data_pos_list_count_index = PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize);
+                let data_pos_list =
+                    DataPosList::load(&type_data[data_pos_list_count_index..], None);
+                PackFileMetadataType::File {
+                    hash_type,
+                    hash_value,
+                    data_pos_list,
+                }
+            }
+            1 => {
+                let file_count = u64::from_le_bytes(
+                    type_data[..PACK_METADATA_DIR_DIR_COUNT_INDEX]
+                        .try_into()
+                        .unwrap(),
+                );
+                let dir_count = u64::from_le_bytes(
+                    type_data[PACK_METADATA_DIR_DIR_COUNT_INDEX
+                        ..PACK_METADATA_DIR_DIR_COUNT_INDEX + PACK_METADATA_DIR_DIR_COUNT_LEN]
+                        .try_into()
+                        .unwrap(),
+                );
+                PackFileMetadataType::Dir {
+                    file_count,
+                    dir_count,
+                }
+            }
+            _ => Err(Error::other("未知类型"))?,
         };
 
         Ok(Self {
@@ -870,9 +921,52 @@ impl PackFileMetadata {
 
     fn to_bytes_vec(&self) -> Vec<u8> {
         //类型及其数据
-        let (type_, type_data) = match &self.file_type {
-            PackFileMetadataType::File(file) => (0, file.to_bytes_vec()),
-            PackFileMetadataType::Dir(dir) => (1, dir.to_bytes_vec()),
+        let type_data = match &self.file_type {
+            PackFileMetadataType::File {
+                hash_type,
+                hash_value,
+                data_pos_list,
+            } => {
+                //已分配列表数据
+                let data_pos_list_data = data_pos_list.to_bytes_vec();
+                let mut data = Vec::with_capacity(
+                    PACK_METADATA_FILE_HASH_TYPE_LEN
+                        + PACK_METADATA_FILE_HASH_LEN_LEN
+                        + hash_value.len()
+                        + data_pos_list_data.len(),
+                );
+                //哈希算法类型
+                data.push(*hash_type);
+                //哈希值长度
+                let hash_len = u8::try_from(hash_value.len()).expect("哈希值长度值过大");
+                data.push(hash_len);
+                //哈希
+                for hash in hash_value {
+                    data.push(*hash);
+                }
+                //已分配数据列表
+                for data_pos_list_data in data_pos_list_data {
+                    data.push(data_pos_list_data);
+                }
+                data
+            }
+            PackFileMetadataType::Dir {
+                file_count,
+                dir_count,
+            } => {
+                let mut data = Vec::with_capacity(
+                    PACK_METADATA_DIR_FILE_COUNT_LEN + PACK_METADATA_DIR_DIR_COUNT_LEN,
+                );
+                //file_count
+                for to_le_byte in file_count.to_le_bytes() {
+                    data.push(to_le_byte);
+                }
+                //dir_count
+                for to_le_byte in dir_count.to_le_bytes() {
+                    data.push(to_le_byte);
+                }
+                data
+            }
         };
         let mut data = Vec::with_capacity(
             PACK_FILE_METADATA_TYPE_LEN
@@ -881,7 +975,7 @@ impl PackFileMetadata {
                 + type_data.len(),
         );
         //类型
-        data.push(type_);
+        data.push(self.file_type.to_u8_type());
         //布尔数据
         let mut bool_data = 0;
         if self.cow {
@@ -914,122 +1008,61 @@ impl PackFileMetadata {
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum PackFileMetadataType {
-    File(PackFileMetadataFile),
-    Dir(PackFileMetadataDir),
-} //包文件元数据类型
-
-//数据格式常量
-//哈希算法值类型
-const PACK_METADATA_FILE_HASH_TYPE_INDEX: usize = 0;
-const PACK_METADATA_FILE_HASH_TYPE_LEN: usize = 1;
-//哈希值长度
-const PACK_METADATA_FILE_HASH_LEN_INDEX: usize = 1;
-const PACK_METADATA_FILE_HASH_LEN_LEN: usize = 1;
-//哈希值
-const PACK_METADATA_FILE_HASH_INDEX: usize =
-    PACK_METADATA_FILE_HASH_TYPE_LEN + PACK_METADATA_FILE_HASH_LEN_LEN;
-
-#[derive(Default, PartialEq, Debug, Clone)]
-pub struct PackFileMetadataFile {
-    //哈希算法类型
-    hash_type: u8,
-    //哈希值
-    hash: Vec<u8>,
-    //已分配数据集合
-    data_pos_list: DataPosList,
-} //包文件元数据文件
-impl PackFileMetadataFile {
-    fn load(data: &[u8]) -> Self {
-        let hash_type = data[PACK_METADATA_FILE_HASH_TYPE_INDEX];
-        let hash_len = data[PACK_METADATA_FILE_HASH_LEN_INDEX];
-        let hash = data
-            [PACK_METADATA_FILE_HASH_INDEX..PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize)]
-            .to_vec();
-        let data_pos_list_count_index = PACK_METADATA_FILE_HASH_INDEX + (hash_len as usize);
-        let data_pos_list = DataPosList::load(&data[data_pos_list_count_index..], None);
-        Self {
-            hash_type,
-            hash,
-            data_pos_list,
-        }
-    }
-    fn to_bytes_vec(&self) -> Vec<u8> {
-        //已分配列表数据
-        let data_pos_list_data = self.data_pos_list.to_bytes_vec();
-        let mut data = Vec::with_capacity(
-            PACK_METADATA_FILE_HASH_TYPE_LEN
-                + PACK_METADATA_FILE_HASH_LEN_LEN
-                + self.hash.len()
-                + data_pos_list_data.len(),
-        );
-        //哈希算法类型
-        data.push(self.hash_type);
-        //哈希值长度
-        let hash_len = u8::try_from(self.hash.len()).expect("哈希值长度值过大");
-        data.push(hash_len);
+    File {
         //哈希
-        for hash in &self.hash {
-            data.push(*hash);
+        hash_type: u8,
+        //哈希值
+        hash_value: Vec<u8>,
+        //已分配数据集合
+        data_pos_list: DataPosList,
+    },
+    Dir {
+        //文件
+        file_count: u64,
+        //目录数
+        dir_count: u64,
+    },
+} //包文件元数据类型
+impl PackFileMetadataType {
+    fn to_u8_type(&self) -> u8 {
+        match self {
+            Self::File { .. } => 0,
+            Self::Dir { .. } => 1,
         }
-        //已分配数据列表
-        for data_pos_list_data in data_pos_list_data {
-            data.push(data_pos_list_data);
-        }
-        data
     }
 }
 
-//数据格式字段
-//文件数量
-const PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
-//目录数量
-const PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
-const PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
+#[derive(Debug, Clone)]
+pub enum PackFileHash {
+    None,
+    Blake3 { hasher: Hasher, is_seek: bool },
+}
 
-#[derive(Default, PartialEq, Debug, Clone)]
-pub struct PackFileMetadataDir {
-    file_count: u64,
-    dir_count: u64,
-} //包文件目录数量
-impl PackFileMetadataDir {
-    pub fn file_count(&self) -> u64 {
-        self.file_count
-    }
-
-    pub fn dir_count(&self) -> u64 {
-        self.dir_count
-    }
-
-    fn load(data: &[u8]) -> Self {
-        let file_count = u64::from_le_bytes(
-            data[..PACK_METADATA_DIR_DIR_COUNT_INDEX]
-                .try_into()
-                .unwrap(),
-        );
-        let dir_count = u64::from_le_bytes(
-            data[PACK_METADATA_DIR_DIR_COUNT_INDEX
-                ..PACK_METADATA_DIR_DIR_COUNT_INDEX + PACK_METADATA_DIR_DIR_COUNT_LEN]
-                .try_into()
-                .unwrap(),
-        );
-
-        Self {
-            file_count,
-            dir_count,
+impl PackFileHash {
+    fn to_u8_type(&self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Blake3 { .. } => 1,
         }
     }
-    fn to_bytes_vec(&self) -> Vec<u8> {
-        let mut data =
-            Vec::with_capacity(PACK_METADATA_DIR_FILE_COUNT_LEN + PACK_METADATA_DIR_DIR_COUNT_LEN);
-        //file_count
-        for to_le_byte in self.file_count.to_le_bytes() {
-            data.push(to_le_byte);
+
+    fn update(&mut self, input: &[u8]) {
+        match self {
+            PackFileHash::Blake3 { hasher, .. } => {
+                hasher.update(input);
+            }
+            PackFileHash::None => (),
         }
-        //dir_count
-        for to_le_byte in self.dir_count.to_le_bytes() {
-            data.push(to_le_byte);
+    }
+
+    fn get_hash_value(&self) -> Vec<u8> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Blake3 { hasher, .. } => {
+                let this_hash = hasher.finalize();
+                this_hash.as_bytes().to_vec()
+            }
         }
-        data
     }
 }
 

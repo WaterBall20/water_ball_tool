@@ -1,7 +1,6 @@
 use crate::wb_files_pack::{
-    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataDir,
-    PackFileMetadataFile, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
-    PackStructItemDir, PackStructItemType,
+    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataRun,
+    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemDir, PackStructItemType,
 };
 
 #[test]
@@ -66,14 +65,17 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
         cow: false,
         len: 53124,
         modified: 5715,
-        file_type: PackFileMetadataType::File(PackFileMetadataFile {
-            hash_type: 0,
-            hash: vec![0],
+        file_type: PackFileMetadataType::File {
+            hash_type: 1,
+            hash_value: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
+            ],
             data_pos_list: DataPosList {
                 data_block: None,
                 list: vec![(0, 100), (10, 1), (223, 5890)],
             },
-        }),
+        },
     };
     let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
     let pfm_load = PackFileMetadata::load(block_data).unwrap();
@@ -86,7 +88,10 @@ fn pack_file_metadata_dir_to_bytes_vec_and_load() {
         cow: true,
         len: 52035,
         modified: 294,
-        file_type: PackFileMetadataType::Dir(PackFileMetadataDir::default()),
+        file_type: PackFileMetadataType::Dir {
+            file_count: 0,
+            dir_count: 0,
+        },
     };
     let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
     let pfm_load = PackFileMetadata::load(block_data).unwrap();
