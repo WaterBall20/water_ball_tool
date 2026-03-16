@@ -973,23 +973,21 @@ impl WBFPManager {
                     dir_count: r.dir_count + 1,
                 })
             }
+        } else if let Some(file_struct_item) = file_struct_item.take() {
+            s_pack_struct
+                .items
+                .insert(file_struct_item.name.clone(), file_struct_item);
+            Ok(MutDirAddReturn {
+                dir_count: 0,
+                file_count: 1,
+                length,
+            })
         } else {
-            if let Some(file_struct_item) = file_struct_item.take() {
-                s_pack_struct
-                    .items
-                    .insert(file_struct_item.name.clone(), file_struct_item);
-                Ok(MutDirAddReturn {
-                    dir_count: 0,
-                    file_count: 1,
-                    length,
-                })
-            } else {
-                Ok(MutDirAddReturn {
-                    length: 0,
-                    file_count: 0,
-                    dir_count: 0,
-                })
-            }
+            Ok(MutDirAddReturn {
+                length: 0,
+                file_count: 0,
+                dir_count: 0,
+            })
         }
     }
 
@@ -1165,9 +1163,8 @@ impl WBFPManager {
         let old_block_len = root_struct.run_data.data_block.get_this_block_len_u64();
         let (block_data, new_block) = root_struct.get_block_data();
         let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_block_len)?;
-        if old_pos != pos {
-            self.manifest.attribute.root_struct_pos = pos;
-        }
+        self.manifest.attribute.root_struct_pos = pos;
+
         Ok(())
     }
 
@@ -1290,7 +1287,8 @@ impl WBFPManager {
             .set_pos_write(FILE_HEADER_DATA_LENGTH_INDEX)?;
         //写入数据
         let pack_len = self.pack_file.len;
-        self.pack_file.write_all(pack_len.to_le_bytes().as_slice())?;
+        self.pack_file
+            .write_all(pack_len.to_le_bytes().as_slice())?;
         Ok(())
     }
 
