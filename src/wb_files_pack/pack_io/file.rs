@@ -6,6 +6,7 @@ use crate::wb_files_pack::{PackFileHash, PackFileMetadata, PackFileMetadataType}
 use blake3::Hasher;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
+use tracing::debug;
 
 pub struct PackFileWR<'a> {
     //管理器实例
@@ -181,7 +182,7 @@ impl PackFileWR<'_> {
             if let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type {
                 *hash_value = self.hash.get_hash_value();
             }
-            self.manager.file_metadata_unlock(path_list, metadata)?;
+            self.manager.file_metadata_update(path_list, metadata)?;
         }
         Ok(())
     }
@@ -189,6 +190,7 @@ impl PackFileWR<'_> {
 
 impl Drop for PackFileWR<'_> {
     fn drop(&mut self) {
+        
         _ = self.finish_mut();
     }
 }
@@ -247,7 +249,7 @@ impl Read for PackFileWR<'_> {
                 //更改文件位置
                 self.manager.pack_file.set_pos_read(pos)?;
                 //读取数据
-                self.manager.pack_file.read(this_buf)?;
+                self.manager.pack_file.read_exact(this_buf)?;
                 read_len += len;
             }
             self.add_pos(read_len as u64)?;
@@ -272,7 +274,7 @@ impl Write for PackFileWR<'_> {
             //更改文件位置
             self.manager.pack_file.set_pos_write(pos)?;
             //写入数据
-            self.manager.pack_file.write(this_data)?;
+            self.manager.pack_file.write_all(this_data)?;
             write_len += len;
             //哈希计算
             self.hash.update(this_data);

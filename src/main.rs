@@ -40,7 +40,7 @@ impl Write for MultiProgressWriter {
 }
 
 //初始化
-fn init_global_logging(mp: &MultiProgress) {
+pub fn init_global_logging(mp: &MultiProgress) {
     #[cfg(debug_assertions)]
     let filter = EnvFilter::new("debug"); // 开发模式看 debug
     #[cfg(not(debug_assertions))]
