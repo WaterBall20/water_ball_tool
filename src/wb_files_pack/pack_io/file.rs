@@ -6,7 +6,6 @@ use crate::wb_files_pack::{PackFileHash, PackFileMetadata, PackFileMetadataType}
 use blake3::Hasher;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
-use tracing::debug;
 
 pub struct PackFileWR<'a> {
     //管理器实例
@@ -34,7 +33,7 @@ impl PackFileWR<'_> {
         let hash = if let PackFileMetadataType::File { hash_type, .. } = metadata.file_type {
             match hash_type {
                 1 => PackFileHash::Blake3 {
-                    hasher: Hasher::new(),
+                    hasher: Box::from(Hasher::new()),
                     is_seek: false,
                 },
                 _ => PackFileHash::None,
@@ -190,7 +189,7 @@ impl PackFileWR<'_> {
 
 impl Drop for PackFileWR<'_> {
     fn drop(&mut self) {
-        
+
         _ = self.finish_mut();
     }
 }

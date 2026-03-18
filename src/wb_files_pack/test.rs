@@ -1,7 +1,4 @@
-use crate::wb_files_pack::{
-    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataRun,
-    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
-};
+use crate::wb_files_pack::{Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType};
 
 #[test]
 fn pack_struct_to_bytes_vec_and_load() {

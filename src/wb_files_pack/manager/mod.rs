@@ -10,11 +10,7 @@ use crate::wb_files_pack::pack_io::{
     FILE_HEADER_DATA_LENGTH, FILE_HEADER_DATA_LENGTH_INDEX,
     FILE_HEADER_DATA_LENGTH_LENGTH, FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX, FILE_HEADER_TYPE_NAME, FILE_HEADER_VERSION,
 };
-use crate::wb_files_pack::{
-    Attribute, DataPosList, ManifestDataBlock, PackFileMetadata, PackFileMetadataRun,
-    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest,
-    WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_LEN, MANIFEST_DATA_BLOCK_LEN,
-};
+use crate::wb_files_pack::{Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_LEN, MANIFEST_DATA_BLOCK_LEN};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
@@ -22,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::vec::IntoIter;
 use std::{fs, io};
-use tracing::{debug, info};
+use tracing::info;
 
 #[cfg(test)]
 mod test;
@@ -185,24 +181,25 @@ impl WBFPManager /* 读取 */ {
         path: P,
     ) -> io::Result<Vec<String>> {
         let item = self.get_pack_struct_item(&path)?;
-        if let PackStructItemType::Dir { pack_struct, .. } = &item.item_type {
-            if let Some(pack_struct) = pack_struct {
-                let mut name_list = Vec::with_capacity(pack_struct.items.len());
-                for name in pack_struct.items.keys() {
-                    name_list.push(name.clone());
+        match &item.item_type {
+            PackStructItemType::Dir { pack_struct, .. } => {
+                if let Some(pack_struct) = pack_struct {
+                    let mut name_list = Vec::with_capacity(pack_struct.items.len());
+                    for name in pack_struct.items.keys() {
+                        name_list.push(name.clone());
+                    }
+                    Ok(name_list)
+                } else {
+                    Err(Error::other(format!(
+                        r#"虚拟路径"{}"的结构实例没有被加载"#,
+                        path.as_ref().display()
+                    )))
                 }
-                Ok(name_list)
-            } else {
-                Err(Error::other(format!(
-                    r#""{}" 结构实例没有被加载"#,
-                    path.as_ref().display()
-                )))
             }
-        } else {
-            Err(Error::new(
+            PackStructItemType::File => Err(Error::new(
                 ErrorKind::NotADirectory,
-                format!(r#"提供的路径 "{:}" 不是目录"#, path.as_ref().display()),
-            ))
+                format!(r#"虚拟路径"{}"是文件不是目录"#, path.as_ref().display()),
+            )),
         }
     }
 
@@ -211,23 +208,23 @@ impl WBFPManager /* 读取 */ {
         &mut self,
         path: P,
     ) -> io::Result<&HashMap<String, PackStructItem>> {
-        //
         self.load_pack_struct_metadata_path(&path)?;
         let path_pack_struct_item = self.get_pack_struct_item_dir(&path)?;
-        if let PackStructItemType::Dir { pack_struct, .. } = &path_pack_struct_item.item_type {
-            if let Some(pack_struct) = pack_struct {
-                Ok(&pack_struct.items)
-            } else {
-                Err(Error::other(format!(
-                    r#""{}" 结构实例没有被加载"#,
-                    path.as_ref().display()
-                )))
+        match &path_pack_struct_item.item_type {
+            PackStructItemType::Dir { pack_struct, .. } => {
+                if let Some(pack_struct) = pack_struct {
+                    Ok(&pack_struct.items)
+                } else {
+                    Err(Error::other(format!(
+                        r#"虚拟路径"{}"的结构实例没有被加载"#,
+                        path.as_ref().display()
+                    )))
+                }
             }
-        } else {
-            Err(Error::new(
+            PackStructItemType::File => Err(Error::new(
                 ErrorKind::NotADirectory,
-                format!(r#"提供的路径 "{:}" 不是目录"#, path.as_ref().display()),
-            ))
+                format!(r#"提供的路径"{}"是文件不是目录"#, path.as_ref().display()),
+            )),
         }
     }
 
@@ -251,33 +248,53 @@ impl WBFPManager /* 读取 */ {
     fn get_pack_struct_item2(&self, path_list: &[String]) -> io::Result<&PackStructItem> {
         if path_list.len() > 1 {
             let mut name_list = path_list.iter();
-            let mut this_name = name_list.next();
-            let mut this_pack_struct = &self.manifest.root_struct;
-            while let Some(name) = this_name {
-                if let Some(item) = this_pack_struct.items.get(name) {
+            let mut s_name = name_list.next();
+            let mut s_pack_struct = &self.manifest.root_struct;
+            let mut s_path = PathBuf::new();
+            while let Some(name) = s_name {
+                let this_path = s_path.join(name);
+                if let Some(item) = s_pack_struct.items.get(name) {
                     if let Some(next_name) = name_list.next() {
-                        if let PackStructItemType::Dir { pack_struct, .. } = &item.item_type {
-                            if let Some(pack_struct) = pack_struct {
-                                this_pack_struct = pack_struct;
-                                this_name = Some(next_name);
-                            } else {
-                                Err(Error::other("实例没有加载"))?;
+                        match &item.item_type {
+                            PackStructItemType::Dir { pack_struct, .. } => {
+                                if let Some(pack_struct) = pack_struct {
+                                    s_pack_struct = pack_struct;
+                                    s_path = this_path;
+                                    s_name = Some(next_name);
+                                } else {
+                                    Err(Error::other(format!(
+                                        r#"虚拟路径"{}"实例没有加载"#,
+                                        this_path.display()
+                                    )))?;
+                                }
                             }
-                        } else {
-                            Err(Error::new(ErrorKind::NotADirectory, "路径存在非目录"))?;
+                            PackStructItemType::File => {
+                                Err(Error::new(
+                                    ErrorKind::NotADirectory,
+                                    format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
+                                ))?;
+                            }
                         }
                     } else {
                         return Ok(item);
                     }
                 } else {
-                    Err(Error::new(ErrorKind::NotFound, "结构项不存在"))?;
+                    Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!(r#"虚拟路径目录"{}"的结构项不存在"#, this_path.display()),
+                    ))?;
                 }
             }
-            Err(Error::other("未知错误"))
+            Err(Error::other(format!("未找到路径{path_list:?}")))
         } else if let Some(v) = self.manifest.root_struct.items.get(&path_list[0]) {
             Ok(v)
+        } else if path_list.len() > 0 {
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!(r#"虚拟路径"{}"的结构项不存在"#, path_list[0]),
+            ))
         } else {
-            Err(Error::new(ErrorKind::NotFound, "结构项不存在"))
+            Err(Error::other("提供了无效或空的路径"))
         }
     }
 
@@ -286,6 +303,7 @@ impl WBFPManager /* 读取 */ {
             wbfp_manager: &mut WBFPManager,
             pack_struct_items: &mut HashMap<String, PackStructItem>,
             no_err: bool,
+            s_path: &Path,
         ) -> io::Result<()> {
             for item in pack_struct_items.values_mut() {
                 if let PackStructItemType::Dir {
@@ -295,9 +313,12 @@ impl WBFPManager /* 读取 */ {
                     && pack_struct.is_none()
                 {
                     let mut this_pack_struct = wbfp_manager.load_pack_struct(*struct_file_pos)?;
-                    if let Err(err) =
-                        m_load_all_data(wbfp_manager, &mut this_pack_struct.items, no_err)
-                        && !no_err
+                    if let Err(err) = m_load_all_data(
+                        wbfp_manager,
+                        &mut this_pack_struct.items,
+                        no_err,
+                        &s_path.join(&item.name),
+                    ) && !no_err
                     {
                         Err(err)?;
                     }
@@ -305,10 +326,14 @@ impl WBFPManager /* 读取 */ {
                 }
                 //加载元数据
                 if let PackFileMetadataRun::NoLoad = item.metadata {
+                    let this_path = s_path.join(&item.name);
                     item.metadata = PackFileMetadataRun::Loaded(
                         match wbfp_manager.load_pack_file_metadata(item.metadata_file_pos) {
                             Ok(v) => v,
-                            Err(err) => Err(Error::other(format!("无法加载元数据, err: {err}")))?,
+                            Err(err) => Err(Error::other(format!(
+                                r#"虚拟路径"{}"的元数据无法加载, err:{err}"#,
+                                this_path.display()
+                            )))?,
                         },
                     );
                 }
@@ -329,7 +354,7 @@ impl WBFPManager /* 读取 */ {
             );
         }
         //处理
-        if let Err(err) = m_load_all_data(self, &mut this_root_items, no_err) {
+        if let Err(err) = m_load_all_data(self, &mut this_root_items, no_err, &PathBuf::new()) {
             //是否忽略错误
             if !no_err {
                 Err(err)?;
@@ -373,6 +398,7 @@ impl WBFPManager /* 读取 */ {
                             pack_struct,
                             &mut path_list,
                             is_dir,
+                            &PathBuf::from(two_name),
                         ) {
                             self.manifest
                                 .root_struct
@@ -384,29 +410,34 @@ impl WBFPManager /* 读取 */ {
                             struct_item.metadata = PackFileMetadataRun::Loaded(
                                 match self.load_pack_file_metadata(struct_item.metadata_file_pos) {
                                     Ok(v) => v,
-                                    Err(err) => {
-                                        Err(Error::other(format!("加载元数据失败, err: {err}")))?
-                                    }
+                                    Err(err) => Err(Error::other(format!(
+                                        r#"虚拟路径"{two_name}"的元数据加载失败, err:{err}"#
+                                    )))?,
                                 },
                             );
                         }
                         struct_item
                     } else {
-                        Err(Error::other("结构实例没有被加载")).unwrap()
+                        Err(Error::other(format!(
+                            r#"虚拟路径"{two_name}"的结构实例没有被加载"#
+                        )))?
                     }
                 }
                 PackStructItemType::File => {
                     //如果只有二级，且不限定目录
                     if is_dir || path_list.next().is_some() {
-                        Err(Error::new(ErrorKind::NotADirectory, "路径存在非目录")).unwrap()
+                        Err(Error::new(
+                            ErrorKind::NotADirectory,
+                            format!(r#"虚拟路径"{two_name}"是文件不是目录"#),
+                        ))?
                     } else {
                         if let PackFileMetadataRun::NoLoad = struct_item.metadata {
                             struct_item.metadata = PackFileMetadataRun::Loaded(
                                 match self.load_pack_file_metadata(struct_item.metadata_file_pos) {
                                     Ok(v) => v,
-                                    Err(err) => {
-                                        Err(Error::other(format!("无法加载元数据, err: {err}")))?
-                                    }
+                                    Err(err) => Err(Error::other(format!(
+                                        r#"虚拟路径"{two_name}"的元数据无法加载, err:{err}"#
+                                    )))?,
                                 },
                             );
                         }
@@ -415,7 +446,10 @@ impl WBFPManager /* 读取 */ {
                 }
             }
         } else {
-            Err(Error::new(ErrorKind::NotFound, "结构项不存在"))?
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!(r#"虚拟路径"{two_name}"的结构项不存在"#),
+            ))?
         };
         //返还
         self.manifest
@@ -430,8 +464,10 @@ impl WBFPManager /* 读取 */ {
         s_pack_struct: &mut PackStruct,
         path_list: &mut Iter<String>,
         is_dir: bool,
+        s_path: &Path,
     ) -> io::Result<()> {
         if let Some(this_name) = path_list.next() {
+            let this_path = s_path.join(this_name);
             if let Some(item) = s_pack_struct.items.get_mut(this_name) {
                 match &mut item.item_type {
                     PackStructItemType::Dir {
@@ -442,82 +478,116 @@ impl WBFPManager /* 读取 */ {
                             *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                         }
                         if let Some(pack_struct) = pack_struct {
-                            self.s_load_pack_struct_metadata_path(pack_struct, path_list, is_dir)?;
+                            self.s_load_pack_struct_metadata_path(
+                                pack_struct,
+                                path_list,
+                                is_dir,
+                                &this_path,
+                            )?;
                             //加载元数据
-                            if let PackFileMetadataRun::NoLoad = item.metadata {
-                                item.metadata = PackFileMetadataRun::Loaded(
-                                    match self.load_pack_file_metadata(item.metadata_file_pos) {
-                                        Ok(v) => v,
-                                        Err(err) => Err(Error::other(format!(
-                                            "无法加载元数据, err: {err}"
-                                        )))?,
-                                    },
-                                );
-                            }
+                            self.load_metadata_to_item(&this_path, item)?;
                             Ok(())
                         } else {
-                            Err(Error::other("结构实例没有被加载")).unwrap()
+                            Err(Error::other(format!(
+                                r#"虚拟路径"{}"的结构实例没有被加载"#,
+                                this_path.display()
+                            )))
                         }
                     }
                     PackStructItemType::File => {
                         //判断是否只有目录且是否存在下一个路径
                         if is_dir || path_list.next().is_some() {
-                            Err(Error::new(ErrorKind::NotADirectory, "目录存在非目录")).unwrap()
+                            Err(Error::new(
+                                ErrorKind::NotADirectory,
+                                format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
+                            ))
                         } else {
                             //最后一个就加载元数据
-                            if let PackFileMetadataRun::NoLoad = item.metadata {
-                                item.metadata = PackFileMetadataRun::Loaded(
-                                    match self.load_pack_file_metadata(item.metadata_file_pos) {
-                                        Ok(v) => v,
-                                        Err(err) => Err(Error::other(format!(
-                                            "无法加载元数据, err: {err}"
-                                        )))?,
-                                    },
-                                );
-                            }
+                            self.load_metadata_to_item(&this_path, item)?;
                             Ok(())
                         }
                     }
                 }
             } else {
-                Err(Error::new(ErrorKind::NotFound, "结构项不存在"))?
+                Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!(r#"虚拟路径"{}"的结构项不存在"#, this_path.display()),
+                ))?
             }
         } else {
             Ok(())
         }
     }
 
+    fn load_metadata_to_item(
+        &mut self,
+        this_path: &PathBuf,
+        item: &mut PackStructItem,
+    ) -> Result<(), Error> {
+        if let PackFileMetadataRun::NoLoad = item.metadata {
+            item.metadata = PackFileMetadataRun::Loaded(
+                match self.load_pack_file_metadata(item.metadata_file_pos) {
+                    Ok(v) => v,
+                    Err(err) => Err(Error::other(format!(
+                        r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
+                        this_path.display()
+                    )))?,
+                },
+            );
+        }
+        Ok(())
+    }
+
     pub fn get_dir<P: AsRef<Path>>(&mut self, path: P) -> io::Result<&PackStruct> {
         let path_list = PathTool::path_to_string_vec(path);
-        self.load_pack_struct_metadata_path2(&path_list, true)?;
-        let mut pack_struct = &self.manifest.root_struct;
-        let mut path_list_iter = path_list.iter();
-        let mut name = path_list_iter.next();
-        while let Some(this_name) = name {
-            if pack_struct.items.contains_key(this_name) {
-                let this_pack_struct = if let PackStructItemType::Dir { pack_struct, .. } =
-                    &pack_struct.items.get(this_name).unwrap().item_type
-                {
-                    if let Some(pack_struct) = pack_struct {
-                        pack_struct
+        if path_list.is_empty() {
+            Err(Error::other("提供了无效或空的路径"))
+        } else {
+            self.load_pack_struct_metadata_path2(&path_list, true)?;
+            let mut pack_struct = &self.manifest.root_struct;
+            let mut path_list_iter = path_list.iter();
+            let mut name = path_list_iter.next();
+            let mut path = PathBuf::new();
+            while let Some(this_name) = name {
+                let this_path = path.join(this_name);
+                if let Some(item) = pack_struct.items.get(this_name) {
+                    let this_pack_struct = match &item.item_type {
+                        PackStructItemType::Dir { pack_struct, .. } => {
+                            if let Some(pack_struct) = pack_struct {
+                                pack_struct
+                            } else {
+                                Err(Error::other(format!(
+                                    r#"虚拟路径"{}"的结构没有被加载"#,
+                                    this_path.display()
+                                )))?
+                            }
+                        }
+                        PackStructItemType::File => Err(Error::new(
+                            ErrorKind::NotADirectory,
+                            format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
+                        ))?,
+                    };
+                    //下循环
+                    let next_name = path_list_iter.next();
+                    if next_name.is_some() {
+                        name = next_name;
+                        pack_struct = this_pack_struct;
+                        path = this_path;
                     } else {
-                        panic!("结构没有被加载")
+                        return Ok(this_pack_struct);
                     }
                 } else {
-                    return Err(Error::new(ErrorKind::NotADirectory, "路径存在非目录")).unwrap();
-                };
-                let next_name = path_list_iter.next();
-                if next_name.is_some() {
-                    name = next_name;
-                    pack_struct = this_pack_struct;
-                } else {
-                    return Ok(this_pack_struct);
+                    Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!(r#"虚拟路径"{}不存在""#, this_path.display()),
+                    ))?;
                 }
-            } else {
-                return Err(Error::new(ErrorKind::DirectoryNotEmpty, "目录不存在")).unwrap();
             }
+            Err(Error::other(format!(
+                r#"未找到路径"{}""#,
+                PathBuf::from(path).display()
+            )))
         }
-        panic!("未知错误")
     }
 
     //加载结构
@@ -597,7 +667,7 @@ impl WBFPManager /* 写入 */ {
                             } else {
                                 Err(Error::new(
                                     ErrorKind::NotADirectory,
-                                    format!("虚拟路径{this_path:?}是文件不是目录"),
+                                    format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
                                 ))
                             }
                         }
@@ -608,7 +678,8 @@ impl WBFPManager /* 写入 */ {
                         wbfp_man
                             .save_metadata_write(&mut metadata)
                             .or(Err(Error::other(format!(
-                                "无法保存文件{this_path:?}的元数据"
+                                r#"无法保存文件"{}"的元数据"#,
+                                this_path.display()
                             ))))?;
 
                     let pack_struct_item = PackStructItem {
@@ -620,15 +691,14 @@ impl WBFPManager /* 写入 */ {
                     pack_struct_items.insert(name, pack_struct_item);
                     Ok(())
                 } else {
-                    Err(Error::new(ErrorKind::NotFound, "文件或目录不存在"))
+                    Err(Error::new(
+                        ErrorKind::NotFound,
+                        format!(r#"虚拟路径"{}"不存在"#, this_path.display()),
+                    ))
                 }
             } else {
                 panic!("逻辑错误")
             }
-        }
-        #[cfg(debug_assertions)]
-        {
-            //debug!("[元数据]更新{path_list:?}元数据");
         }
         let mut path_list = path_list.into_iter();
         let two_name = path_list.next().ok_or(Error::other("路径为空"))?;
@@ -699,7 +769,6 @@ impl WBFPManager /* 写入 */ {
                         r#"无法保存文件"{two_name}"的元数据"#
                     ))))?;
 
-
             let pack_struct_item = PackStructItem {
                 name: two_name.clone(),
                 item_type: PackStructItemType::File,
@@ -711,7 +780,10 @@ impl WBFPManager /* 写入 */ {
                 .items
                 .insert(two_name, pack_struct_item);
         } else {
-            Err(Error::new(ErrorKind::NotFound, "目录或文件不存在")).unwrap()
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!(r#"虚拟路径"{two_name}"不存在"#),
+            ))?
         }
         self.save_root_pack_struct()
     }
@@ -749,7 +821,8 @@ impl WBFPManager /* 写入 */ {
                                         {
                                             Ok(v) => v,
                                             Err(err) => Err(Error::other(format!(
-                                                "无法加载元数据, err: {err}"
+                                                r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
+                                                this_path.display()
                                             )))?,
                                         },
                                     );
@@ -758,7 +831,7 @@ impl WBFPManager /* 写入 */ {
                             } else {
                                 Err(Error::new(
                                     ErrorKind::NotADirectory,
-                                    format!("虚拟路径{this_path:?}是文件不是目录"),
+                                    format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
                                 ))?
                             }
                         }
@@ -766,7 +839,7 @@ impl WBFPManager /* 写入 */ {
                 } else {
                     Err(Error::new(
                         ErrorKind::NotFound,
-                        format!(r#"虚拟路径"{this_path:?}"文件不存在"#),
+                        format!(r#"虚拟路径"{}"不存在"#, this_path.display()),
                     ))?
                 }
             } else {
@@ -819,7 +892,7 @@ impl WBFPManager /* 写入 */ {
                             .insert(two_pack_struct_name.clone(), pack_struct_item);
                         Err(Error::new(
                             ErrorKind::NotADirectory,
-                            format!(r#"路径"{two_pack_struct_name}是文件不是目录""#),
+                            format!(r#"虚拟路径"{two_pack_struct_name}是文件不是目录""#),
                         ))?
                     }
                 }
@@ -849,7 +922,7 @@ impl WBFPManager /* 写入 */ {
             DATA_DATA_BLOCK_LEN,
             self.cow,
             DEFAULT_HASH_TYPE,
-        );
+        )?;
         todo!();
     }
 
@@ -880,10 +953,12 @@ impl WBFPManager /* 写入 */ {
         cow: bool,
         hash_type: u8,
     ) -> io::Result<PackFileWR<'_>> {
-
         let path_list = PathTool::path_to_string_vec(&path);
         if self.file_is_some(&path) {
-            Err(Error::other("文件或目录已存在"))?;
+            Err(Error::other(format!(
+                r#"虚拟路径"{}"文件或目录已存在"#,
+                path.as_ref().display()
+            )))?;
         }
         if path_list.len() > 1 {
             self.create_dir_all2(&path_list[..path_list.len() - 1])?;
@@ -918,80 +993,79 @@ impl WBFPManager /* 写入 */ {
             let this_path = s_path.join(name);
             //判断目录是否存在
             if let Some(item) = s_pack_struct.items.get_mut(name) {
-                if let PackStructItemType::Dir {
-                    struct_file_pos,
-                    pack_struct,
-                } = &mut item.item_type
-                {
-                    if pack_struct.is_none() {
-                        //加载实例
-                        *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
-                    }
-                    if let Some(pack_struct) = pack_struct {
-                        //递归
-                        let r = self.s_create_dir_all(pack_struct, path_list, cow, &this_path)?;
-                        //更新元数据
-                        if let PackFileMetadataRun::NoLoad = item.metadata {
-                            //加载元数据
-                            item.metadata = PackFileMetadataRun::Loaded(
-                                match self.load_pack_file_metadata(item.metadata_file_pos) {
-                                    Ok(v) => v,
-                                    Err(err) => {
-                                        Err(Error::other(format!("无法加载元数据, err: {err}")))?
-                                    }
-                                },
-                            );
+                match &mut item.item_type {
+                    PackStructItemType::Dir {
+                        struct_file_pos,
+                        pack_struct,
+                    } => {
+                        if pack_struct.is_none() {
+                            //加载实例
+                            *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                         }
-                        if r.dir_count != 0 || r.file_count != 0 {
-                            let (new_block, pos) = self.save_pack_struct_write(pack_struct)?;
-
-                            if new_block {
-                                *struct_file_pos = pos;
+                        if let Some(pack_struct) = pack_struct {
+                            //递归
+                            let r =
+                                self.s_create_dir_all(pack_struct, path_list, cow, &this_path)?;
+                            //更新元数据
+                            if let PackFileMetadataRun::NoLoad = item.metadata {
+                                //加载元数据
+                                item.metadata = PackFileMetadataRun::Loaded(
+                                    match self.load_pack_file_metadata(item.metadata_file_pos) {
+                                        Ok(v) => v,
+                                        Err(err) => Err(Error::other(format!(
+                                            r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
+                                            this_path.display()
+                                        )))?,
+                                    },
+                                );
                             }
-                        }
-                        match &mut item.metadata {
-                            PackFileMetadataRun::Loaded(metadata) => {
-                                if let PackFileMetadataType::Dir {
-                                    file_count,
-                                    dir_count,
-                                } = &mut metadata.file_type
-                                {
-                                    *dir_count += r.dir_count;
-                                    *file_count += r.file_count;
-                                    metadata.len += r.length;
-                                    //保存元数据和结构
-                                    if r.dir_count != 0 || r.file_count != 0 || r.length != 0 {
-                                        let (new_block, pos) =
-                                            self.save_metadata_write(metadata)?;
+                            if r.dir_count != 0 || r.file_count != 0 {
+                                let (new_block, pos) = self.save_pack_struct_write(pack_struct)?;
 
-                                        if new_block {
-                                            item.metadata_file_pos = pos;
-                                        }
-                                    }
-                                    Ok(MutDirAddReturn {
-                                        dir_count: r.dir_count,
-                                        file_count: r.file_count,
-                                        length: r.length,
-                                    })
-                                } else {
-                                    panic!("存在逻辑错误")
+                                if new_block {
+                                    *struct_file_pos = pos;
                                 }
                             }
-                            PackFileMetadataRun::Locked => {
-                                Err(Error::other("元数据被锁定")).unwrap()
+                            match &mut item.metadata {
+                                PackFileMetadataRun::Loaded(metadata) => {
+                                    if let PackFileMetadataType::Dir {
+                                        file_count,
+                                        dir_count,
+                                    } = &mut metadata.file_type
+                                    {
+                                        *dir_count += r.dir_count;
+                                        *file_count += r.file_count;
+                                        metadata.len += r.length;
+                                        //保存元数据和结构
+                                        if r.dir_count != 0 || r.file_count != 0 || r.length != 0 {
+                                            let (new_block, pos) =
+                                                self.save_metadata_write(metadata)?;
+
+                                            if new_block {
+                                                item.metadata_file_pos = pos;
+                                            }
+                                        }
+                                        Ok(MutDirAddReturn {
+                                            dir_count: r.dir_count,
+                                            file_count: r.file_count,
+                                            length: r.length,
+                                        })
+                                    } else {
+                                        panic!("存在逻辑错误")
+                                    }
+                                }
+                                PackFileMetadataRun::Locked => Err(Error::other("元数据被锁定")),
+                                PackFileMetadataRun::NoLoad => panic!("元数据没有被加载"),
+                                PackFileMetadataRun::None => panic!("逻辑错误：目录的元数据为空"),
                             }
-                            PackFileMetadataRun::NoLoad => panic!("元数据没有被加载"),
-                            PackFileMetadataRun::None => panic!("逻辑错误：目录的元数据为空"),
+                        } else {
+                            panic!(r#"虚拟路径"{}"的结构没有被加载"#, this_path.display())
                         }
-                    } else {
-                        panic!("结构没有被加载")
                     }
-                } else {
-                    Err(Error::new(
+                    PackStructItemType::File => Err(Error::new(
                         ErrorKind::NotADirectory,
-                        "提供的目录已存在非目录的文件",
-                    ))
-                    .unwrap()
+                        format!("虚拟路径{}存在同名文件", this_path.display()),
+                    )),
                 }
             } else {
                 //创建
@@ -1064,22 +1138,22 @@ impl WBFPManager /* 写入 */ {
         {
             //存在则暂时删除（移动）
             //类型判断
-            if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = &mut two_item.item_type
-            {
-                //实例判断并尝试加载
-                if pack_struct.is_none() {
-                    //加载结构
-                    *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
+            match &mut two_item.item_type {
+                PackStructItemType::Dir {
+                    struct_file_pos,
+                    pack_struct,
+                } => {
+                    //实例判断并尝试加载
+                    if pack_struct.is_none() {
+                        //加载结构
+                        *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
+                    }
                 }
-                if pack_struct.is_none() {
-                    panic!("无法加载实例");
-                    Err(Error::other("无法加载实例"))?;
+                PackStructItemType::File => {
+                    Err(Error::other(format!(
+                        r#"虚拟路径"{two_name}"是文件不是目录"#
+                    )))?;
                 }
-            } else {
-                Err(Error::other(format!(r#""{two_name}"不是目录"#)))?;
             }
             (
                 two_item,
@@ -1090,7 +1164,6 @@ impl WBFPManager /* 写入 */ {
                 },
             )
         } else {
-
             (
                 PackStructItem::new_empty_dir(two_name, PackFileMetadata::new_empty_dir(self.cow)),
                 MutDirAddReturn {
@@ -1101,70 +1174,76 @@ impl WBFPManager /* 写入 */ {
             )
         };
         //子目录处理
-        if let PackStructItemType::Dir {
-            struct_file_pos,
-            pack_struct,
-        } = &mut two_pack_struct_item.item_type
-        {
-            if let Some(two_pack_struct) = pack_struct {
-                let r = self.s_create_dir_all(
-                    two_pack_struct,
-                    &mut path_list,
-                    self.cow,
-                    two_name.as_ref(),
-                )?;
-                two_r.dir_count += r.dir_count;
-                two_r.file_count += r.file_count;
-                two_r.length += r.length;
-                //
+        match &mut two_pack_struct_item.item_type {
+            PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } => {
+                if let Some(two_pack_struct) = pack_struct {
+                    let r = self.s_create_dir_all(
+                        two_pack_struct,
+                        &mut path_list,
+                        self.cow,
+                        two_name.as_ref(),
+                    )?;
+                    two_r.dir_count += r.dir_count;
+                    two_r.file_count += r.file_count;
+                    two_r.length += r.length;
+                    //
 
-                let (new_block, pos) = self.save_pack_struct_write(two_pack_struct)?;
-
-                if new_block {
-                    *struct_file_pos = pos;
-                }
-                if let PackFileMetadataRun::Loaded(metadata) = &mut two_pack_struct_item.metadata {
-                    metadata.len += r.length;
-                    if let PackFileMetadataType::Dir {
-                        file_count,
-                        dir_count,
-                    } = &mut metadata.file_type
-                    {
-                        *file_count += r.file_count;
-                        *dir_count += r.dir_count;
-                    }
-                    let (new_block, pos) = self.save_metadata_write(metadata)?;
+                    let (new_block, pos) = self.save_pack_struct_write(two_pack_struct)?;
 
                     if new_block {
-                        two_pack_struct_item.metadata_file_pos = pos;
+                        *struct_file_pos = pos;
                     }
+                    if let PackFileMetadataRun::Loaded(metadata) =
+                        &mut two_pack_struct_item.metadata
+                    {
+                        metadata.len += r.length;
+                        if let PackFileMetadataType::Dir {
+                            file_count,
+                            dir_count,
+                        } = &mut metadata.file_type
+                        {
+                            *file_count += r.file_count;
+                            *dir_count += r.dir_count;
+                        }
+                        let (new_block, pos) = self.save_metadata_write(metadata)?;
+
+                        if new_block {
+                            two_pack_struct_item.metadata_file_pos = pos;
+                        }
+                    } else {
+                        panic!("逻辑错误");
+                    }
+                    self.manifest
+                        .root_struct
+                        .items
+                        .insert(two_name.clone(), two_pack_struct_item);
                 } else {
-                    panic!("逻辑错误");
+                    self.manifest
+                        .root_struct
+                        .items
+                        .insert(two_name.clone(), two_pack_struct_item);
+                    Err(Error::other(format!(r#"虚拟路径"{two_name}"的结构不存在"#)))?;
                 }
-            } else {
-                panic!("没有结构实例");
-                Err(Error::other("没有结构实例"))?;
             }
-        } else {
-            self.manifest
-                .root_struct
-                .items
-                .insert(two_name.clone(), two_pack_struct_item);
-            panic!("类型错误，不是目录");
-            Err(Error::other("类型错误，不是目录"))?;
+            PackStructItemType::File => {
+                self.manifest
+                    .root_struct
+                    .items
+                    .insert(two_name.clone(), two_pack_struct_item);
+                Err(Error::other(format!(
+                    r#"虚拟路径"{two_name}"是文件不是目录"#
+                )))?;
+            }
         }
-        self.manifest
-            .root_struct
-            .items
-            .insert(two_name.clone(), two_pack_struct_item);
         self.manifest.attribute.dir_count += two_r.dir_count;
         self.manifest.attribute.file_count += two_r.file_count;
         self.manifest.attribute.data_len += two_r.length;
         self.pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count;
         self.save_root_pack_struct()?;
         self.low_save_all()?;
-        //强制触发gc
-        self.save_all().unwrap();
         Ok(())
     }
 }
@@ -1190,7 +1269,7 @@ impl WBFPManager /* 核心 */ {
         if let Some(file) = &mut self.manifest.file {
             Ok(file.get_file_pos(length))
         } else {
-            Err(Error::other("清单文件空数据列表不存在")).unwrap()
+            Err(Error::other("清单文件空数据列表不存在"))?
         }
     }
 
@@ -1208,7 +1287,6 @@ impl WBFPManager /* 核心 */ {
     }
     //垃圾回收
     fn file_gc(&mut self) -> io::Result<()> {
-
         self.pack_file.file_gc();
         self.save_empty_data_list()
     }
@@ -1216,7 +1294,6 @@ impl WBFPManager /* 核心 */ {
     //清单文件垃圾回收
     fn manifest_file_gc(&mut self) -> io::Result<()> {
         if let Some(file) = &mut self.manifest.file {
-
             file.file_gc();
             self.save_manifest_empty_data_list()
         } else {
@@ -1244,7 +1321,6 @@ impl WBFPManager /* 核心 */ {
 
     //保存所有数据
     fn save_all(&mut self) -> io::Result<()> {
-
         self.file_gc()?;
         self.manifest_file_gc()?;
         self.save_root_pack_struct()?;
@@ -1255,7 +1331,6 @@ impl WBFPManager /* 核心 */ {
 
     //保存空数据位置列表
     fn save_empty_data_list(&mut self) -> io::Result<()> {
-
         let old_pos = self.manifest.attribute.empty_data_pos_list_pos;
         let old_len = self
             .pack_file
@@ -1274,7 +1349,6 @@ impl WBFPManager /* 核心 */ {
     //保存清单空数据位置列表
     fn save_manifest_empty_data_list(&mut self) -> io::Result<()> {
         if let Some(file) = &mut self.manifest.file {
-
             let old_pos = self.manifest.attribute.manifest_empty_data_pos_list_pos;
             let old_len = file
                 .empty_data_list
@@ -1292,7 +1366,6 @@ impl WBFPManager /* 核心 */ {
 
     //保存根结构
     fn save_root_pack_struct(&mut self) -> io::Result<()> {
-
         let old_pos = self.manifest.attribute.root_struct_pos;
         let root_struct = &mut self.manifest.root_struct;
         let old_block_len = root_struct.data_block.get_this_block_len_u64();
@@ -1304,7 +1377,6 @@ impl WBFPManager /* 核心 */ {
 
     //保存属性
     fn save_manifest_attribute(&mut self) -> io::Result<()> {
-
         //属性
         let attribute = &mut self.manifest.attribute;
         //转换数据
@@ -1320,7 +1392,6 @@ impl WBFPManager /* 核心 */ {
 
     //保存数据长度
     fn save_pack_length(&mut self) -> io::Result<()> {
-
         self.pack_file.up_len();
         //上锁
         self.write_lock()?;
@@ -1360,7 +1431,7 @@ impl WBFPManager /* 核心 */ {
         } else if let Some(manifest_file) = &self.manifest.file {
             manifest_file
         } else {
-            Err(Error::other("已启用清单分离文件，但清单文件实例不存在")).unwrap()
+            Err(Error::other("已启用清单分离文件，但清单文件实例不存在"))?
         };
         data_file.manifest_data_block_read(file_pos)
     }
@@ -1374,13 +1445,11 @@ impl WBFPManager /* 核心 */ {
     ) -> io::Result<u64> {
         if self.s_manifest_file {
             if let Some(file) = &mut self.manifest.file {
-
                 file.manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
             } else {
                 Err(Error::other("已启用清单分离文件，但清单文件实例不存在"))
             }
         } else {
-            
             self.pack_file
                 .manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
         }
@@ -1427,10 +1496,11 @@ impl WBFPManager /* 核心 */ {
             }
             PackLockType::Dir => Err(Error::new(
                 ErrorKind::IsADirectory,
-                "无法解锁，锁文件类型是目录",
-            ))
-            .unwrap(),
-            PackLockType::Symlink => Err(Error::other("无法解锁，锁文件类型是符号链接")).unwrap(),
+                "无法解锁，锁文件类型很可能已被其他程序修改成目录",
+            ))?,
+            PackLockType::Symlink => Err(Error::other(
+                "无法解锁，锁文件类型很可能已被其他程序修改成符号链接",
+            ))?,
             PackLockType::None => Ok(()),
         }
     }
@@ -1539,10 +1609,10 @@ fn write_lock(run_lock: bool, write_lock_path: &PathBuf) -> Result<Option<File>,
         match lock_info.file_lock_pid_run {
             Some(true) => panic!("无法为包文件上写入锁，正在被其他进程持有。"),
             Some(false) => panic!(
-                r"包文件未正常解锁，但相关进程(pid:{})可能已停止。
-                    如果你认为可以继续，可以删除锁文件：{:?} 强制解锁",
-                lock_info.file_lock_pid.expect(""),
-                write_lock_path
+                r#"包文件未正常解锁，但相关进程(pid:{})可能已停止。
+                    如果你认为可以继续，可以删除锁文件"{}"强制解锁"#,
+                lock_info.file_lock_pid.expect("pid参数不存在"),
+                write_lock_path.display()
             ),
             None => Ok(Some(write_lock_file(write_lock_path)?)),
         }
@@ -1645,7 +1715,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             attribute,
             root_struct,
             file: Some(manifest_file),
-            run_data: WBFilesPackManifestRun::default(),
+            _run_data: WBFilesPackManifestRun::default(),
         };
         Ok(WBFPManager::new(
             pack_path,
@@ -1671,7 +1741,7 @@ pub fn open_file<P: AsRef<Path>>(pack_path: &P) -> io::Result<WBFPManager> {
             attribute,
             root_struct,
             file: None,
-            run_data: WBFilesPackManifestRun::default(),
+            _run_data: WBFilesPackManifestRun::default(),
         };
         Ok(WBFPManager::new(
             pack_path,
@@ -1787,7 +1857,7 @@ fn create2<P: AsRef<Path>>(
             },
             root_struct: PackStruct::default(),
             file: manifest_file,
-            run_data: WBFilesPackManifestRun::default(),
+            _run_data: WBFilesPackManifestRun::default(),
         },
         pack_file,
         s_manifest_file,

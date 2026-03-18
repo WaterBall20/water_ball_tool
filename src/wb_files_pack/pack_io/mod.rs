@@ -1,9 +1,10 @@
+use crate::tools;
 use crate::wb_files_pack::{
     DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_LEN, MANIFEST_DATA_BLOCK_LEN,
 };
 use std::fs::File;
 use std::io;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 pub mod file;
 
@@ -267,7 +268,7 @@ impl PackIO {
         Ok(())
     }
 
-    fn sync_data(&mut self) -> io::Result<()> {
+    pub(crate) fn _sync_data(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
 }
@@ -283,7 +284,15 @@ impl PackIO {
         //读取
         file.read_exact(&mut block_data_buf)?;
         //分析是否需要再加载
-        let block_len = ManifestDataBlock::get_block_len(&block_data_buf)?;
+        let block_len = ManifestDataBlock::get_block_len(&block_data_buf)
+            .map_err(|err| Error::other(format!("包文件IO属性数据块读取错误，err:{err:?}")))?;
+        if block_len > u32::MAX as u64 {
+            Err(Error::other(format!(
+                "解析的数据大小过大，可能是错误的:{}[{}]",
+                tools::bytes_len_to_string(block_len),
+                block_len
+            )))?
+        }
         let l_len = usize::try_from(block_len).unwrap() - MANIFEST_DATA_BLOCK_LEN;
         let block_data = if l_len > 0 {
             let mut l_block_buf = vec![0; l_len];

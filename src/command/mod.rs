@@ -1,21 +1,18 @@
 /*
 创建时间:26/02/24 80:40
 */
-use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{ ErrorKind, Read, Write };
-use std::path::{ Path, PathBuf };
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{ fs, io };
-use tracing::{ error, info, warn };
-use water_ball_tool::file_finder::{ FileFinder, FileInfo, FileKind, FilesList };
+use std::{fs, io};
+use tracing::{error, info, warn};
+use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
 use water_ball_tool::wb_files_pack::manager::WBFPManager;
 use water_ball_tool::wb_files_pack::{
-    PackFileMetadata,
-    PackFileMetadataRun,
-    PackStructItem,
-    PackStructItemType,
+    PackFileMetadata, PackFileMetadataRun, PackStructItem, PackStructItemType,
 };
 
 #[cfg(test)]
@@ -57,7 +54,9 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
                 f.write_all(&data).expect("保存到文件错误");
                 info!(r#"搜索结果已输出到文件: "{out_path}""#);
             }
-            Err(err) => { panic!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#) }
+            Err(err) => {
+                panic!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#)
+            }
         }
     } else {
         info!("搜索结果：{files_list:?}");
@@ -70,7 +69,7 @@ fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Res
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg} ({pos} 个文件和目录)")
-                .unwrap()
+                .unwrap(),
         );
         pb.set_message("搜索文件中");
     }
@@ -87,14 +86,14 @@ fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Res
                 &mut (|add_file_count, add_dir_count| {
                     file_count += add_file_count;
                     dir_count += add_dir_count;
-                    let files_count = file_count + dir_count;
-                    pb.set_position(files_count);
+                    let all_count = file_count + dir_count;
+                    pb.set_position(all_count);
                     //10的倍数才更新
-                    if files_count.is_multiple_of(10) {
+                    if all_count.is_multiple_of(10) {
                         pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
                     }
-                })
-            )
+                }),
+            ),
         )
     } else {
         ff.search(path.as_ref(), skip_symlink, None)
@@ -107,22 +106,24 @@ pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     match arg.as_str() {
         "-s" => wbfp_s(&args[1..], mp),
         "-m" => wbfp_m(&args[1..], mp),
-        _ =>
-            panic!(
-                "未知的路由参数: {arg}\\
+        _ => panic!(
+            "未知的路由参数: {arg}\\
     提示：
         -s  :  解包文件 | <包文件路径> <输出目录>
         -m  :  打包文件 | <输入目录> <包文件路径> [-f]
                         -f  :   不分离数据到单独的文件
 "
-            ),
+        ),
     }
 }
 
 //水球包文件打包
 pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
-    assert!(args.len() >= 2, "参数数量不够，至少需要 <输入目录> <目标路径>");
+    assert!(
+        args.len() >= 2,
+        "参数数量不够，至少需要 <输入目录> <目标路径>"
+    );
     //源目录路径
     let in_dir_path = &args[0];
     //输出的包文件路径
@@ -148,9 +149,9 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备打包");
     info!("创建新包文件并初始化");
-    let mut pack = water_ball_tool::wb_files_pack::manager
-        ::create_new_file2(&pack_path, false, s_data_file)
-        .expect("创建包文件错误");
+    let mut pack =
+        water_ball_tool::wb_files_pack::manager::create_new_file2(&pack_path, false, s_data_file)
+            .expect("创建包文件错误");
     //逻辑实现=== ===
     //搜索文件===
     info!("搜索文件");
@@ -164,24 +165,28 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})"
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
                 )
                 .unwrap()
-                .progress_chars("=>-")
+                .progress_chars("=>-"),
         );
         pb.set_message("0.00%");
     }
     info!("开始复制数据");
-    write_pack(&mut pack, Option::from(&pb), &files_list, in_dir_path.as_ref()).expect(
-        "写入包文件错误"
-    );
+    write_pack(
+        &mut pack,
+        Option::from(&pb),
+        &files_list,
+        in_dir_path.as_ref(),
+    )
+    .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
     pack_man: &mut WBFPManager,
     pb: Option<&ProgressBar>,
     files_list: &FilesList,
-    in_dir_path: &Path
+    in_dir_path: &Path,
 ) -> io::Result<()> {
     fn s_write_pack<'a>(
         pack: &mut WBFPManager,
@@ -189,21 +194,20 @@ fn write_pack(
         info_list: &HashMap<String, FileInfo>,
         in_s_path_buf: &Path,
         pack_s_path_buf: &Path,
-        run_buf: &mut [u8]
+        run_buf: &mut [u8],
     ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64)>> {
         for (name, info) in info_list {
             let this_in_path = in_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
             match info.file_kind() {
-                FileKind::File =>
-                    from_file_write_to_pack(
-                        pack,
-                        &mut pb_c,
-                        run_buf,
-                        info,
-                        &this_in_path,
-                        &this_pack_path
-                    ),
+                FileKind::File => from_file_write_to_pack(
+                    pack,
+                    &mut pb_c,
+                    run_buf,
+                    info,
+                    &this_in_path,
+                    &this_pack_path,
+                ),
                 FileKind::Dir(dir) => {
                     //目录仅递归处理
                     pb_c = s_write_pack(
@@ -212,7 +216,7 @@ fn write_pack(
                         dir.files_list(),
                         &this_in_path,
                         &this_pack_path,
-                        run_buf
+                        run_buf,
                     )?;
                 }
             }
@@ -230,9 +234,9 @@ fn write_pack(
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (files_list.data_length() as f64)) * 100.0;
-            pb.set_message(
-                format!("[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]")
-            );
+            pb.set_message(format!(
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+            ));
         }
     };
     s_write_pack(
@@ -244,7 +248,7 @@ fn write_pack(
         files_list.files_list(),
         in_dir_path,
         &PathBuf::new(),
-        &mut buf
+        &mut buf,
     )?;
     Ok(())
 }
@@ -255,19 +259,18 @@ fn from_file_write_to_pack(
     run_buf: &mut [u8],
     info: &FileInfo,
     this_in_path: &PathBuf,
-    this_pack_path: &PathBuf
+    this_pack_path: &PathBuf,
 ) {
     //更新进度
     let mut lase_up_pb_c_write_len = 0;
     if info.length() > 1024 * 1024 * 512 {
-        //TODO:需要自动单位转换函数
-        let mut msg = format!(
-            "正在从{this_in_path:?}复制大文件到虚拟路径{this_pack_path:?}，大小:{}",
+        info!(
+            r#"正在从"{}"复制大文件到虚拟路径"{}"，大小:{}[{}]"#,
+            this_in_path.display(),
+            this_pack_path.display(),
+            water_ball_tool::tools::bytes_len_to_string(info.length()),
             info.length()
         );
-        #[cfg(debug_assertions)]
-        msg.push_str("([仅调试附加]TODO:需要自动单位转换函数)");
-        info!("{msg}");
     }
     if let Some(pb_c) = pb_c {
         pb_c(0, 1);
@@ -281,7 +284,10 @@ fn from_file_write_to_pack(
                     //权限不足
                     error!("无法打开文件{this_in_path:?}，权限不足，将跳过，err:{err}");
                 }
-                _ => panic!("[未处理错误]无法打开文件{this_in_path:?}，err:{err}"),
+                _ => panic!(
+                    r#"[未处理错误]无法打开文件"{}"，err:{err}"#,
+                    this_in_path.display()
+                ),
             }
             return;
         }
@@ -289,7 +295,12 @@ fn from_file_write_to_pack(
     //尝试创建虚拟文件
     let mut out_file = pack_man
         .create_file2(this_pack_path, info.modified_time(), info.length())
-        .unwrap_or_else(|err| panic!("无法创建虚拟文件{this_pack_path:?},将跳过, err:{err}"));
+        .unwrap_or_else(|err| {
+            panic!(
+                "无法创建虚拟文件{},将跳过, err:{err}",
+                this_pack_path.display()
+            )
+        });
     //写入操作
     let mut write_len = 0;
     while write_len < info.length() {
@@ -301,11 +312,13 @@ fn from_file_write_to_pack(
                         assert_ne!(
                             this_read_len,
                             0,
-                            "文件{this_in_path:?}读取的大小为0，但于预期不符，文件大小可能不是0"
+                            "文件{}读取的大小为0，但于预期不符，文件大小可能不是0",
+                            this_pack_path.display()
                         );
                         if this_write_len < this_read_len {
                             warn!(
-                                "文件{this_in_path:?}写入虚拟文件{this_pack_path:?}大小不一致，读：{this_read_len}，写：{this_write_len}"
+                                "文件{this_in_path:?}写入虚拟文件{this_pack_path:?}大小不一致，读：{this_read_len\
+                                }，写：{this_write_len}",
                             );
                         }
                         write_len += this_write_len as u64;
@@ -319,14 +332,12 @@ fn from_file_write_to_pack(
                         }
                     }
                     Err(err) => {
-                        panic!("写入虚拟文件{this_pack_path:?}错误，err:{err}");
                         error!("写入虚拟文件{this_pack_path:?}错误, 将跳过，err:{err}");
                         break;
                     }
                 }
             }
             Err(err) => {
-                panic!("读取文件{this_in_path:?}失败，err:{err}");
                 error!("读取文件{this_in_path:?}失败，将跳过，err:{err}");
                 break;
             }
@@ -340,7 +351,10 @@ fn from_file_write_to_pack(
 //水球包文件解包
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
-    assert!(args.len() >= 2, "参数数量不够，至少需要 <包文件路径> <目标目录>");
+    assert!(
+        args.len() >= 2,
+        "参数数量不够，至少需要 <包文件路径> <目标目录>"
+    );
     //包文件路径
     let pack_path = &args[0];
     //输出文件路径
@@ -355,9 +369,8 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备解包");
     info!("打开包文件");
-    let mut pack = water_ball_tool::wb_files_pack::manager
-        ::open_file(pack_path)
-        .expect("打开包文件错误");
+    let mut pack =
+        water_ball_tool::wb_files_pack::manager::open_file(pack_path).expect("打开包文件错误");
     //逻辑实现=== ===
     info!("开始复制数据");
     fs::create_dir_all(out_dir_path).expect("无法创建数据路径");
@@ -368,7 +381,7 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
 fn read_pack(
     pack_man: &mut WBFPManager,
     pb: Option<&ProgressBar>,
-    out_dir_path: &Path
+    out_dir_path: &Path,
 ) -> io::Result<()> {
     fn s_read_pack<'a>(
         pack_man: &mut WBFPManager,
@@ -376,7 +389,7 @@ fn read_pack(
         pack_struct_items: &HashMap<String, PackStructItem>,
         out_s_path_buf: &Path,
         pack_s_path_buf: &Path,
-        run_buf: &mut [u8]
+        run_buf: &mut [u8],
     ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64)>> {
         for (name, item) in pack_struct_items {
             let this_out_path = out_s_path_buf.join(name);
@@ -390,10 +403,9 @@ fn read_pack(
                             run_buf,
                             metadata,
                             &this_out_path,
-                            &this_pack_path
+                            &this_pack_path,
                         );
                     } else {
-                        panic!("虚拟路径{this_pack_path:?}文件的元数据没有被加载");
                         error!("虚拟路径{this_pack_path:?}文件的元数据没有被加载");
                     }
                 }
@@ -409,10 +421,9 @@ fn read_pack(
                             pack_struct.items(),
                             &this_out_path,
                             &this_pack_path,
-                            run_buf
+                            run_buf,
                         )?;
                     } else {
-                        panic!("虚拟路径{this_pack_path:?}目录的结构没有被加载");
                         error!("虚拟路径{this_pack_path:?}目录的结构没有被加载");
                     }
                 }
@@ -438,9 +449,9 @@ fn read_pack(
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
-            pb.set_message(
-                format!("[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]")
-            );
+            pb.set_message(format!(
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+            ));
         }
     };
     s_read_pack(
@@ -452,7 +463,7 @@ fn read_pack(
         &root_struct_list,
         out_dir_path,
         &PathBuf::new(),
-        &mut buf
+        &mut buf,
     )?;
     Ok(())
 }
@@ -463,19 +474,18 @@ fn pack_read_write_to_file(
     run_buf: &mut [u8],
     metadata: &PackFileMetadata,
     this_out_path: &PathBuf,
-    this_pack_path: &PathBuf
+    this_pack_path: &PathBuf,
 ) {
     //更新进度
     let mut lase_up_pb_c_write_len = 0;
     if metadata.len() > 1024 * 1024 * 512 {
-        //TODO:需要自动单位转换函数
-        let mut msg = format!(
-            "正在从包文件虚拟路径{this_pack_path:?}复制大文件到{this_out_path:?}，大小:{}",
+        info!(
+            r#"正在从包文件虚拟路径"{}"复制大文件到"{}"，大小:{}[{}]"#,
+            this_pack_path.display(),
+            this_out_path.display(),
+            water_ball_tool::tools::bytes_len_to_string(metadata.len()),
             metadata.len()
         );
-        #[cfg(debug_assertions)]
-        msg.push_str("([仅调试附加]TODO:需要自动单位转换函数)");
-        info!("{msg}");
     }
     if let Some(pb_c) = pb_c {
         pb_c(0, 1);
@@ -484,7 +494,6 @@ fn pack_read_write_to_file(
     let mut in_file = match pack_man.get_file_rw(this_pack_path) {
         Ok(file) => file,
         Err(err) => {
-            panic!("无法打开虚拟文件{this_pack_path:?}，err:{err}");
             error!("无法打开虚拟文件{this_pack_path:?}，将跳过，err:{err}");
             return;
         }
@@ -493,7 +502,6 @@ fn pack_read_write_to_file(
     let mut out_file = match File::create(this_out_path) {
         Ok(file_wr) => file_wr,
         Err(err) => {
-            panic!("无法创建文件{this_out_path:?}，err：{err}");
             error!("无法创建文件{this_out_path:?},将跳过，err：{err}");
             return;
         }
@@ -511,14 +519,10 @@ fn pack_read_write_to_file(
                 match out_file.write(&run_buf[..this_read_len]) {
                     Ok(this_write_len) => {
                         if this_read_len == 0 {
-                            panic!("虚拟文件{this_pack_path:?}读取的大小为0。");
                             warn!("虚拟文件{this_pack_path:?}读取的大小为0, 将跳过。");
                             break;
                         }
                         if this_write_len < this_read_len {
-                            panic!(
-                                "虚拟文件{this_pack_path:?}写入文件{this_out_path:?}大小不一致，读：{this_read_len}，写：{this_write_len}"
-                            );
                             warn!(
                                 "虚拟文件{this_pack_path:?}写入文件{this_out_path:?}大小不一致，读：{this_read_len}，写：{this_write_len}"
                             );
@@ -534,14 +538,12 @@ fn pack_read_write_to_file(
                         }
                     }
                     Err(err) => {
-                        panic!("写入文件{this_pack_path:?}错误, 将跳过，err:{err}");
                         error!("写入文件{this_pack_path:?}错误, 将跳过，err:{err}");
                         break;
                     }
                 }
             }
             Err(err) => {
-                panic!("读取虚拟文件{this_pack_path:?}失败，将跳过，err:{err}");
                 error!("读取虚拟文件{this_pack_path:?}失败，将跳过，err:{err}");
                 break;
             }

@@ -110,15 +110,8 @@ pub struct FileFinder;
 impl FileFinder {
     fn get_file_name(path_buf: &PathBuf) -> Option<&str> {
         if let Some(name) = path_buf.file_name() {
-            if let Some(name) = name.to_str() {
-                Some(name)
-            } else {
-                panic!("无法将OsStr:{name:?} 转换成Str");
-                warn!("无法将OsStr:{name:?} 转换成Str");
-                None
-            }
+            Option::from(name.to_str().expect("无法将OsStr转换成Str"))
         } else {
-            panic!("目录:（{path_buf:?}）无法获取文件名。");
             warn!("目录:（{path_buf:?}）无法获取文件名。");
             None
         }
@@ -148,7 +141,7 @@ impl FileFinder {
             Ok(rd) => rd,
             Err(err) => match err.kind() {
                 ErrorKind::PermissionDenied => {
-                    error!("获取目录迭代器错误:path:{path:?},err:{err}");
+                    error!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, path.display());
                     return MSearchReturn {
                         callback,
                         add_length: 0,
@@ -157,17 +150,16 @@ impl FileFinder {
                     };
                 }
                 _ => {
-                    panic!("获取目录迭代器错误:path:{path:?},err:{err:?}");
+                    panic!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, path.display());
                 }
             },
         }
-            .flatten()
+        .flatten()
         {
             let path_buf = entry.path();
             //println!("[消息]找到: '{path_buf:?}' ");
             if path_buf.is_symlink() && skip_symlink {
                 info!("已跳过符号链接:{path_buf:?}");
-                continue;
             } else if path_buf.is_file() {
                 file_count += 1;
                 if let Some(ref mut cb) = callback {
@@ -178,23 +170,19 @@ impl FileFinder {
                 if let Some(name) = name {
                     let name = String::from(name);
                     //获取文件元数据
-                    match path_buf.metadata() {
-                        Ok(metadata) => {
-                            let len = metadata.len();
-                            let modified_time = Self::get_file_modified(&metadata);
-                            let file_info = FileInfo {
-                                name: String::from(&name),
-                                length: len,
-                                modified_time,
-                                file_kind: FileKind::File,
-                            };
-                            hash_map.insert(name, file_info);
-                            data_length += len;
-                        }
-                        Err(_) => {
-                            panic!("无法获取文件:{path_buf:?}的元数据");
-                            error!("无法获取文件:{path_buf:?}的元数据");
-                        }
+                    if let Ok(metadata) = path_buf.metadata() {
+                        let len = metadata.len();
+                        let modified_time = Self::get_file_modified(&metadata);
+                        let file_info = FileInfo {
+                            name: String::from(&name),
+                            length: len,
+                            modified_time,
+                            file_kind: FileKind::File,
+                        };
+                        hash_map.insert(name, file_info);
+                        data_length += len;
+                    } else {
+                        error!("无法获取文件:{path_buf:?}的元数据");
                     }
                 }
             } else if path_buf.is_dir() {
@@ -221,48 +209,43 @@ impl FileFinder {
                 if let Some(name) = name {
                     let name = String::from(name);
                     //获取目录元数据
-                    match path_buf.metadata() {
-                        Ok(metadata) => {
-                            dir_count += 1;
-                            if let Some(ref mut cb) = callback {
-                                cb(0, 1);
-                            }
-                            let mut files_list = HashMap::new();
-                            let modified_time = Self::get_file_modified(&metadata);
-
-                            let r = self.m_search(
-                                path_buf.as_path(),
-                                skip_symlink,
-                                &mut files_list,
-                                callback,
-                            );
-                            callback = r.callback;
-
-                            let file_info = FileInfo {
-                                name: String::from(&name),
-                                length: r.add_length,
-                                modified_time,
-                                file_kind: FileKind::Dir(Dir {
-                                    files_list,
-                                    file_count: r.add_file_count,
-                                    dir_count: r.add_dir_count,
-                                }),
-                            };
-                            hash_map.insert(name, file_info);
-                            data_length += r.add_length;
-                            file_count += r.add_file_count;
-                            dir_count += r.add_dir_count;
+                    if let Ok(metadata) = path_buf.metadata() {
+                        dir_count += 1;
+                        if let Some(ref mut cb) = callback {
+                            cb(0, 1);
                         }
-                        Err(_) => {
-                            panic!("无法获取目录: {path_buf:?}的元数据");
-                            error!("无法获取目录: {path_buf:?}的元数据");
-                        }
+                        let mut files_list = HashMap::new();
+                        let modified_time = Self::get_file_modified(&metadata);
+
+                        let r = self.m_search(
+                            path_buf.as_path(),
+                            skip_symlink,
+                            &mut files_list,
+                            callback,
+                        );
+                        callback = r.callback;
+
+                        let file_info = FileInfo {
+                            name: String::from(&name),
+                            length: r.add_length,
+                            modified_time,
+                            file_kind: FileKind::Dir(Dir {
+                                files_list,
+                                file_count: r.add_file_count,
+                                dir_count: r.add_dir_count,
+                            }),
+                        };
+                        hash_map.insert(name, file_info);
+                        data_length += r.add_length;
+                        file_count += r.add_file_count;
+                        dir_count += r.add_dir_count;
+                    } else {
+                        error!("无法获取目录: {path_buf:?}的元数据");
                     }
                 }
             } else if path_buf.is_symlink() {
                 warn!("符号链接 {path_buf:?} 已断。");
             } else {
-                panic!("{path_buf:?} 无法访问");
                 error!("{path_buf:?} 无法访问");
             }
         }
