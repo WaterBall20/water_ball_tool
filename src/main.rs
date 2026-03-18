@@ -23,7 +23,7 @@ fn main() {
     }
 }
 
-// 创建一个包装类，让 MultiProgress 兼容 io::Write
+// 创建一个包装类，让 MultiProgress 兼容 pack_io::Write
 struct MultiProgressWriter(MultiProgress);
 
 impl Write for MultiProgressWriter {
@@ -40,7 +40,7 @@ impl Write for MultiProgressWriter {
 }
 
 //初始化
-fn init_global_logging(mp: &MultiProgress) {
+pub fn init_global_logging(mp: &MultiProgress) {
     #[cfg(debug_assertions)]
     let filter = EnvFilter::new("debug"); // 开发模式看 debug
     #[cfg(not(debug_assertions))]
@@ -56,5 +56,6 @@ fn init_global_logging(mp: &MultiProgress) {
                 .with_target(false)
                 // 关键点：将日志重定向到 MultiProgress 的 println
                 .with_writer(move || MultiProgressWriter(mp_writer.clone())),
-        ).try_init();
+        )
+        .try_init();
 }
