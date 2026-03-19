@@ -10,7 +10,7 @@ use std::time::Duration;
 use std::{fs, io};
 use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
-use water_ball_tool::wb_files_pack::manager::WBFPManager;
+use water_ball_tool::wb_files_pack::allocator::Allocator;
 use water_ball_tool::wb_files_pack::{
     PackFileMetadata, PackFileMetadataRun, PackStructItem, PackStructItemType,
 };
@@ -132,12 +132,12 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     let s_data_file = match args.get(2) {
         Some(value) => {
             if value.contains("-f") {
-                !water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE
+                !water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE
             } else {
-                water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE
+                water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE
             }
         }
-        None => water_ball_tool::wb_files_pack::manager::DEFAULT_S_DATA_FILE,
+        None => water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE,
     };
 
     //进度条
@@ -149,9 +149,12 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备打包");
     info!("创建新包文件并初始化");
-    let mut pack =
-        water_ball_tool::wb_files_pack::manager::create_new_file2(&pack_path, false, s_data_file)
-            .expect("创建包文件错误");
+    let mut pack = water_ball_tool::wb_files_pack::allocator::Allocator::create_new_pack_file(
+        &pack_path,
+        false,
+        s_data_file,
+    )
+    .expect("创建包文件错误");
     //逻辑实现=== ===
     //搜索文件===
     info!("搜索文件");
@@ -183,13 +186,13 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
-    pack_man: &mut WBFPManager,
+    pack_man: &mut Allocator,
     pb: Option<&ProgressBar>,
     files_list: &FilesList,
     in_dir_path: &Path,
 ) -> io::Result<()> {
     fn s_write_pack<'a>(
-        pack: &mut WBFPManager,
+        pack: &mut Allocator,
         mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
         info_list: &HashMap<String, FileInfo>,
         in_s_path_buf: &Path,
@@ -254,7 +257,7 @@ fn write_pack(
 }
 
 fn from_file_write_to_pack(
-    pack_man: &mut WBFPManager,
+    pack_man: &mut Allocator,
     pb_c: &mut Option<&mut dyn FnMut(u64, u64)>,
     run_buf: &mut [u8],
     info: &FileInfo,
@@ -369,8 +372,8 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备解包");
     info!("打开包文件");
-    let mut pack =
-        water_ball_tool::wb_files_pack::manager::open_file(pack_path).expect("打开包文件错误");
+    let mut pack = water_ball_tool::wb_files_pack::allocator::Allocator::open_pack_file(pack_path)
+        .expect("打开包文件错误");
     //逻辑实现=== ===
     info!("开始复制数据");
     fs::create_dir_all(out_dir_path).expect("无法创建数据路径");
@@ -379,12 +382,12 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
 }
 
 fn read_pack(
-    pack_man: &mut WBFPManager,
+    pack_man: &mut Allocator,
     pb: Option<&ProgressBar>,
     out_dir_path: &Path,
 ) -> io::Result<()> {
     fn s_read_pack<'a>(
-        pack_man: &mut WBFPManager,
+        pack_man: &mut Allocator,
         mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
         pack_struct_items: &HashMap<String, PackStructItem>,
         out_s_path_buf: &Path,
@@ -401,7 +404,7 @@ fn read_pack(
                             pack_man,
                             &mut pb_c,
                             run_buf,
-                            metadata,
+                            &metadata,
                             &this_out_path,
                             &this_pack_path,
                         );
@@ -436,11 +439,11 @@ fn read_pack(
     pack_man.load_all_data(false)?;
 
     //获取根列表
-    let root_struct_list = pack_man.get_root_struct_items().clone();
+    let root_struct_list = pack_man.get_root_struct_items()?;
     let mut buf = vec![0; BUF_LEN];
     let mut this_all_write_len = 0;
     let mut this_all_write_file_count = 0;
-    let attribute = pack_man.get_manifest_attribute();
+    let attribute = pack_man.get_manifest_attribute()?;
     let all_file_count = attribute.file_count();
     let data_len = attribute.data_len();
     let mut binding = |add_len, add_file_count| {
@@ -469,7 +472,7 @@ fn read_pack(
 }
 
 fn pack_read_write_to_file(
-    pack_man: &mut WBFPManager,
+    pack_man: &mut Allocator,
     pb_c: &mut Option<&mut dyn FnMut(u64, u64)>,
     run_buf: &mut [u8],
     metadata: &PackFileMetadata,
@@ -491,7 +494,7 @@ fn pack_read_write_to_file(
         pb_c(0, 1);
     }
     //尝试打开虚拟文件
-    let mut in_file = match pack_man.get_file_rw(this_pack_path) {
+    let mut in_file = match pack_man.get_file_wr(this_pack_path) {
         Ok(file) => file,
         Err(err) => {
             error!("无法打开虚拟文件{this_pack_path:?}，将跳过，err:{err}");
@@ -551,6 +554,6 @@ fn pack_read_write_to_file(
     }
     //不论是否写入成功都对齐进度条
     if let Some(pb_c) = pb_c {
-        pb_c(metadata.len() - write_len, 0)
+        pb_c(metadata.len() - write_len, 0);
     }
 }

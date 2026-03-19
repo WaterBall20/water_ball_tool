@@ -1,7 +1,7 @@
 /*
 创建时间：2026/02/24 08:51
 */
-use crate::wb_files_pack::manager::{create_new_file, create_new_file2, open_file};
+use crate::wb_files_pack::manager::{create_new_pack_file2, create_new_pack_file, open_pack_file};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -33,7 +33,7 @@ fn create_new_pack_file() {
     remove_test_pack_files(&pack_file);
     //创建文件
     {
-        create_new_file(&pack_file).expect("无法创建文件");
+        create_new_pack_file2(&pack_file).expect("无法创建文件");
         println!("已创建文件");
     }
     remove_test_pack_files(&pack_file);
@@ -52,7 +52,7 @@ fn create_new_pack_file_and_create_dir() {
     remove_test_pack_files(&pack_file);
     //创建文件
     {
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         let test_pack_path = "Test/Test2";
         pack.create_dir_all(test_pack_path)
             .expect("创建虚假目录失败");
@@ -78,7 +78,7 @@ fn create_new_pack_file_and_create_file_wr() {
     remove_test_pack_files(&pack_file);
     //开始创建
     {
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         let modified_time = 0;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -120,7 +120,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
     remove_test_pack_files(&pack_file);
     //开始创建
     {
-        let mut pack = create_new_file2(&pack_file, false, false).expect("无法创建文件");
+        let mut pack = create_new_pack_file(&pack_file, false, false).expect("无法创建文件");
         let modified_time = 0;
         //file1
         //w
@@ -167,7 +167,7 @@ fn create_new_file_and_open_pack() {
     //
     let (root_struct, other_name_list) = {
         //创建文件
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         //随机创建文件
         let mut other_name_list = Vec::new();
         for index in 0..1000 {
@@ -190,7 +190,7 @@ fn create_new_file_and_open_pack() {
     };
     //打开已创建并关闭的文件
     {
-        let mut pack = open_file(&pack_file).expect("无法打开包文件");
+        let mut pack = open_pack_file(&pack_file).expect("无法打开包文件");
         let mut rw = pack
             .get_file_rw(test_file_path)
             .expect("无法打开虚拟文件读写器");
@@ -223,14 +223,14 @@ fn create_new_file_and_open_pack_manifest_ver() {
     //
     {
         //创建文件
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
     //打开已创建并关闭的文件
     {
-        open_file(&pack_file).expect("无法打开包文件");
+        open_pack_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
@@ -250,9 +250,9 @@ fn create_new_pack_file_err() {
     remove_test_pack_files(&pack_file);
     //
     let r = {
-        create_new_file(&pack_file).expect("无法创建文件");
+        create_new_pack_file2(&pack_file).expect("无法创建文件");
         //当上锁时，无法创建是正确的。
-        create_new_file(&pack_file)
+        create_new_pack_file2(&pack_file)
     };
     if let Err(err) = r {
         remove_test_pack_files(&pack_file);
@@ -273,14 +273,14 @@ fn create_new_file_and_open_pack_err_manifest_ver1() {
     //
     {
         //创建文件
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
     }
     //打开已创建并关闭的文件
     {
-        open_file(&pack_file).expect("无法打开包文件");
+        open_pack_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
@@ -299,14 +299,14 @@ fn create_new_file_and_open_pack_err_manifest_ver2() {
     //
     {
         //创建文件
-        let mut pack = create_new_file(&pack_file).expect("无法创建文件");
+        let mut pack = create_new_pack_file2(&pack_file).expect("无法创建文件");
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
     //打开已创建并关闭的文件
     {
-        open_file(&pack_file).expect("无法打开包文件");
+        open_pack_file(&pack_file).expect("无法打开包文件");
     }
     remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+//内部路径工具
 pub(crate) struct PathTool;
 
 impl PathTool {

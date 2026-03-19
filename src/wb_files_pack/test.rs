@@ -1,4 +1,7 @@
-use crate::wb_files_pack::{Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType};
+use crate::wb_files_pack::{
+    Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata,
+    PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
+};
 
 #[test]
 fn pack_struct_to_bytes_vec_and_load() {
@@ -157,18 +160,13 @@ fn pack_file_metadata_dir_to_bytes_vec_and_load() {
 
 #[test]
 fn pack_file_metadata_data_block_save_and_load() {
-    let a = Attribute::default();
-    let a_data = a.to_bytes_vec();
-    let mut data_block = vec![0u8; ManifestDataBlock::get_block_len_us(a_data.len())];
-    //Save
-    let data_block_len = data_block.len();
-    ManifestDataBlock::save_data_to_block_data_new(&a_data, &mut data_block, data_block_len);
-    //Load
-    let save_load_data = ManifestDataBlock::get_data(&data_block).unwrap();
-    let a_load = Attribute::load(save_load_data).unwrap();
+    let mut a = Attribute::default();
+    let a_block_data = a.get_block_data().0;
+    let a_data_block = ManifestDataBlock::from_block_data_new(a_block_data, 0).unwrap();
+    let a_load = Attribute::load(a_data_block).unwrap();
     assert_eq!(a, a_load);
     //Save2
-    let b = Attribute {
+    let mut b = Attribute {
         version: 10,
         version_compatible: 10,
         cow: true,
@@ -179,20 +177,17 @@ fn pack_file_metadata_data_block_save_and_load() {
         empty_data_pos_list_pos: 255,
         manifest_empty_data_pos_list_pos: 241,
         manifest_file_len: 123,
+        data_block: ManifestDataBlock::default(),
     };
-    let data_block_len = data_block.len();
-    ManifestDataBlock::save_data_to_block_data(&b.to_bytes_vec(), &mut data_block, data_block_len)
-        .unwrap();
+    let b_block_data = b.get_block_data().0;
     //Load
-    let save_load_data = ManifestDataBlock::get_data(&data_block).unwrap();
-    let b_load = Attribute::load(save_load_data).unwrap();
+    let b_load =
+        Attribute::load(ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()).unwrap();
     assert_eq!(b, b_load);
     //Save3
-    let data_block_len = data_block.len();
-    ManifestDataBlock::save_data_to_block_data(&b.to_bytes_vec(), &mut data_block, data_block_len)
-        .unwrap();
+    let b_block_data = b.get_block_data().0;
     //Load
-    let save_load_data = ManifestDataBlock::get_data(&data_block).unwrap();
-    let b_load = Attribute::load(save_load_data).unwrap();
+    let b_load =
+        Attribute::load(ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()).unwrap();
     assert_eq!(b, b_load);
 }

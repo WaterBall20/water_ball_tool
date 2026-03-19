@@ -2,14 +2,18 @@
 开始时间：26/02/13 11：31
  */
 use crate::wb_files_pack::manager::WBFPManager;
+use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{PackFileHash, PackFileMetadata, PackFileMetadataType};
 use blake3::Hasher;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 
-pub struct PackFileWR<'a> {
+pub struct PackFileWR {
     //管理器实例
-    manager: &'a mut WBFPManager,
+    manager: Arc<Mutex<WBFPManager>>,
+    //包文件io
+    pack_io: Arc<Mutex<PackIO>>,
     //文件位置
     pos: u64,
     //缓存_文件分配的位置当前索引
@@ -24,12 +28,13 @@ pub struct PackFileWR<'a> {
     hash: PackFileHash,
 }
 
-impl PackFileWR<'_> {
+impl PackFileWR {
     pub(in crate::wb_files_pack) fn new(
-        manager: &'_ mut WBFPManager,
+        manager: Arc<Mutex<WBFPManager>>,
+        pack_io: Arc<Mutex<PackIO>>,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
-    ) -> PackFileWR<'_> {
+    ) -> PackFileWR {
         let hash = if let PackFileMetadataType::File { hash_type, .. } = metadata.file_type {
             match hash_type {
                 1 => PackFileHash::Blake3 {
@@ -43,6 +48,7 @@ impl PackFileWR<'_> {
         };
         PackFileWR {
             manager,
+            pack_io,
             pos: 0,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
@@ -181,20 +187,23 @@ impl PackFileWR<'_> {
             if let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type {
                 *hash_value = self.hash.get_hash_value();
             }
-            self.manager.file_metadata_update(path_list, metadata)?;
+            let manager = self.manager.clone();
+            let mut manager = manager
+                .lock()
+                .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            manager.file_metadata_update(path_list, metadata)?;
         }
         Ok(())
     }
 }
 
-impl Drop for PackFileWR<'_> {
+impl Drop for PackFileWR {
     fn drop(&mut self) {
-
         _ = self.finish_mut();
     }
 }
 
-impl Seek for PackFileWR<'_> {
+impl Seek for PackFileWR {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match &mut self.hash {
             PackFileHash::Blake3 { is_seek, .. } => *is_seek = true,
@@ -230,8 +239,11 @@ impl Seek for PackFileWR<'_> {
     }
 }
 
-impl Read for PackFileWR<'_> {
+impl Read for PackFileWR {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let pack_file = self.pack_io.clone();
+        let mut pack_file = pack_file
+            .lock().map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
         if let Some(metadata) = &self.metadata {
             //当前大小所需的位置列表
             let pos_s = self.get_add_pos_s(buf.len() as u64, true)?;
@@ -246,9 +258,9 @@ impl Read for PackFileWR<'_> {
                 };
                 let this_buf = &mut buf[read_len..read_len + len];
                 //更改文件位置
-                self.manager.pack_file.set_pos_read(pos)?;
+                pack_file.set_pos_read(pos)?;
                 //读取数据
-                self.manager.pack_file.read_exact(this_buf)?;
+                pack_file.read_exact(this_buf)?;
                 read_len += len;
             }
             self.add_pos(read_len as u64)?;
@@ -259,9 +271,15 @@ impl Read for PackFileWR<'_> {
     }
 }
 
-impl Write for PackFileWR<'_> {
+impl Write for PackFileWR {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.manager.write_lock()?;
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock().map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        manager.this_write_lock()?;
+        let pack_file = self.pack_io.clone();
+        let mut pack_file = pack_file
+            .lock().map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
         //当前大小所需的位置列表
         let pos_s = self.get_add_pos_s(buf.len() as u64, false)?;
         //当前已写入大小
@@ -271,9 +289,9 @@ impl Write for PackFileWR<'_> {
             let len = usize::try_from(len).unwrap();
             let this_data = &buf[write_len..write_len + len];
             //更改文件位置
-            self.manager.pack_file.set_pos_write(pos)?;
+            pack_file.set_pos_write(pos)?;
             //写入数据
-            self.manager.pack_file.write_all(this_data)?;
+            pack_file.write_all(this_data)?;
             write_len += len;
             //哈希计算
             self.hash.update(this_data);

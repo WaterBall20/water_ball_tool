@@ -1,7 +1,5 @@
 use crate::tools;
-use crate::wb_files_pack::{
-    DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_LEN, MANIFEST_DATA_BLOCK_LEN,
-};
+use crate::wb_files_pack::{DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN};
 use std::fs::File;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
@@ -22,26 +20,24 @@ pub(in crate::wb_files_pack) const FILE_HEADER_BOOL_DATA_INDEX: usize =
 pub(in crate::wb_files_pack) const FILE_HEADER_BOOL_DATA_LENGTH: usize = 1;
 
 //文件头数据长度位置
-pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH_INDEX: u64 =
-    (FILE_HEADER_BOOL_DATA_INDEX + FILE_HEADER_BOOL_DATA_LENGTH) as u64;
+pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH_INDEX: usize =
+    FILE_HEADER_BOOL_DATA_INDEX + FILE_HEADER_BOOL_DATA_LENGTH;
 
 //文件头数据长度长度
-pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH_LENGTH: u64 = 8;
-
-//文件头清单属性
-pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: u64 =
-    FILE_HEADER_DATA_LENGTH_INDEX + FILE_HEADER_DATA_LENGTH_LENGTH;
+pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH_LENGTH: usize = 8;
 
 //文件头长度
-pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH: u64 = ((FILE_HEADER_TYPE_NAME.len()
+pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH: usize = FILE_HEADER_TYPE_NAME.len()
     + FILE_HEADER_VERSION.len()
     + FILE_HEADER_BOOL_DATA_LENGTH
-    + MANIFEST_ATTRIBUTE_LEN)
-    as u64)
     + FILE_HEADER_DATA_LENGTH_LENGTH;
 
+//文件头清单属性
+pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: usize =
+    MANIFEST_DATA_BLOCK_LEN;
+
 //文件头块长度
-pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize = MANIFEST_DATA_BLOCK_LEN;
+pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize = MANIFEST_DATA_BLOCK_LEN + MANIFEST_ATTRIBUTE_BLOCK_LEN;
 
 #[derive(Default, Debug)]
 pub(crate) struct RunData {
@@ -286,12 +282,12 @@ impl PackIO {
         //分析是否需要再加载
         let block_len = ManifestDataBlock::get_block_len(&block_data_buf)
             .map_err(|err| Error::other(format!("包文件IO属性数据块读取错误，err:{err:?}")))?;
-        if block_len > u32::MAX as u64 {
+        if block_len > u64::from(u32::MAX) {
             Err(Error::other(format!(
                 "解析的数据大小过大，可能是错误的:{}[{}]",
                 tools::bytes_len_to_string(block_len),
                 block_len
-            )))?
+            )))?;
         }
         let l_len = usize::try_from(block_len).unwrap() - MANIFEST_DATA_BLOCK_LEN;
         let block_data = if l_len > 0 {
