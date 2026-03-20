@@ -19,7 +19,7 @@ pub struct Allocator {
 impl Allocator {
     pub fn open_pack_file<P: AsRef<Path>>(path: &P) -> io::Result<Allocator> {
         //打开水球包文件
-        let pack_file = File::options().read(true).write(true).open(&path)?;
+        let pack_file = File::options().read(true).write(true).open(path)?;
         let pack_io = PackIO::new(pack_file);
         let pack_io = Arc::new(Mutex::new(pack_io));
         let manager = WBFPManager::open_pack_file(path, pack_io.clone())?;
@@ -72,28 +72,28 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.file_is_some(path))
     }
     pub fn get_manifest_attribute(&self) -> io::Result<Attribute> {
         let manager = self.manager.clone();
-        let mut manager = manager
+        let manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_manifest_attribute().clone())
     }
     pub fn get_root_struct_items(&self) -> io::Result<HashMap<String, PackStructItem>> {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_root_struct_items().clone())
     }
     pub fn get_root_struct_item_name_list(&mut self) -> io::Result<Vec<String>> {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_root_struct_item_name_list())
     }
     pub fn get_struct_item_name_list<P: AsRef<Path>>(
@@ -103,7 +103,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.get_struct_item_name_list(path)
     }
 
@@ -114,7 +114,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_dir_pack_struct_items(path)?.clone())
     }
 
@@ -125,7 +125,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_pack_struct_item_dir(path)?.clone())
     }
 
@@ -133,7 +133,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_pack_struct_item(path)?.clone())
     }
 
@@ -141,7 +141,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.load_all_data(no_err)
     }
 
@@ -149,7 +149,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.load_pack_struct_metadata_path(path)
     }
 
@@ -157,7 +157,7 @@ impl Allocator /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_dir(path)?.clone())
     }
 }
@@ -167,7 +167,7 @@ impl Allocator /*写*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.create_dir_all(path)
     }
 
@@ -180,7 +180,7 @@ impl Allocator /*写*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file2(path, modified, len)?;
         Ok(PackFileWR::new(
             self.manager.clone(),
@@ -194,7 +194,7 @@ impl Allocator /*写*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
         let metadata = manager.file_metadata_lock(&path_list)?;
         Ok(PackFileWR::new(
@@ -205,11 +205,14 @@ impl Allocator /*写*/ {
         ))
     }
 
-    pub(crate) fn create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
+    pub fn _create_file_no_len<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file_no_len(path)?;
         Ok(PackFileWR::new(
             self.manager.clone(),
@@ -239,7 +242,7 @@ impl Allocator /*写*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .or_else(|e| Err(Error::other(format!("无法获得管理器锁, err:{e}"))))?;
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file(path, modified, len, cow, hash_type)?;
         Ok(PackFileWR::new(
             self.manager.clone(),

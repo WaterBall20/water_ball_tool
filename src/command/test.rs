@@ -107,6 +107,9 @@ fn wbfp_create_new_pack_m_longtime() {
     let args: Vec<String> = vec![
         String::from("-m"),
         // String::from("/home/waterball/Documents/Dev/JavaRust/MC-MMD-rust/rust_engine/src/animation/"),
+        #[cfg(target_os = "windows")]
+        String::from("C:\\Program Files"),
+        #[cfg(not(target_os = "windows"))]
         String::from("/home/waterball/Apps/IDE/"),
         out_file_path.clone(),
     ];

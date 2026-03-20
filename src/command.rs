@@ -149,12 +149,8 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备打包");
     info!("创建新包文件并初始化");
-    let mut pack = water_ball_tool::wb_files_pack::allocator::Allocator::create_new_pack_file(
-        &pack_path,
-        false,
-        s_data_file,
-    )
-    .expect("创建包文件错误");
+    let mut pack =
+        Allocator::create_new_pack_file(&pack_path, false, s_data_file).expect("创建包文件错误");
     //逻辑实现=== ===
     //搜索文件===
     info!("搜索文件");
@@ -182,7 +178,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         &files_list,
         in_dir_path.as_ref(),
     )
-    .expect("写入包文件错误");
+        .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
@@ -372,8 +368,7 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     };
     info!("开始准备解包");
     info!("打开包文件");
-    let mut pack = water_ball_tool::wb_files_pack::allocator::Allocator::open_pack_file(pack_path)
-        .expect("打开包文件错误");
+    let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
     //逻辑实现=== ===
     info!("开始复制数据");
     fs::create_dir_all(out_dir_path).expect("无法创建数据路径");
@@ -404,7 +399,7 @@ fn read_pack(
                             pack_man,
                             &mut pb_c,
                             run_buf,
-                            &metadata,
+                            metadata,
                             &this_out_path,
                             &this_pack_path,
                         );

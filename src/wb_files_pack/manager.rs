@@ -1,9 +1,6 @@
-use crate::wb_files_pack::pack_io::file::PackFileWR;
-use core::slice::Iter;
 /*
 开始时间：26/2/11 15：51
  */
-//use crate::wb_files_pack::manager::file::PackFileWR;
 use crate::tools::PathTool;
 use crate::wb_files_pack::pack_io::{
     PackIO, FILE_HEADER_BLOCK_LEN, FILE_HEADER_BOOL_DATA_INDEX,
@@ -16,6 +13,7 @@ use crate::wb_files_pack::{
     PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
     PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN,
 };
+use core::slice::Iter;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
@@ -137,7 +135,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
             pack_file
                 .write_all(&file_header_buf)
                 .expect("无法写入文件头");
@@ -145,26 +143,20 @@ impl WBFPManager {
             //设置文件大小
             pack_file
                 .set_len(FILE_HEADER_BLOCK_LEN as u64)
-                .or_else(|err| Err(Error::other(format!("无法设置文件大小, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法设置文件大小, err: {err}")))?;
         }
 
         //初始化并保存空数据列表
-        self.save_empty_data_list().or_else(|err| {
-            Err(Error::other(format!(
-                "初始化和保存空数据列表失败, err:{err}"
-            )))
-        })?;
+        self.save_empty_data_list()
+            .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err:{err}")))?;
 
         if self.s_manifest_file {
-            self.save_manifest_empty_data_list().or_else(|err| {
-                Err(Error::other(format!(
-                    "初始化和保存空数据列表失败, err: {err}"
-                )))
-            })?;
+            self.save_manifest_empty_data_list()
+                .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err: {err}")))?;
         }
         //初始化并保存根结构
         self.save_root_pack_struct()
-            .or_else(|err| Err(Error::other(format!("初始化和保存根结构失败, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("初始化和保存根结构失败, err: {err}")))?;
         Ok(())
     }
 }
@@ -1077,9 +1069,9 @@ impl WBFPManager /* 写入 */ {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                            file_count,
-                            dir_count,
-                        } = &mut metadata.file_type
+                        file_count,
+                        dir_count,
+                    } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1236,7 +1228,7 @@ impl WBFPManager /* 写入 */ {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
             pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count
         }
         self.save_root_pack_struct()?;
@@ -1254,7 +1246,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         let length = if length.is_multiple_of(DATA_BLOCK_LEN_U64) {
             length
         } else {
@@ -1271,7 +1263,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         pack_file.file_gc_add(gc_pos_list);
         Ok(())
     }
@@ -1286,7 +1278,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         pack_file.file_gc();
         drop(pack_file);
         self.save_empty_data_list()
@@ -1307,11 +1299,11 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (MANIFEST_DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-                > 10_000
+            > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -1338,7 +1330,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         let old_pos = self.manifest.attribute.empty_data_pos_list_pos;
         let old_len = pack_file
             .empty_data_list
@@ -1388,7 +1380,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         //属性
         let attribute = &mut self.manifest.attribute;
         //转换数据
@@ -1403,13 +1395,13 @@ impl WBFPManager /* 核心 */ {
 
     //保存数据长度
     fn save_pack_length(&mut self) -> io::Result<()> {
+        //上锁
+        self.this_write_lock()?;
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         pack_file.up_len();
-        //上锁
-        self.this_write_lock()?;
         //修改包文件位置
         pack_file.set_pos_write(FILE_HEADER_DATA_LENGTH_INDEX as u64)?;
         //写入数据
@@ -1443,7 +1435,7 @@ impl WBFPManager /* 核心 */ {
             let pack_file = self.pack_file.clone();
             let pack_file = pack_file
                 .lock()
-                .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
             pack_file.manifest_data_block_read(file_pos)
         } else if let Some(manifest_file) = &self.manifest.file {
             manifest_file.manifest_data_block_read(file_pos)
@@ -1469,7 +1461,7 @@ impl WBFPManager /* 核心 */ {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
             pack_file.manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
         }
     }
@@ -1487,7 +1479,7 @@ impl WBFPManager /* 核心 */ {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
             let lock_file = Self::write_lock(true, &self.run_data.write_lock_path)?;
             if let Some(lock_file) = lock_file {
                 self.run_data.write_lock_file = Some(lock_file);
@@ -1503,7 +1495,7 @@ impl WBFPManager /* 核心 */ {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .or_else(|err| Err(Error::other(format!("无法获得包文件锁, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         //锁文件路径
         let path = &self.run_data.write_lock_path;
         //获取锁信息
@@ -1665,7 +1657,7 @@ impl WBFPManager {
         let m_pack_file_arc = pack_file.clone();
         let mut m_pack_file = m_pack_file_arc
             .lock()
-            .or_else(|err| Err(Error::other(format!("获得包文件IO锁错误, err: {err}"))))?;
+            .map_err(|err| Error::other(format!("获得包文件IO锁错误, err: {err}")))?;
         const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
         let pack_path = pack_path
             .as_ref()
@@ -1712,7 +1704,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-        .expect("无法解析数据块");
+            .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         //锁文件
         let mut write_lock_file_path = pack_path.clone();
