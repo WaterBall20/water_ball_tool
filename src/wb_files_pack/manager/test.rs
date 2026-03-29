@@ -7,17 +7,22 @@ use crate::wb_files_pack::manager::{
 };
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
-use std::fs;
+use pretty_assertions::assert_eq;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::{fs, io};
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
 
 fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
-    let pack_path = path.as_ref().to_str().unwrap().to_string();
+    let pack_path = path
+        .as_ref()
+        .to_str()
+        .expect("无法将路径转换成String")
+        .to_string();
     _ = fs::remove_file(&pack_path);
     let mut pack_json_path = pack_path.clone();
     pack_json_path.push_str(".wbm");
@@ -53,8 +58,8 @@ fn create_pack_file(
         s_manifest_file,
         create_new,
     )
-        .expect("无法创建包管理器");
-    manager.init_new_pack().unwrap();
+    .expect("无法创建包管理器");
+    manager.init_new_pack().expect("初始化新包文件错误");
     (manager, pack_io)
 }
 fn open_pack_file<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO>>) {
@@ -73,17 +78,17 @@ fn open_pack_file<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<Pack
 }
 fn get_file_rw<P: AsRef<Path>>(
     pack_path: &P,
-    pack: Arc<Mutex<WBFPManager>>,
-    pack_io: Arc<Mutex<PackIO>>,
-) -> PackFileWR {
+    pack: &Arc<Mutex<WBFPManager>>,
+    pack_io: &Arc<Mutex<PackIO>>,
+) -> io::Result<PackFileWR> {
     let path_list = PathTool::path_to_string_vec(pack_path);
     let metadata = pack
         .clone()
         .lock()
-        .unwrap()
+        .expect("无法获得包文件锁")
         .file_metadata_lock(&path_list)
         .expect("无法获得元数据");
-    PackFileWR::new(pack.clone(), pack_io.clone(), path_list, metadata)
+    PackFileWR::create(pack.clone(), pack_io.clone(), path_list, metadata)
 }
 //OK===
 
@@ -94,7 +99,7 @@ fn create_new_pack_file() {
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
     pack_dir.push_str("/create_new_file");
     let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
+    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     let pack_path = pack_dir.join("pack");
     remove_test_pack_files(&pack_path);
     //创建文件
@@ -113,7 +118,7 @@ fn create_new_pack_file_and_create_dir() {
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
     pack_dir.push_str("/create_new_file_and_create_dir");
     let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
+    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     let pack_path = pack_dir.join("pack");
     remove_test_pack_files(&pack_path);
     //创建文件
@@ -138,7 +143,7 @@ fn create_new_pack_file_and_create_file_wr() {
     let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
     pack_dir.push_str("/create_new_pack_file_and_create_file_wr");
     let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
+    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     //测试文件
     let pack_file = pack_dir.join("pack");
     remove_test_pack_files(&pack_file);
@@ -149,27 +154,30 @@ fn create_new_pack_file_and_create_file_wr() {
         let modified_time = 0;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let test_file_path = "Test/Test1";
         let rw2 = man
             .clone()
             .lock()
-            .unwrap()
-            .create_file2("Test/Test1", modified_time, LENGTH as u64)
-            .unwrap();
-        let mut rw2 = PackFileWR::new(man.clone(), pack_io.clone(), rw2.0, rw2.1);
-        _ = rw2.write(&write_data1[..]).unwrap();
+            .expect("获得包管理器失败")
+            .create_file2(test_file_path, modified_time, LENGTH as u64)
+            .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, err:{e}"#));
+        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1)
+            .expect("无法获得虚拟文件实例");
+        _ = rw2.write(&write_data1[..]).expect("写入虚拟文件失败");
         let mut read_data1: [u8; LENGTH] = [0; 10];
-        rw2.seek(SeekFrom::Start(0)).unwrap();
-        _ = rw2.read(&mut read_data1[..]).unwrap();
-        drop(rw2);
+        rw2.seek(SeekFrom::Start(0)).expect("写入虚拟文件失败");
+        _ = rw2.read(&mut read_data1[..]).expect("读取虚拟文件失败");
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
+        let test_file_path = "Test/Test2";
         let rw2 = man
             .clone()
             .lock()
-            .unwrap()
-            .create_file2("Test/Test2", modified_time, LENGTH as u64)
-            .unwrap();
-        let mut rw2 = PackFileWR::new(man.clone(), pack_io.clone(), rw2.0, rw2.1);
+            .expect("无法获得包管理器")
+            .create_file2(test_file_path, modified_time, LENGTH as u64)
+            .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, e" {e}"#));
+        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1)
+            .expect("写入虚拟文件失败");
         _ = rw2.write(&write_data2[..]).unwrap();
         let mut read_data2: [u8; LENGTH] = [0; 10];
         rw2.seek(SeekFrom::Start(0)).unwrap();
@@ -207,7 +215,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
             .unwrap()
             .create_file2("Test/Test1", modified_time, LENGTH as u64)
             .unwrap();
-        let mut rw1 = PackFileWR::new(man.clone(), pack_io.clone(), rw1.0, rw1.1);
+        let mut rw1 = PackFileWR::create(man.clone(), pack_io.clone(), rw1.0, rw1.1).unwrap();
         _ = rw1.write(&write_data1[..]).unwrap();
         //r
         let mut read_data1: [u8; LENGTH] = [0; 10];
@@ -223,7 +231,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
             .unwrap()
             .create_file2("Test/Test2", modified_time, LENGTH as u64)
             .unwrap();
-        let mut rw2 = PackFileWR::new(man.clone(), pack_io.clone(), rw2.0, rw2.1);
+        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1).unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         //r
         let mut read_data2: [u8; LENGTH] = [0; 10];
@@ -266,7 +274,7 @@ fn create_new_file_and_open_pack() {
                 .unwrap()
                 .create_file(&name, modified, len, false, DEFAULT_HASH_TYPE)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
-            let mut wr = PackFileWR::new(man.clone(), pack_io.clone(), wr.0, wr.1);
+            let mut wr = PackFileWR::create(man.clone(), pack_io.clone(), wr.0, wr.1).unwrap();
             wr.write_all(&test_data)
                 .unwrap_or_else(|_| panic!("循环第{index}次，无法写入虚拟随机文件:{name}"));
         }
@@ -276,7 +284,7 @@ fn create_new_file_and_open_pack() {
             .unwrap()
             .create_file2(&test_file_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
-        let mut rw = PackFileWR::new(man.clone(), pack_io.clone(), rw.0, rw.1);
+        let mut rw = PackFileWR::create(man.clone(), pack_io.clone(), rw.0, rw.1).unwrap();
         _ = rw.write(&test_data).expect("无法写入虚拟文件");
         drop(rw);
         (
@@ -288,7 +296,7 @@ fn create_new_file_and_open_pack() {
     {
         let (pack, pack_io) = open_pack_file(&pack_file);
         let pack = Arc::new(Mutex::new(pack));
-        let mut rw = get_file_rw(&test_file_path, pack.clone(), pack_io);
+        let mut rw = get_file_rw(&test_file_path, &pack.clone(), &pack_io).unwrap();
         let mut test_data_read = vec![0; test_data.len()];
         let len = rw.read(&mut test_data_read).expect("无法读取虚拟文件");
         drop(rw);
@@ -300,11 +308,14 @@ fn create_new_file_and_open_pack() {
         assert_eq!(len, test_data.len());
         assert_eq!(test_data, test_data_read);
         //细分判断
-        for name in other_name_list {
+        for name in &other_name_list {
             let pack = pack.clone();
             let pack = pack.lock().unwrap();
-            let a_item = root_struct.items.get(&name).unwrap();
-            let b_item = pack.manifest.root_struct.items.get(&name).unwrap();
+            let a_item = root_struct
+                .items
+                .get(name)
+                .unwrap_or_else(|| panic!("获取列表项失败: name={name}"));
+            let b_item = pack.manifest.root_struct.items.get(name).unwrap();
             assert_eq!(a_item, b_item);
         }
     }

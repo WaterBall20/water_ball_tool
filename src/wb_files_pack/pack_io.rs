@@ -1,5 +1,7 @@
 use crate::tools;
-use crate::wb_files_pack::{DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN};
+use crate::wb_files_pack::{
+    DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN,
+};
 use std::fs::File;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
@@ -37,7 +39,8 @@ pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: usize =
     MANIFEST_DATA_BLOCK_LEN;
 
 //文件头块长度
-pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize = MANIFEST_DATA_BLOCK_LEN + MANIFEST_ATTRIBUTE_BLOCK_LEN;
+pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize =
+    MANIFEST_DATA_BLOCK_LEN + MANIFEST_ATTRIBUTE_BLOCK_LEN;
 
 #[derive(Default, Debug)]
 pub(crate) struct RunData {
@@ -123,8 +126,8 @@ impl Read for PackIO {
         self.file.read_exact(buf)
     }
 }
-//核心
-impl PackIO {
+
+impl PackIO /*核心*/ {
     //垃圾回收提交
     pub(crate) fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         for pos in gc_pos_list {
@@ -267,10 +270,15 @@ impl PackIO {
     pub(crate) fn _sync_data(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
+
+    pub(crate) fn try_clone_pack_file(&self) -> io::Result<File> {
+        self.file
+            .try_clone()
+            .map_err(|e| Error::other(format!("尝试复制包文件实例失败，err: {e}")))
+    }
 }
 
-//读
-impl PackIO {
+impl PackIO /*读*/ {
     pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
         let mut file = &self.file;
         let block_data_buf = vec![0; MANIFEST_DATA_BLOCK_LEN];
@@ -319,7 +327,7 @@ impl PackIO {
 }
 
 //写
-impl PackIO {
+impl PackIO /*写*/ {
     pub(crate) fn unlock(&mut self) -> io::Result<()> {
         self.file.unlock()
     }

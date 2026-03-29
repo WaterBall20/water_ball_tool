@@ -106,12 +106,14 @@ pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     match arg.as_str() {
         "-s" => wbfp_s(&args[1..], mp),
         "-m" => wbfp_m(&args[1..], mp),
+        "-h" => wbfp_h(&args[1..], mp),
         _ => panic!(
             "未知的路由参数: {arg}\\
     提示：
         -s  :  解包文件 | <包文件路径> <输出目录>
         -m  :  打包文件 | <输入目录> <包文件路径> [-f]
                         -f  :   不分离数据到单独的文件
+        -h  :  哈希校验 | <包文件路径>
 "
         ),
     }
@@ -178,7 +180,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         &files_list,
         in_dir_path.as_ref(),
     )
-        .expect("写入包文件错误");
+    .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
@@ -292,14 +294,17 @@ fn from_file_write_to_pack(
         }
     };
     //尝试创建虚拟文件
-    let mut out_file = pack_man
-        .create_file2(this_pack_path, info.modified_time(), info.length())
-        .unwrap_or_else(|err| {
-            panic!(
-                "无法创建虚拟文件{},将跳过, err:{err}",
-                this_pack_path.display()
-            )
-        });
+    let mut out_file =
+        match pack_man.create_file2(this_pack_path, info.modified_time(), info.length()) {
+            Ok(v) => v,
+            Err(err) => {
+                error!(
+                    "无法创建虚拟文件{},将跳过, err:{err}",
+                    this_pack_path.display()
+                );
+                return;
+            }
+        };
     //写入操作
     let mut write_len = 0;
     while write_len < info.length() {
@@ -316,8 +321,9 @@ fn from_file_write_to_pack(
                         );
                         if this_write_len < this_read_len {
                             warn!(
-                                "文件{this_in_path:?}写入虚拟文件{this_pack_path:?}大小不一致，读：{this_read_len\
-                                }，写：{this_write_len}",
+                                "文件{}写入虚拟文件{}大小不一致，读：{this_read_len}，写：{this_write_len}",
+                                this_in_path.display(),
+                                this_pack_path.display()
                             );
                         }
                         write_len += this_write_len as u64;
@@ -441,6 +447,19 @@ fn read_pack(
     let attribute = pack_man.get_manifest_attribute()?;
     let all_file_count = attribute.file_count();
     let data_len = attribute.data_len();
+    //进度条
+    if let Some(pb) = pb {
+        pb.set_length(data_len);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb.set_message("0.00%");
+    }
     let mut binding = |add_len, add_file_count| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
@@ -520,7 +539,7 @@ fn pack_read_write_to_file(
                             warn!("虚拟文件{this_pack_path:?}读取的大小为0, 将跳过。");
                             break;
                         }
-                        if this_write_len < this_read_len {
+                        if this_write_len != this_read_len {
                             warn!(
                                 "虚拟文件{this_pack_path:?}写入文件{this_out_path:?}大小不一致，读：{this_read_len}，写：{this_write_len}"
                             );
@@ -550,5 +569,127 @@ fn pack_read_write_to_file(
     //不论是否写入成功都对齐进度条
     if let Some(pb_c) = pb_c {
         pb_c(metadata.len() - write_len, 0);
+    }
+}
+//包文件哈希校验
+fn wbfp_h(args: &[String], mp: Option<&MultiProgress>) {
+    //包文件路径
+    let pack_path = &args[0];
+
+    //进度条
+    let pb = if let Some(mp) = mp {
+        let pb = mp.add(ProgressBar::new_spinner());
+        Some(pb)
+    } else {
+        None
+    };
+    info!("开始准备哈希校验");
+    info!("打开包文件");
+    let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
+    //逻辑实现=== ===
+    info!("开始哈希校验");
+    verify_hash(&mut pack, pb.as_ref()).unwrap();
+    info!("操作已完成");
+}
+
+fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()> {
+    pack.load_all_data(false)?;
+    let root_name_list = pack.get_root_struct_item_name_list()?;
+    let mut buf = vec![0; BUF_LEN];
+    let mut this_all_write_len = 0;
+    let mut this_all_write_file_count = 0;
+    let attribute = pack.get_manifest_attribute()?;
+    let all_file_count = attribute.file_count();
+    let data_len = attribute.data_len();
+
+    //进度条
+    if let Some(pb) = pb {
+        pb.set_length(data_len);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb.set_message("0.00%");
+    }
+    let mut binding = |add_len, add_file_count| {
+        this_all_write_len += add_len;
+        this_all_write_file_count += add_file_count;
+        if let Some(pb) = pb {
+            pb.set_position(this_all_write_len);
+            let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
+            pb.set_message(format!(
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+            ));
+        }
+    };
+
+    for root_name in root_name_list {
+        verify_hash_inner(
+            pack,
+            root_name.as_ref(),
+            if pb.is_some() {
+                Some(&mut binding)
+            } else {
+                None
+            },
+        );
+    }
+    Ok(())
+}
+
+fn verify_hash_inner<'a>(
+    pack: &mut Allocator,
+    path: &Path,
+    mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
+) -> Option<&'a mut dyn FnMut(u64, u64)> {
+    let item = match pack.get_pack_struct_item(path) {
+        Ok(v) => v,
+        Err(err) => {
+            error!(r#"无法获取虚拟路径"{}"结构项"#, path.display());
+            return pb_c;
+        }
+    };
+    match item.item_type() {
+        PackStructItemType::Dir { .. } => {
+            let items_name = match pack.get_struct_item_name_list(path) {
+                Ok(v) => v,
+                Err(err) => {
+                    error!(r#"无法获取虚拟路径"{}"的结构项名称"#, path.display());
+                    return pb_c;
+                }
+            };
+            let mut pb_c = pb_c;
+            for name in items_name {
+                pb_c = verify_hash_inner(pack, &path.join(name), pb_c);
+            }
+            pb_c
+        }
+        PackStructItemType::File => {
+            let mut rw = match pack.get_file_wr(path) {
+                Ok(v) => v,
+                Err(err) => {
+                    error!("无法获取包文件读写器，err: {err}");
+                    return pb_c;
+                }
+            };
+            match rw.verify_hash() {
+                Ok(false) => {
+                    warn!(r#"虚拟文件"{}"哈希验证失败"#, path.display());
+                }
+                Err(err) => warn!(
+                    r#"虚拟文件"{}"哈希验证发生错误, err: {err}"#,
+                    path.display()
+                ),
+                _ => (),
+            }
+            if let Some(pb) = &mut pb_c {
+                pb(rw.get_len(), 1);
+            }
+            pb_c
+        }
     }
 }

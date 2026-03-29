@@ -24,7 +24,7 @@ fn ff_out_file_skip_symlink() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     let args: Vec<String> = vec![String::from("."), out_file_path.clone(), String::from("-s")];
-    ff(args.as_slice(), None);
+    ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
 //文件查找器输出文件
@@ -39,7 +39,7 @@ fn ff_out_file() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     let args: Vec<String> = vec![String::from("."), out_file_path.clone()];
-    ff(args.as_slice(), None);
+    ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
 //文件查找器输出文件,长时间
@@ -58,7 +58,7 @@ fn ff_out_file_longtime() {
     let args: Vec<String> = vec![String::from("/home"), out_file_path.clone()];
     #[cfg(target_os = "windows")]
     let args: Vec<String> = vec![String::from("c:/"), out_file_path.clone()];
-    ff(args.as_slice(), None);
+    ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
 //文件查找器不输出文件
@@ -68,7 +68,7 @@ fn ff_no_out_file() {
     crate::init_global_logging(&mp);
     //命令行参数处理
     let args: Vec<String> = vec![String::from(".")];
-    ff(args.as_slice(), None);
+    ff(args.as_slice(), Some(&mp));
 }
 
 //水球包文件打包===
@@ -88,7 +88,7 @@ fn wbfp_create_new_pack_m() {
         String::from("./src"),
         out_file_path.clone(),
     ];
-    wbfp(args.as_slice(), None);
+    wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&out_file_path);
 }
 // 长时间
@@ -110,10 +110,11 @@ fn wbfp_create_new_pack_m_longtime() {
         #[cfg(target_os = "windows")]
         String::from("C:\\Program Files"),
         #[cfg(not(target_os = "windows"))]
-        String::from("/home/waterball/Apps/IDE/"),
+        //String::from("/usr"),
+            String::from("/home/waterball/Apps/IDE/JetBrains/"),
         out_file_path.clone(),
     ];
-    wbfp(args.as_slice(), None);
+    wbfp(args.as_slice(), Some(&mp));
 }
 
 // 不分离数据
@@ -134,7 +135,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
         out_file_path.clone(),
         String::from("-f"),
     ];
-    wbfp(args.as_slice(), None);
+    wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&out_file_path);
 }
 
@@ -143,7 +144,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
 // 长时间
 #[test]
 #[ignore = "长时间"]
-fn wbfp_create_new_pack_s_longtime() {
+fn wbfp_pack_s_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let mut in_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
@@ -158,10 +159,10 @@ fn wbfp_create_new_pack_s_longtime() {
         _ = fs::create_dir_all(&out_dir_path);
         out_dir_path
     }];
-    wbfp(args.as_slice(), None);
+    wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&in_file_path);
 }
-// 不分离数据打包和解包
+// 不分离数据打包和解包和哈希校验
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file_s() {
     let mp = MultiProgress::new();
@@ -181,7 +182,18 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
             out_file_path.clone(),
             String::from("-f"),
         ];
-        wbfp(args.as_slice(), None);
+        wbfp(args.as_slice(), Some(&mp));
+    }
+    //哈希校验
+    {
+        out_dir_path.push_str("/s");
+        //命令行参数处理
+        let args: Vec<String> = vec![
+            String::from("-h"),
+            out_file_path.clone(),
+            out_dir_path.clone(),
+        ];
+        wbfp(args.as_slice(), Some(&mp));
     }
     //解包
     {
@@ -192,9 +204,33 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
             out_file_path.clone(),
             out_dir_path.clone(),
         ];
-        wbfp(args.as_slice(), None);
+        wbfp(args.as_slice(), Some(&mp));
     }
     _ = fs::remove_dir_all(&out_file_path);
+}
+
+//哈希校验===
+//分离
+// 长时间
+#[test]
+#[ignore = "长时间"]
+fn wbfp_verify_all_file_hash_longtime() {
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+    let mut in_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
+    in_dir_path.push_str("/create_new_pack_m");
+    _ = fs::create_dir_all(&in_dir_path);
+    let mut in_file_path = in_dir_path.clone();
+    in_file_path.push_str("/pack");
+    //命令行参数处理
+    let args: Vec<String> = vec![String::from("-h"), in_file_path.clone(), {
+        let mut out_dir_path = in_dir_path.clone();
+        out_dir_path.push_str("/s_pack");
+        _ = fs::create_dir_all(&out_dir_path);
+        out_dir_path
+    }];
+    wbfp(args.as_slice(), Some(&mp));
+    _ = fs::remove_dir_all(&in_file_path);
 }
 
 //ERR===
@@ -215,7 +251,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
         out_file_path.clone(),
         String::from("-s"),
     ];
-    ff(args.as_slice(), None);
+    ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
 //水球包文件打包，但输入路径不存在
@@ -236,6 +272,6 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
         String::from("/~"),
         out_file_path.clone(),
     ];
-    wbfp(args.as_slice(), None);
+    wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&out_file_path);
 }

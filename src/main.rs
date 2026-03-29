@@ -18,7 +18,7 @@ fn main() {
         match &mod_type[..] {
             "ff" => command::ff(args, Some(&mp)),
             "wbfp" => command::wbfp(args, Some(&mp)),
-            _ => {}
+            v => panic!("未知命令： {v}"),
         }
     }
 }

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use std::vec::IntoIter;
 use std::{fs, io};
@@ -343,7 +343,7 @@ impl WBFPManager /* 读取 */ {
                     let this_path = s_path.join(&item.name);
                     item.metadata = PackFileMetadataRun::Loaded(
                         match wbfp_manager.load_pack_file_metadata(item.metadata_file_pos) {
-                            Ok(v) => v,
+                            Ok(v) => Box::new(v),
                             Err(err) => Err(Error::other(format!(
                                 r#"虚拟路径"{}"的元数据无法加载, err:{err}"#,
                                 this_path.display()
@@ -426,7 +426,7 @@ impl WBFPManager /* 读取 */ {
                         if let PackFileMetadataRun::NoLoad = struct_item.metadata {
                             struct_item.metadata = PackFileMetadataRun::Loaded(
                                 match self.load_pack_file_metadata(struct_item.metadata_file_pos) {
-                                    Ok(v) => v,
+                                    Ok(v) => Box::from(v),
                                     Err(err) => Err(Error::other(format!(
                                         r#"虚拟路径"{two_name}"的元数据加载失败, err:{err}"#
                                     )))?,
@@ -451,7 +451,7 @@ impl WBFPManager /* 读取 */ {
                         if let PackFileMetadataRun::NoLoad = struct_item.metadata {
                             struct_item.metadata = PackFileMetadataRun::Loaded(
                                 match self.load_pack_file_metadata(struct_item.metadata_file_pos) {
-                                    Ok(v) => v,
+                                    Ok(v) => Box::from(v),
                                     Err(err) => Err(Error::other(format!(
                                         r#"虚拟路径"{two_name}"的元数据无法加载, err:{err}"#
                                     )))?,
@@ -544,7 +544,7 @@ impl WBFPManager /* 读取 */ {
         if let PackFileMetadataRun::NoLoad = item.metadata {
             item.metadata = PackFileMetadataRun::Loaded(
                 match self.load_pack_file_metadata(item.metadata_file_pos) {
-                    Ok(v) => v,
+                    Ok(v) => Box::from(v),
                     Err(err) => Err(Error::other(format!(
                         r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
                         this_path.display()
@@ -638,18 +638,23 @@ impl WBFPManager /* 写入 */ {
                         *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                     }
                     if let Some(pack_struct) = pack_struct {
-                        self.file_metadata_update_inner(
+                        let r = self.file_metadata_update_inner(
                             path_list,
                             &PathBuf::from(&two_name),
                             &mut pack_struct.items,
                             metadata,
                         )?;
                         let (new_pos, pos) = self.save_pack_struct_write(pack_struct)?;
-
                         if new_pos {
                             *struct_file_pos = pos;
                         }
                         if let PackFileMetadataRun::Loaded(metadata) = &mut struct_item.metadata {
+                            metadata.len += r.length;
+                            if let PackFileMetadataType::Dir { file_count, .. } =
+                                &mut metadata.file_type
+                            {
+                                *file_count += r.file_count;
+                            }
                             let (new_pos, pos) = self.save_metadata_write(metadata)?;
                             if new_pos {
                                 struct_item.metadata_file_pos = pos;
@@ -659,6 +664,8 @@ impl WBFPManager /* 写入 */ {
                             .root_struct
                             .items
                             .insert(two_name, struct_item);
+                        self.manifest.attribute.file_count += r.file_count;
+                        self.manifest.attribute.data_len += r.length;
                     } else {
                         panic!("逻辑错误")
                     }
@@ -667,7 +674,6 @@ impl WBFPManager /* 写入 */ {
                     if path_list.next().is_none() {
                         //保存元数据
                         let (new_pos, pos) = self.save_metadata_write(&mut metadata)?;
-
                         if new_pos {
                             struct_item.metadata_file_pos = pos;
                         }
@@ -691,17 +697,20 @@ impl WBFPManager /* 写入 */ {
                     .or(Err(Error::other(format!(
                         r#"无法保存文件"{two_name}"的元数据"#
                     ))))?;
-
+            //创建文件
+            let len = metadata.len;
             let pack_struct_item = PackStructItem {
                 name: two_name.clone(),
                 item_type: PackStructItemType::File,
                 metadata_file_pos,
-                metadata: PackFileMetadataRun::Loaded(metadata),
+                metadata: PackFileMetadataRun::Loaded(Box::from(metadata)),
             };
             self.manifest
                 .root_struct
                 .items
                 .insert(two_name, pack_struct_item);
+            self.manifest.attribute.file_count += 1;
+            self.manifest.attribute.data_len += len;
         } else {
             Err(Error::new(
                 ErrorKind::NotFound,
@@ -716,7 +725,7 @@ impl WBFPManager /* 写入 */ {
         s_path: &Path,
         pack_struct_items: &mut HashMap<String, PackStructItem>,
         mut metadata: PackFileMetadata,
-    ) -> io::Result<()> {
+    ) -> io::Result<DirFileAddReturn> {
         if let Some(name) = path_list.next() {
             let this_path = s_path.join(&name);
             if let Some(item) = pack_struct_items.get_mut(&name) {
@@ -729,7 +738,7 @@ impl WBFPManager /* 写入 */ {
                             *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                         }
                         if let Some(pack_struct) = pack_struct {
-                            self.file_metadata_update_inner(
+                            let r = self.file_metadata_update_inner(
                                 path_list,
                                 &PathBuf::from(name),
                                 &mut pack_struct.items,
@@ -740,12 +749,18 @@ impl WBFPManager /* 写入 */ {
                                 *struct_file_pos = pos;
                             }
                             if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata {
+                                metadata.len += r.length;
+                                if let PackFileMetadataType::Dir { file_count, .. } =
+                                    &mut metadata.file_type
+                                {
+                                    *file_count += r.file_count;
+                                }
                                 let (new_pos, pos) = self.save_metadata_write(metadata)?;
                                 if new_pos {
                                     item.metadata_file_pos = pos;
                                 }
                             }
-                            Ok(())
+                            Ok(r)
                         } else {
                             panic!("逻辑错误")
                         }
@@ -754,12 +769,15 @@ impl WBFPManager /* 写入 */ {
                         if path_list.next().is_none() {
                             //更新元数据
                             let (new_pos, pos) = self.save_metadata_write(&mut metadata)?;
-
                             if new_pos {
                                 item.metadata_file_pos = pos;
                             }
                             item.metadata.unlock(metadata);
-                            Ok(())
+                            Ok(DirFileAddReturn {
+                                length: 0,
+                                file_count: 0,
+                                dir_count: 0,
+                            })
                         } else {
                             Err(Error::new(
                                 ErrorKind::NotADirectory,
@@ -776,15 +794,20 @@ impl WBFPManager /* 写入 */ {
                             r#"无法保存文件"{}"的元数据"#,
                             this_path.display()
                         ))))?;
-
+                //创建文件
+                let len = metadata.len;
                 let pack_struct_item = PackStructItem {
                     name: name.clone(),
                     item_type: PackStructItemType::File,
                     metadata_file_pos,
-                    metadata: PackFileMetadataRun::Loaded(metadata),
+                    metadata: PackFileMetadataRun::Loaded(Box::from(metadata)),
                 };
                 pack_struct_items.insert(name, pack_struct_item);
-                Ok(())
+                Ok(DirFileAddReturn {
+                    length: len,
+                    file_count: 1,
+                    dir_count: 0,
+                })
             } else {
                 Err(Error::new(
                     ErrorKind::NotFound,
@@ -975,7 +998,7 @@ impl WBFPManager /* 写入 */ {
         path_list: &mut Iter<String>,
         cow: bool,
         s_path: &Path,
-    ) -> io::Result<MutDirAddReturn> {
+    ) -> io::Result<DirFileAddReturn> {
         if let Some(name) = path_list.next() {
             let this_path = s_path.join(name);
             //判断目录是否存在
@@ -998,7 +1021,7 @@ impl WBFPManager /* 写入 */ {
                                 //加载元数据
                                 item.metadata = PackFileMetadataRun::Loaded(
                                     match self.load_pack_file_metadata(item.metadata_file_pos) {
-                                        Ok(v) => v,
+                                        Ok(v) => Box::from(v),
                                         Err(err) => Err(Error::other(format!(
                                             r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
                                             this_path.display()
@@ -1032,7 +1055,7 @@ impl WBFPManager /* 写入 */ {
                                                 item.metadata_file_pos = pos;
                                             }
                                         }
-                                        Ok(MutDirAddReturn {
+                                        Ok(DirFileAddReturn {
                                             dir_count: r.dir_count,
                                             file_count: r.file_count,
                                             length: r.length,
@@ -1069,9 +1092,9 @@ impl WBFPManager /* 写入 */ {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                        file_count,
-                        dir_count,
-                    } = &mut metadata.file_type
+                            file_count,
+                            dir_count,
+                        } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1092,14 +1115,14 @@ impl WBFPManager /* 写入 */ {
                     panic!("逻辑错误")
                 };
                 s_pack_struct.items.insert(name.clone(), item);
-                Ok(MutDirAddReturn {
+                Ok(DirFileAddReturn {
                     length: r.length,
                     file_count: r.file_count,
                     dir_count: r.dir_count + 1,
                 })
             }
         } else {
-            Ok(MutDirAddReturn {
+            Ok(DirFileAddReturn {
                 length: 0,
                 file_count: 0,
                 dir_count: 0,
@@ -1140,7 +1163,7 @@ impl WBFPManager /* 写入 */ {
             }
             (
                 two_item,
-                MutDirAddReturn {
+                DirFileAddReturn {
                     length: 0,
                     file_count: 0,
                     dir_count: 0,
@@ -1149,7 +1172,7 @@ impl WBFPManager /* 写入 */ {
         } else {
             (
                 PackStructItem::new_empty_dir(two_name, PackFileMetadata::new_empty_dir(self.cow)),
-                MutDirAddReturn {
+                DirFileAddReturn {
                     length: 0,
                     file_count: 0,
                     dir_count: 1,
@@ -1229,7 +1252,7 @@ impl WBFPManager /* 写入 */ {
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
-            pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count
+            pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count;
         }
         self.save_root_pack_struct()?;
         self.low_save_all()?;
@@ -1303,7 +1326,7 @@ impl WBFPManager /* 核心 */ {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (MANIFEST_DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-            > 10_000
+                > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -1535,7 +1558,7 @@ impl Drop for WBFPManager {
     }
 }
 
-struct MutDirAddReturn {
+struct DirFileAddReturn {
     length: u64,
     file_count: u64,
     dir_count: u64,
@@ -1654,11 +1677,11 @@ impl WBFPManager {
         pack_path: &P,
         pack_file: Arc<Mutex<PackIO>>,
     ) -> io::Result<WBFPManager> {
+        const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
         let m_pack_file_arc = pack_file.clone();
         let mut m_pack_file = m_pack_file_arc
             .lock()
             .map_err(|err| Error::other(format!("获得包文件IO锁错误, err: {err}")))?;
-        const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
         let pack_path = pack_path
             .as_ref()
             .to_str()
@@ -1704,7 +1727,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-            .expect("无法解析数据块");
+        .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         //锁文件
         let mut write_lock_file_path = pack_path.clone();
@@ -1712,48 +1735,14 @@ impl WBFPManager {
         let write_lock_file = Self::write_lock_file(&PathBuf::from(write_lock_file_path))?;
         //如果分离数据文件
         if s_manifest_file {
-            //尝试加载分离数据文件
-            let mut manifest_path = pack_path.clone();
-            manifest_path.push_str(".wbm");
-            let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
-            let mut manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len);
-            //空数据列表===
-            let empty_pos_data_block =
-                manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos)?;
-            let empty_pos_data = empty_pos_data_block
-                .get_this_data()
-                .expect("读取空数据列表失败")
-                .to_vec();
-            m_pack_file.empty_data_list =
-                DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
-            //清单文件空数据
-            let manifest_empty_pos_data_block = manifest_file
-                .manifest_data_block_read(attribute.manifest_empty_data_pos_list_pos)?;
-            let manifest_empty_pos_data = manifest_empty_pos_data_block
-                .get_this_data()
-                .expect("读取清单空数据列表失败")
-                .to_vec();
-            manifest_file.empty_data_list = DataPosList::load(
-                &manifest_empty_pos_data,
-                Some(manifest_empty_pos_data_block),
-            );
-            //加载根结构
-            let root_struct_block_data =
-                manifest_file.manifest_data_block_read(attribute.root_struct_pos)?;
-            let root_struct = PackStruct::load(root_struct_block_data)?;
-            let manifest = WBFilesPackManifest {
-                attribute,
-                root_struct,
-                file: Some(manifest_file),
-                _run_data: WBFilesPackManifestRun::default(),
-            };
-            Ok(WBFPManager::new(
-                pack_path,
-                manifest,
+            Self::open_pack_file_s_manifest_file(
                 pack_file,
+                &mut m_pack_file,
+                &pack_path,
                 s_manifest_file,
-                Some(write_lock_file),
-            ))
+                attribute,
+                write_lock_file,
+            )?
         } else {
             //空数据列表===
             let empty_pos_data_block =
@@ -1786,6 +1775,57 @@ impl WBFPManager {
         }
     }
 
+    fn open_pack_file_s_manifest_file(
+        pack_file: Arc<Mutex<PackIO>>,
+        m_pack_file: &mut MutexGuard<PackIO>,
+        pack_path: &String,
+        s_manifest_file: bool,
+        attribute: Attribute,
+        write_lock_file: File,
+    ) -> Result<Result<WBFPManager, Error>, Error> {
+        //尝试加载分离数据文件
+        let mut manifest_path = pack_path.clone();
+        manifest_path.push_str(".wbm");
+        let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
+        let mut manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len);
+        //空数据列表===
+        let empty_pos_data_block =
+            manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos)?;
+        let empty_pos_data = empty_pos_data_block
+            .get_this_data()
+            .expect("读取空数据列表失败")
+            .to_vec();
+        m_pack_file.empty_data_list =
+            DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
+        //清单文件空数据
+        let manifest_empty_pos_data_block =
+            manifest_file.manifest_data_block_read(attribute.manifest_empty_data_pos_list_pos)?;
+        let manifest_empty_pos_data = manifest_empty_pos_data_block
+            .get_this_data()
+            .expect("读取清单空数据列表失败")
+            .to_vec();
+        manifest_file.empty_data_list = DataPosList::load(
+            &manifest_empty_pos_data,
+            Some(manifest_empty_pos_data_block),
+        );
+        //加载根结构
+        let root_struct_block_data =
+            manifest_file.manifest_data_block_read(attribute.root_struct_pos)?;
+        let root_struct = PackStruct::load(root_struct_block_data)?;
+        let manifest = WBFilesPackManifest {
+            attribute,
+            root_struct,
+            file: Some(manifest_file),
+            _run_data: WBFilesPackManifestRun::default(),
+        };
+        Ok(Ok(WBFPManager::new(
+            pack_path,
+            manifest,
+            pack_file,
+            s_manifest_file,
+            Some(write_lock_file),
+        )))
+    }
     //创建===
 
     //创建新包文件,

@@ -35,7 +35,11 @@ pub fn bytes_len_to_string(len: u64) -> String {
     match len {
         0..B_LEN => format!("{len}B"),
         B_LEN..K_LEN => format!("{}KiB", (len * 100 / B_LEN) as f64 / 100.0),
-        K_LEN..G_LEN => format!("{}MiB", (len * 100 / M_LEN) as f64 / 100.0),
-        G_LEN.. => format!("{}GiB", (len * 100 / G_LEN) as f64 / 100.0),
+        K_LEN..G_LEN => format!("{}MiB", (len * 100 / K_LEN) as f64 / 100.0),
+        G_LEN.. => format!("{}GiB", (len * 100 / M_LEN) as f64 / 100.0),
     }
+}
+
+struct WBFPTool {
+
 }

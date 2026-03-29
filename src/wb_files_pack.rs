@@ -516,7 +516,7 @@ pub struct PackStructItem {
 } //包结构项
 impl PackStructItem {
     fn new_empty_dir(name: &str, metadata: PackFileMetadata) -> Self {
-        let metadata = PackFileMetadataRun::Loaded(metadata);
+        let metadata = PackFileMetadataRun::Loaded(Box::from(metadata));
         Self {
             name: name.to_string(),
             metadata_file_pos: 0,
@@ -653,13 +653,13 @@ pub enum PackStructItemType {
 pub enum PackFileMetadataRun {
     None,
     NoLoad,
-    Loaded(PackFileMetadata),
+    Loaded(Box<PackFileMetadata>),
     Locked,
 }
 impl PackFileMetadataRun {
     fn take(&mut self, this_type: Self) -> Option<PackFileMetadata> {
         match std::mem::replace(self, this_type) {
-            Self::Loaded(m) => Some(m),
+            Self::Loaded(m) => Some(*m),
             _ => None,
         }
     }
@@ -686,7 +686,7 @@ impl PackFileMetadataRun {
 
     fn unlock(&mut self, metadata: PackFileMetadata) {
         if self == &Self::Locked {
-            self.take(PackFileMetadataRun::Loaded(metadata));
+            self.take(PackFileMetadataRun::Loaded(Box::from(metadata)));
         }
     }
 }
@@ -963,39 +963,6 @@ impl PackFileMetadataType {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum PackFileHash {
-    None,
-    Blake3 { hasher: Box<Hasher>, is_seek: bool },
-}
-
-impl PackFileHash {
-    fn _to_u8_type(&self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::Blake3 { .. } => 1,
-        }
-    }
-
-    fn update(&mut self, input: &[u8]) {
-        match self {
-            PackFileHash::Blake3 { hasher, .. } => {
-                hasher.update(input);
-            }
-            PackFileHash::None => (),
-        }
-    }
-
-    fn get_hash_value(&self) -> Vec<u8> {
-        match self {
-            Self::None => Vec::new(),
-            Self::Blake3 { hasher, .. } => {
-                let this_hash = hasher.finalize();
-                this_hash.as_bytes().to_vec()
-            }
-        }
-    }
-}
 
 //清单数据实际占用大小
 const MANIFEST_DATA_BLOCK_DATA_LEN_LEN: usize = 8;

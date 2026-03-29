@@ -4,13 +4,15 @@ use crate::wb_files_pack::manager::{
 };
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem};
+use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::Error;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
+mod test;
 
 pub struct Allocator {
     manager: Arc<Mutex<WBFPManager>>,
@@ -182,12 +184,12 @@ impl Allocator /*写*/ {
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file2(path, modified, len)?;
-        Ok(PackFileWR::new(
+        Ok(PackFileWR::create(
             self.manager.clone(),
             self.pack_io.clone(),
             path_list,
             metadata,
-        ))
+        )?)
     }
 
     pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
@@ -197,29 +199,26 @@ impl Allocator /*写*/ {
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
         let metadata = manager.file_metadata_lock(&path_list)?;
-        Ok(PackFileWR::new(
+        Ok(PackFileWR::create(
             self.manager.clone(),
             self.pack_io.clone(),
             path_list,
             metadata,
-        ))
+        )?)
     }
 
-    pub fn _create_file_no_len<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-    ) -> io::Result<PackFileWR> {
+    pub fn _create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file_no_len(path)?;
-        Ok(PackFileWR::new(
+        Ok(PackFileWR::create(
             self.manager.clone(),
             self.pack_io.clone(),
             path_list,
             metadata,
-        ))
+        )?)
     }
     pub fn create_file3<P: AsRef<Path>>(
         &mut self,
@@ -244,11 +243,67 @@ impl Allocator /*写*/ {
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         let (path_list, metadata) = manager.create_file(path, modified, len, cow, hash_type)?;
-        Ok(PackFileWR::new(
+        Ok(PackFileWR::create(
             self.manager.clone(),
             self.pack_io.clone(),
             path_list,
             metadata,
-        ))
+        )?)
+    }
+}
+
+impl Allocator /*工具方法*/ {
+    pub fn verify_all_file_hash(&mut self) -> io::Result<VerifyHashR> {
+        let mut vhr = VerifyHashR::new();
+        let root_struct = self.get_root_struct_item_name_list()?;
+        for name in root_struct {
+            self.verify_all_file_hash_inner(name.as_ref(), &mut vhr)?;
+        }
+        Ok(vhr)
+    }
+    fn verify_all_file_hash_inner(
+        &mut self,
+        path: &Path,
+        verify_hash_r: &mut VerifyHashR,
+    ) -> io::Result<()> {
+        let item = self.get_pack_struct_item(path)?;
+        match &item.item_type {
+            PackStructItemType::Dir { .. } => {
+                let s_file_name = self.get_struct_item_name_list(path)?;
+                for name in s_file_name {
+                    self.verify_all_file_hash_inner(&path.join(name), verify_hash_r)?;
+                }
+                Ok(())
+            }
+            PackStructItemType::File => {
+                let mut file = self.get_file_wr(path)?;
+                match file.verify_hash() {
+                    Ok(true) => verify_hash_r
+                        .ok_path
+                        .push(path.to_str().unwrap().to_string()),
+                    Ok(false) => verify_hash_r
+                        .err_path
+                        .push((path.to_str().unwrap().to_string(), None)),
+                    Err(err) => verify_hash_r
+                        .err_path
+                        .push((path.to_str().unwrap().to_string(), Some(err))),
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct VerifyHashR {
+    ok_path: Vec<String>,
+    err_path: Vec<(String, Option<Error>)>,
+}
+impl VerifyHashR {
+    fn new() -> Self {
+        Self {
+            ok_path: Vec::new(),
+            err_path: Vec::new(),
+        }
     }
 }
