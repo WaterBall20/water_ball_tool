@@ -9,7 +9,6 @@ mod test;
 pub mod allocator;
 
 use crate::wb_files_pack::pack_io::PackIO;
-use blake3::Hasher;
 use std::collections::HashMap;
 use std::io;
 use std::io::Error;
