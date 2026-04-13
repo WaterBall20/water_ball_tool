@@ -57,7 +57,7 @@ fn ff_out_file_longtime() {
     #[cfg(not(target_os = "windows"))]
     let args: Vec<String> = vec![String::from("/home"), out_file_path.clone()];
     #[cfg(target_os = "windows")]
-    let args: Vec<String> = vec![String::from("c:/"), out_file_path.clone()];
+    let args: Vec<String> = vec![String::from("c:/Users"), out_file_path.clone()];
     ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
@@ -111,7 +111,7 @@ fn wbfp_create_new_pack_m_longtime() {
         String::from("C:\\Program Files"),
         #[cfg(not(target_os = "windows"))]
         //String::from("/usr"),
-            String::from("/home/waterball/Apps/IDE/JetBrains/"),
+        String::from("/home/waterball/Apps/IDE/JetBrains/"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), Some(&mp));
