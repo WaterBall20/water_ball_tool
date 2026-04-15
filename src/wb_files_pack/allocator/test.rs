@@ -2,7 +2,7 @@ use crate::wb_files_pack::allocator::Allocator;
 
 //TEST===
 static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
-static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
+static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
 //哈希校验===
 // 长时间
 #[test]

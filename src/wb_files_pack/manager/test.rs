@@ -361,11 +361,9 @@ fn create_new_pack_file_err() {
     let pack_file = pack_dir.join("pack");
     remove_test_pack_files(&pack_file);
     //
-    let r = {
-        create_new_pack_file2(&pack_file);
-        //当上锁时，无法创建是正确的。
-        create_new_pack_file2(&pack_file)
-    }.0;
+    create_new_pack_file2(&pack_file);
+    //当上锁时，无法创建是正确的。
+    create_new_pack_file2(&pack_file);
     /*if let Err(err) = r {
         remove_test_pack_files(&pack_file);
         _ = fs::remove_dir_all(pack_dir);
