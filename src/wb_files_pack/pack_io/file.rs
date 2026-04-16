@@ -5,12 +5,11 @@ use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{PackFileMetadata, PackFileMetadataType, DATA_DATA_BLOCK_LEN};
 use blake3::{Hash, Hasher};
-use std::fs::File;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
-#[cfg(not(target_os = "windows"))]
-use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "windows"))]
+use std::{fs::File, os::unix::fs::FileExt};
 
 pub struct PackFileWR {
     //管理器实例
@@ -18,6 +17,7 @@ pub struct PackFileWR {
     //包文件io
     pack_io: Arc<Mutex<PackIO>>,
     //包文件文件实例
+    #[cfg(not(target_os = "windows"))]
     pack_file: File,
     //文件位置
     pos: u64,
@@ -29,6 +29,7 @@ pub struct PackFileWR {
     path_list: Option<Vec<String>>,
     //元数据
     metadata: Option<PackFileMetadata>,
+    is_write: bool,
 }
 #[derive(Debug, Clone)]
 pub enum PackFileHash {
@@ -111,16 +112,19 @@ impl PackFileWR {
         path_list: Vec<String>,
         metadata: PackFileMetadata,
     ) -> io::Result<PackFileWR> {
+        #[cfg(not(target_os = "windows"))]
         let pack_file = pack_io.clone().lock().unwrap().try_clone_pack_file()?;
         Ok(PackFileWR {
             manager,
             pack_io,
+            #[cfg(not(target_os = "windows"))]
             pack_file,
             pos: 0,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
             path_list: Some(path_list),
             metadata: Some(metadata),
+            is_write: false,
         })
     }
 
@@ -312,12 +316,14 @@ impl PackFileWR {
 
     fn commit_data(&mut self) -> io::Result<()> {
         //计算哈希
-        let read_hash = self.read_hash_v();
-        if let Ok(read_hash) = read_hash
-            && let Some(metadata) = &mut self.metadata
-            && let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type
-        {
-            *hash_value = read_hash.get_hash_value();
+        if self.is_write {
+            let read_hash = self.read_hash_v();
+            if let Ok(read_hash) = read_hash
+                && let Some(metadata) = &mut self.metadata
+                && let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type
+            {
+                *hash_value = read_hash.get_hash_value();
+            }
         }
         //返还元数据
         if let Some(path_list) = self.path_list.take()
@@ -404,6 +410,7 @@ impl Read for PackFileWR {
 
 impl Write for PackFileWR {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.is_write = true;
         #[cfg(target_os = "windows")]
         let manager = self.manager.clone();
         #[cfg(target_os = "windows")]

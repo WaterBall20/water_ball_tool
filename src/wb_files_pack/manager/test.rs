@@ -58,7 +58,7 @@ fn create_pack_file(
         s_manifest_file,
         create_new,
     )
-    .expect("无法创建包管理器");
+        .expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
     (manager, pack_io)
 }
@@ -350,8 +350,8 @@ fn create_new_file_and_open_pack_manifest_ver() {
 
 //ERR===
 //创建文件_应失败
-/*#[test]
-#[should_panic(expected = "文件可能已存在，无法创建！")]
+#[test]
+#[should_panic(expected = "文件存在")]
 fn create_new_pack_file_err() {
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
@@ -361,17 +361,15 @@ fn create_new_pack_file_err() {
     let pack_file = pack_dir.join("pack");
     remove_test_pack_files(&pack_file);
     //
-    let r = {
-        create_new_pack_file2(&pack_file);
-        //当上锁时，无法创建是正确的。
-        create_new_pack_file2(&pack_file)
-    }.0;
-    if let Err(err) = r {
+    create_new_pack_file2(&pack_file);
+    //当上锁时，无法创建是正确的。
+    create_new_pack_file2(&pack_file);
+    /*if let Err(err) = r {
         remove_test_pack_files(&pack_file);
         _ = fs::remove_dir_all(pack_dir);
         panic!("{}", err)
-    }
-}*/
+    }*/
+}
 #[test]
 #[should_panic(expected = "版本过高")]
 fn create_new_file_and_open_pack_err_manifest_ver1() {

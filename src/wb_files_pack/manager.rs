@@ -1092,9 +1092,9 @@ impl WBFPManager /* 写入 */ {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                            file_count,
-                            dir_count,
-                        } = &mut metadata.file_type
+                        file_count,
+                        dir_count,
+                    } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1282,7 +1282,7 @@ impl WBFPManager /* 核心 */ {
     //GC===
 
     //垃圾回收提交
-    fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
+    fn _file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> io::Result<()> {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
@@ -1291,11 +1291,11 @@ impl WBFPManager /* 核心 */ {
         Ok(())
     }
     //清单文件垃圾回收提交
-    fn manifest_file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
+    /*fn manifest_file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         if let Some(file) = &mut self.manifest.file {
             file.file_gc_add(gc_pos_list);
         }
-    }
+    }*/
     //垃圾回收
     fn file_gc(&mut self) -> io::Result<()> {
         let pack_file = self.pack_file.clone();
@@ -1326,7 +1326,7 @@ impl WBFPManager /* 核心 */ {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (MANIFEST_DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-                > 10_000
+            > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -1543,7 +1543,7 @@ impl WBFPManager /* 核心 */ {
             PackLockType::Symlink => Err(Error::other(
                 "无法解锁，锁文件类型很可能已被其他程序修改成符号链接",
             ))?,
-            PackLockType::None => Ok(()),
+            PackLockType::_None => Ok(()),
         }
     }
 }
@@ -1568,7 +1568,7 @@ enum PackLockType {
     File,
     Dir,
     Symlink,
-    None,
+    _None,
 }
 
 struct PackLockInfo {
@@ -1641,7 +1641,7 @@ impl WBFPManager {
         let lock_info = Self::write_lock_info(run_lock, write_lock_path);
         if lock_info.run_lock {
             //若锁文件不存在就写入
-            if let PackLockType::None = lock_info.file_lock_type {
+            if let PackLockType::_None = lock_info.file_lock_type {
                 Ok(Some(Self::write_lock_file(write_lock_path)?))
             } else {
                 Ok(None)
@@ -1727,7 +1727,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-        .expect("无法解析数据块");
+            .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         //锁文件
         let mut write_lock_file_path = pack_path.clone();

@@ -40,6 +40,4 @@ pub fn bytes_len_to_string(len: u64) -> String {
     }
 }
 
-struct WBFPTool {
-
-}
+struct _WBFPTool {}

@@ -57,7 +57,7 @@ fn ff_out_file_longtime() {
     #[cfg(not(target_os = "windows"))]
     let args: Vec<String> = vec![String::from("/home"), out_file_path.clone()];
     #[cfg(target_os = "windows")]
-    let args: Vec<String> = vec![String::from("c:/"), out_file_path.clone()];
+    let args: Vec<String> = vec![String::from("c:/Users"), out_file_path.clone()];
     ff(args.as_slice(), Some(&mp));
     _ = fs::remove_file(&out_file_path);
 }
@@ -98,7 +98,7 @@ fn wbfp_create_new_pack_m_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
-    out_dir_path.push_str("/create_new_pack_m");
+    out_dir_path.push_str("/create_new_pack_m_longtime");
     _ = fs::remove_dir_all(&out_dir_path);
     _ = fs::create_dir_all(&out_dir_path);
     let mut out_file_path = out_dir_path.clone();
@@ -111,7 +111,7 @@ fn wbfp_create_new_pack_m_longtime() {
         String::from("C:\\Program Files"),
         #[cfg(not(target_os = "windows"))]
         //String::from("/usr"),
-            String::from("/home/waterball/Apps/IDE/JetBrains/"),
+        String::from("/home/waterball/Apps/IDE/JetBrains/"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), Some(&mp));
@@ -148,7 +148,7 @@ fn wbfp_pack_s_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let mut in_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
-    in_dir_path.push_str("/create_new_pack_m");
+    in_dir_path.push_str("/create_new_pack_m_longtime");
     _ = fs::create_dir_all(&in_dir_path);
     let mut in_file_path = in_dir_path.clone();
     in_file_path.push_str("/pack");
@@ -218,17 +218,12 @@ fn wbfp_verify_all_file_hash_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let mut in_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
-    in_dir_path.push_str("/create_new_pack_m");
+    in_dir_path.push_str("/create_new_pack_m_longtime");
     _ = fs::create_dir_all(&in_dir_path);
     let mut in_file_path = in_dir_path.clone();
     in_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("-h"), in_file_path.clone(), {
-        let mut out_dir_path = in_dir_path.clone();
-        out_dir_path.push_str("/s_pack");
-        _ = fs::create_dir_all(&out_dir_path);
-        out_dir_path
-    }];
+    let args: Vec<String> = vec![String::from("-h"), in_file_path.clone()];
     wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&in_file_path);
 }

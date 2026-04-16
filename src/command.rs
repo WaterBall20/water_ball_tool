@@ -180,7 +180,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         &files_list,
         in_dir_path.as_ref(),
     )
-    .expect("写入包文件错误");
+        .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
@@ -595,7 +595,6 @@ fn wbfp_h(args: &[String], mp: Option<&MultiProgress>) {
 fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()> {
     pack.load_all_data(false)?;
     let root_name_list = pack.get_root_struct_item_name_list()?;
-    let mut buf = vec![0; BUF_LEN];
     let mut this_all_write_len = 0;
     let mut this_all_write_file_count = 0;
     let attribute = pack.get_manifest_attribute()?;
@@ -649,7 +648,7 @@ fn verify_hash_inner<'a>(
     let item = match pack.get_pack_struct_item(path) {
         Ok(v) => v,
         Err(err) => {
-            error!(r#"无法获取虚拟路径"{}"结构项"#, path.display());
+            error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
             return pb_c;
         }
     };
@@ -658,7 +657,7 @@ fn verify_hash_inner<'a>(
             let items_name = match pack.get_struct_item_name_list(path) {
                 Ok(v) => v,
                 Err(err) => {
-                    error!(r#"无法获取虚拟路径"{}"的结构项名称"#, path.display());
+                    error!(r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#, path.display());
                     return pb_c;
                 }
             };
