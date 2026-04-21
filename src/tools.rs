@@ -26,6 +26,7 @@ impl PathTool {
     }
 }
 
+#[must_use] 
 pub fn bytes_len_to_string(len: u64) -> String {
     const B_LEN: u64 = 1024;
     const K_LEN: u64 = B_LEN * 1024;

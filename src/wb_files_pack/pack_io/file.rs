@@ -15,6 +15,7 @@ pub struct PackFileWR {
     //管理器实例
     manager: Arc<Mutex<WBFPManager>>,
     //包文件io
+    #[cfg(target_os = "windows")]
     pack_io: Arc<Mutex<PackIO>>,
     //包文件文件实例
     #[cfg(not(target_os = "windows"))]
@@ -95,7 +96,7 @@ impl PackFileHash {
                 if let Self::Blake3 { hash_value, .. } = other {
                     let hash = hasher.finalize();
                     let other_hash = Hash::from_slice(hash_value)
-                        .map_err(|e| Error::other(format!("比较发生错误，err: {e}")))?;
+                        .map_err(|e| Error::other(format!("比较发生错误，err: {e:?}")))?;
                     Ok(hash == other_hash)
                 } else {
                     Err(Error::other("不能对不同类型进行比较"))
@@ -107,8 +108,9 @@ impl PackFileHash {
 
 impl PackFileWR {
     pub(in crate::wb_files_pack) fn create(
+        new: bool,
         manager: Arc<Mutex<WBFPManager>>,
-        pack_io: Arc<Mutex<PackIO>>,
+        pack_io: &Arc<Mutex<PackIO>>,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
     ) -> io::Result<PackFileWR> {
@@ -116,6 +118,7 @@ impl PackFileWR {
         let pack_file = pack_io.clone().lock().unwrap().try_clone_pack_file()?;
         Ok(PackFileWR {
             manager,
+            #[cfg(target_os = "windows")]
             pack_io,
             #[cfg(not(target_os = "windows"))]
             pack_file,
@@ -124,7 +127,7 @@ impl PackFileWR {
             temp_pos_this_len: 0,
             path_list: Some(path_list),
             metadata: Some(metadata),
-            is_write: false,
+            is_write: new,
         })
     }
 

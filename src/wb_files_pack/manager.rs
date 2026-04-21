@@ -125,8 +125,15 @@ impl WBFPManager {
             file_header_buf[FILE_HEADER_DATA_LENGTH_INDEX + index] = *value;
         }
         //清单属性
-        for byte in self.manifest.attribute.get_block_data().0 {
-            file_header_buf.push(byte);
+        for (index, byte) in self
+            .manifest
+            .attribute
+            .get_block_data()
+            .0
+            .into_iter()
+            .enumerate()
+        {
+            file_header_buf[FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX + index] = byte;
         }
         //填充所有剩余空间
         file_header_buf.resize(FILE_HEADER_BLOCK_LEN, 0);
@@ -1092,9 +1099,9 @@ impl WBFPManager /* 写入 */ {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                        file_count,
-                        dir_count,
-                    } = &mut metadata.file_type
+                            file_count,
+                            dir_count,
+                        } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1326,7 +1333,7 @@ impl WBFPManager /* 核心 */ {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (MANIFEST_DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-            > 10_000
+                > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -1395,6 +1402,7 @@ impl WBFPManager /* 核心 */ {
         let (block_data, new_block) = root_struct.get_block_data();
         let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_block_len)?;
         self.manifest.attribute.root_struct_pos = pos;
+        self.save_manifest_attribute()?;
         Ok(())
     }
 
@@ -1727,7 +1735,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-            .expect("无法解析数据块");
+        .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         //锁文件
         let mut write_lock_file_path = pack_path.clone();

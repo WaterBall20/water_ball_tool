@@ -589,7 +589,7 @@ fn wbfp_h(args: &[String], mp: Option<&MultiProgress>) {
     //逻辑实现=== ===
     info!("开始哈希校验");
     verify_hash(&mut pack, pb.as_ref()).unwrap();
-    info!("操作已完成");
+    info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");
 }
 
 fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()> {
@@ -680,7 +680,7 @@ fn verify_hash_inner<'a>(
                     warn!(r#"虚拟文件"{}"哈希验证失败"#, path.display());
                 }
                 Err(err) => warn!(
-                    r#"虚拟文件"{}"哈希验证发生错误, err: {err}"#,
+                    r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#,
                     path.display()
                 ),
                 _ => (),

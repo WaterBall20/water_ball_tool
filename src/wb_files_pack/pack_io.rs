@@ -271,7 +271,8 @@ impl PackIO /*核心*/ {
         self.file.sync_data()
     }
 
-    pub(crate) fn _try_clone_pack_file(&self) -> io::Result<File> {
+    #[cfg(not(target_os = "windows"))]
+    pub(crate) fn try_clone_pack_file(&self) -> io::Result<File> {
         self.file
             .try_clone()
             .map_err(|e| Error::other(format!("尝试复制包文件实例失败，err: {e}")))

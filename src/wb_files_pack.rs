@@ -44,10 +44,12 @@ pub struct WBFilesPackManifest {
 } //包文件数据
 
 impl WBFilesPackManifest {
+    #[must_use]
     pub fn attribute(&self) -> &Attribute {
         &self.attribute
     }
 
+    #[must_use]
     pub fn root_struct(&self) -> &PackStruct {
         &self.root_struct
     }
@@ -152,26 +154,32 @@ impl Default for Attribute {
     }
 }
 impl Attribute {
+    #[must_use]
     pub fn version(&self) -> u16 {
         self.version
     }
 
+    #[must_use]
     pub fn version_compatible(&self) -> u16 {
         self.version_compatible
     }
 
+    #[must_use]
     pub fn cow(&self) -> bool {
         self.cow
     }
 
+    #[must_use]
     pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
+    #[must_use]
     pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
 
+    #[must_use]
     pub fn data_len(&self) -> u64 {
         self.data_len
     }
@@ -425,6 +433,7 @@ pub struct PackStruct {
     data_block: ManifestDataBlock,
 } //包结构
 impl PackStruct {
+    #[must_use]
     pub fn items(&self) -> &HashMap<String, PackStructItem> {
         &self.items
     }
@@ -527,14 +536,17 @@ impl PackStructItem {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> &String {
         &self.name
     }
 
+    #[must_use]
     pub fn item_type(&self) -> &PackStructItemType {
         &self.item_type
     }
 
+    #[must_use]
     pub fn metadata(&self) -> &PackFileMetadataRun {
         &self.metadata
     }
@@ -756,22 +768,27 @@ impl PackFileMetadata {
         }
     }
 
+    #[must_use]
     pub fn cow(&self) -> bool {
         self.cow
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    #[must_use]
     pub fn len(&self) -> u64 {
         self.len
     }
 
+    #[must_use]
     pub fn modified(&self) -> u128 {
         self.modified
     }
 
+    #[must_use]
     pub fn file_type(&self) -> &PackFileMetadataType {
         &self.file_type
     }

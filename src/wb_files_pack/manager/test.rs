@@ -9,13 +9,13 @@ use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
 use pretty_assertions::assert_eq;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
-static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
-static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
+static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
+static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 
 fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
     let pack_path = path
@@ -31,7 +31,7 @@ fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
     pack_lock_path.push_str(".lock");
     _ = fs::remove_file(pack_lock_path);
 }
-fn create_new_pack_file2(pack_path: &Path) -> (WBFPManager, Arc<Mutex<PackIO>>) {
+fn create_new_pack_file2(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     create_pack_file(pack_path, DEFAULT_COW, DEFAULT_S_MANIFEST_FILE, true)
 }
 fn create_pack_file(
@@ -39,7 +39,7 @@ fn create_pack_file(
     cow: bool,
     s_manifest_file: bool,
     create_new: bool,
-) -> (WBFPManager, Arc<Mutex<PackIO>>) {
+) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     let pack_file = File::options()
         .read(true)
         .write(true)
@@ -47,7 +47,12 @@ fn create_pack_file(
         .truncate(true)
         .create_new(true)
         .open(pack_path)
-        .expect("无法创建文件");
+        .map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => {
+                Error::new(ErrorKind::AlreadyExists, format!("文件已存在, err: {e}"))
+            }
+            _ => panic!("创建文件错误. err:{e}"),
+        })?;
     //创建包文件数据文件
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
@@ -58,9 +63,9 @@ fn create_pack_file(
         s_manifest_file,
         create_new,
     )
-        .expect("无法创建包管理器");
+    .expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
-    (manager, pack_io)
+    Ok((manager, pack_io))
 }
 fn open_pack_file<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO>>) {
     //打开水球包文件
@@ -88,7 +93,7 @@ fn get_file_rw<P: AsRef<Path>>(
         .expect("无法获得包文件锁")
         .file_metadata_lock(&path_list)
         .expect("无法获得元数据");
-    PackFileWR::create(pack.clone(), pack_io.clone(), path_list, metadata)
+    PackFileWR::create(false, pack.clone(), &pack_io.clone(), path_list, metadata)
 }
 //OK===
 
@@ -104,7 +109,7 @@ fn create_new_pack_file() {
     remove_test_pack_files(&pack_path);
     //创建文件
     {
-        create_new_pack_file2(&pack_path);
+        create_new_pack_file2(&pack_path).unwrap();
         println!("已创建文件");
     }
     remove_test_pack_files(&pack_path);
@@ -123,7 +128,7 @@ fn create_new_pack_file_and_create_dir() {
     remove_test_pack_files(&pack_path);
     //创建文件
     {
-        let mut pack = create_new_pack_file2(&pack_path).0;
+        let mut pack = create_new_pack_file2(&pack_path).unwrap().0;
         let test_pack_path = String::from("Test/Test2");
         pack.create_dir_all(&test_pack_path)
             .expect("创建虚假目录失败");
@@ -149,24 +154,24 @@ fn create_new_pack_file_and_create_file_wr() {
     remove_test_pack_files(&pack_file);
     //开始创建
     {
-        let (pack, pack_io) = create_new_pack_file2(&pack_file);
+        let (pack, pack_io) = create_new_pack_file2(&pack_file).unwrap();
         let man = Arc::new(Mutex::new(pack));
         let modified_time = 0;
         //file1
         let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let test_file_path = "Test/Test1";
-        let rw2 = man
+        let rw1 = man
             .clone()
             .lock()
             .expect("获得包管理器失败")
             .create_file2(test_file_path, modified_time, LENGTH as u64)
             .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, err:{e}"#));
-        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1)
+        let mut rw1 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw1.0, rw1.1)
             .expect("无法获得虚拟文件实例");
-        _ = rw2.write(&write_data1[..]).expect("写入虚拟文件失败");
+        _ = rw1.write(&write_data1[..]).expect("写入虚拟文件失败");
         let mut read_data1: [u8; LENGTH] = [0; 10];
-        rw2.seek(SeekFrom::Start(0)).expect("写入虚拟文件失败");
-        _ = rw2.read(&mut read_data1[..]).expect("读取虚拟文件失败");
+        rw1.seek(SeekFrom::Start(0)).expect("写入虚拟文件失败");
+        _ = rw1.read(&mut read_data1[..]).expect("读取虚拟文件失败");
         //file2
         let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
         let test_file_path = "Test/Test2";
@@ -176,7 +181,7 @@ fn create_new_pack_file_and_create_file_wr() {
             .expect("无法获得包管理器")
             .create_file2(test_file_path, modified_time, LENGTH as u64)
             .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, e" {e}"#));
-        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1)
+        let mut rw2 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw2.0, rw2.1)
             .expect("写入虚拟文件失败");
         _ = rw2.write(&write_data2[..]).unwrap();
         let mut read_data2: [u8; LENGTH] = [0; 10];
@@ -203,7 +208,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
     remove_test_pack_files(&pack_file);
     //开始创建
     {
-        let (pack, pack_io) = create_pack_file(&pack_file, false, false, true);
+        let (pack, pack_io) = create_pack_file(&pack_file, false, false, true).unwrap();
         let man = Arc::new(Mutex::new(pack));
         let modified_time = 0;
         //file1
@@ -215,7 +220,8 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
             .unwrap()
             .create_file2("Test/Test1", modified_time, LENGTH as u64)
             .unwrap();
-        let mut rw1 = PackFileWR::create(man.clone(), pack_io.clone(), rw1.0, rw1.1).unwrap();
+        let mut rw1 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw1.0, rw1.1)
+            .unwrap();
         _ = rw1.write(&write_data1[..]).unwrap();
         //r
         let mut read_data1: [u8; LENGTH] = [0; 10];
@@ -231,7 +237,8 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
             .unwrap()
             .create_file2("Test/Test2", modified_time, LENGTH as u64)
             .unwrap();
-        let mut rw2 = PackFileWR::create(man.clone(), pack_io.clone(), rw2.0, rw2.1).unwrap();
+        let mut rw2 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw2.0, rw2.1)
+            .unwrap();
         _ = rw2.write(&write_data2[..]).unwrap();
         //r
         let mut read_data2: [u8; LENGTH] = [0; 10];
@@ -259,7 +266,7 @@ fn create_new_file_and_open_pack() {
     //
     let (root_struct, other_name_list) = {
         //创建文件
-        let (pack, pack_io) = create_new_pack_file2(&pack_file);
+        let (pack, pack_io) = create_new_pack_file2(&pack_file).unwrap();
         let man = Arc::new(Mutex::new(pack));
         //随机创建文件
         let mut other_name_list = Vec::new();
@@ -274,7 +281,8 @@ fn create_new_file_and_open_pack() {
                 .unwrap()
                 .create_file(&name, modified, len, false, DEFAULT_HASH_TYPE)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
-            let mut wr = PackFileWR::create(man.clone(), pack_io.clone(), wr.0, wr.1).unwrap();
+            let mut wr = PackFileWR::create(true, man.clone(), &pack_io.clone(), wr.0, wr.1)
+                .unwrap();
             wr.write_all(&test_data)
                 .unwrap_or_else(|_| panic!("循环第{index}次，无法写入虚拟随机文件:{name}"));
         }
@@ -284,7 +292,7 @@ fn create_new_file_and_open_pack() {
             .unwrap()
             .create_file2(&test_file_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
-        let mut rw = PackFileWR::create(man.clone(), pack_io.clone(), rw.0, rw.1).unwrap();
+        let mut rw = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw.0, rw.1).unwrap();
         _ = rw.write(&test_data).expect("无法写入虚拟文件");
         drop(rw);
         (
@@ -335,7 +343,7 @@ fn create_new_file_and_open_pack_manifest_ver() {
     //
     {
         //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).0;
+        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
@@ -351,7 +359,7 @@ fn create_new_file_and_open_pack_manifest_ver() {
 //ERR===
 //创建文件_应失败
 #[test]
-#[should_panic(expected = "文件存在")]
+#[should_panic(expected = "文件已存在")]
 fn create_new_pack_file_err() {
     //测试目录
     let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
@@ -361,14 +369,14 @@ fn create_new_pack_file_err() {
     let pack_file = pack_dir.join("pack");
     remove_test_pack_files(&pack_file);
     //
-    create_new_pack_file2(&pack_file);
+    create_new_pack_file2(&pack_file).unwrap();
     //当上锁时，无法创建是正确的。
-    create_new_pack_file2(&pack_file);
-    /*if let Err(err) = r {
+    let r = create_new_pack_file2(&pack_file);
+    if let Err(err) = r {
         remove_test_pack_files(&pack_file);
         _ = fs::remove_dir_all(pack_dir);
         panic!("{}", err)
-    }*/
+    }
 }
 #[test]
 #[should_panic(expected = "版本过高")]
@@ -383,7 +391,7 @@ fn create_new_file_and_open_pack_err_manifest_ver1() {
     //
     {
         //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).0;
+        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
@@ -409,7 +417,7 @@ fn create_new_file_and_open_pack_err_manifest_ver2() {
     //
     {
         //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).0;
+        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
         //更改实例内部的数据版本
         pack.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
         pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;

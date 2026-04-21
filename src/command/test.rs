@@ -8,8 +8,8 @@ use std::fs;
 //TEST===
 static FF_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/ff/ok";
 static FF_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/ff/err";
-static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/ok";
-static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/err";
+static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/command/ok";
+static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/command/err";
 
 //OK===
 //文件查找器输出文件跳过符号链接
@@ -110,8 +110,7 @@ fn wbfp_create_new_pack_m_longtime() {
         #[cfg(target_os = "windows")]
         String::from("C:\\Program Files"),
         #[cfg(not(target_os = "windows"))]
-        //String::from("/usr"),
-        String::from("/home/waterball/Apps/IDE/JetBrains/"),
+        String::from("/usr/lib/"),
         out_file_path.clone(),
     ];
     wbfp(args.as_slice(), Some(&mp));

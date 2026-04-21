@@ -27,22 +27,27 @@ pub struct FilesList {
     files_list: HashMap<String, FileInfo>,
 } //搜索结果
 impl FilesList {
+    #[must_use] 
     pub fn file_path(&self) -> &str {
         &self.path
     }
 
+    #[must_use] 
     pub fn data_length(&self) -> u64 {
         self.data_length
     }
 
+    #[must_use] 
     pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
+    #[must_use] 
     pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
 
+    #[must_use] 
     pub fn files_list(&self) -> &HashMap<String, FileInfo> {
         &self.files_list
     }
@@ -59,18 +64,22 @@ pub struct FileInfo {
     file_kind: FileKind,
 } //文件信息
 impl FileInfo {
+    #[must_use] 
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    #[must_use] 
     pub fn length(&self) -> u64 {
         self.length
     }
 
+    #[must_use] 
     pub fn modified_time(&self) -> u128 {
         self.modified_time
     }
 
+    #[must_use] 
     pub fn file_kind(&self) -> &FileKind {
         &self.file_kind
     }
@@ -85,14 +94,17 @@ pub struct Dir {
     dir_count: u64,
 } //文件夹独有
 impl Dir {
+    #[must_use] 
     pub fn files_list(&self) -> &HashMap<String, FileInfo> {
         &self.files_list
     }
 
+    #[must_use] 
     pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
+    #[must_use] 
     pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
