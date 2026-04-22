@@ -190,10 +190,12 @@ impl Allocator /*写*/ {
             &self.pack_io.clone(),
             path_list,
             metadata,
+            false,
         )
     }
 
-    pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
+    pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) ->
+    io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -206,6 +208,7 @@ impl Allocator /*写*/ {
             &self.pack_io.clone(),
             path_list,
             metadata,
+            end_pos,
         )
     }
 
@@ -221,6 +224,7 @@ impl Allocator /*写*/ {
             &self.pack_io.clone(),
             path_list,
             metadata,
+            false,
         )
     }
     pub fn create_file3<P: AsRef<Path>>(
@@ -252,6 +256,7 @@ impl Allocator /*写*/ {
             &self.pack_io.clone(),
             path_list,
             metadata,
+            false,
         )
     }
 }
@@ -280,7 +285,7 @@ impl Allocator /*工具方法*/ {
                 Ok(())
             }
             PackStructItemType::File => {
-                let mut file = self.get_file_wr(path)?;
+                let mut file = self.get_file_wr(path, false)?;
                 match file.verify_hash() {
                     Ok(true) => verify_hash_r
                         .ok_path

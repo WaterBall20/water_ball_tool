@@ -508,7 +508,7 @@ fn pack_read_write_to_file(
         pb_c(0, 1);
     }
     //尝试打开虚拟文件
-    let mut in_file = match pack_man.get_file_wr(this_pack_path) {
+    let mut in_file = match pack_man.get_file_wr(this_pack_path, false) {
         Ok(file) => file,
         Err(err) => {
             error!("无法打开虚拟文件{this_pack_path:?}，将跳过，err:{err}");
@@ -668,7 +668,7 @@ fn verify_hash_inner<'a>(
             pb_c
         }
         PackStructItemType::File => {
-            let mut rw = match pack.get_file_wr(path) {
+            let mut rw = match pack.get_file_wr(path, false) {
                 Ok(v) => v,
                 Err(err) => {
                     error!("无法获取包文件读写器，err: {err}");

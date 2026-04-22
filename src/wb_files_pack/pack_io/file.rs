@@ -113,16 +113,17 @@ impl PackFileWR {
         pack_io: &Arc<Mutex<PackIO>>,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
+        end_pos: bool,
     ) -> io::Result<PackFileWR> {
         #[cfg(not(target_os = "windows"))]
         let pack_file = pack_io.clone().lock().unwrap().try_clone_pack_file()?;
         Ok(PackFileWR {
             manager,
             #[cfg(target_os = "windows")]
-            pack_io,
+            pack_io: pack_io.clone(),
             #[cfg(not(target_os = "windows"))]
             pack_file,
-            pos: 0,
+            pos: if end_pos { metadata.len } else { 0 },
             temp_pos_index: 0,
             temp_pos_this_len: 0,
             path_list: Some(path_list),
