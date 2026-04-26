@@ -93,7 +93,7 @@ fn wbfp_create_new_pack_m() {
 }
 // 长时间
 #[test]
-#[ignore = "长时间"]
+#[ignore = "longtime"]
 fn wbfp_create_new_pack_m_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
@@ -106,7 +106,6 @@ fn wbfp_create_new_pack_m_longtime() {
     //命令行参数处理
     let args: Vec<String> = vec![
         String::from("-m"),
-        // String::from("/home/waterball/Documents/Dev/JavaRust/MC-MMD-rust/rust_engine/src/animation/"),
         #[cfg(target_os = "windows")]
         String::from("C:\\Program Files"),
         #[cfg(not(target_os = "windows"))]
@@ -142,7 +141,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
 //分离
 // 长时间
 #[test]
-#[ignore = "长时间"]
+#[ignore = "longtime"]
 fn wbfp_pack_s_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
@@ -212,7 +211,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
 //分离
 // 长时间
 #[test]
-#[ignore = "长时间"]
+#[ignore = "longtime"]
 fn wbfp_verify_all_file_hash_longtime() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);

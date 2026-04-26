@@ -194,25 +194,8 @@ impl Allocator /*写*/ {
         )
     }
 
-    pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) ->
-    io::Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        let path_list = PathTool::path_to_string_vec(path);
-        let metadata = manager.file_metadata_lock(&path_list)?;
-        PackFileWR::create(
-            false,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            end_pos,
-        )
-    }
 
-    pub fn _create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
+    pub fn create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -257,6 +240,28 @@ impl Allocator /*写*/ {
             path_list,
             metadata,
             false,
+        )
+    }
+
+    pub fn open_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> io::Result<PackFileWR> {
+        self.get_file_wr(path, end_pos)
+    }
+
+    pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) ->
+    io::Result<PackFileWR> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        let metadata = manager.file_metadata_lock(&path_list)?;
+        PackFileWR::create(
+            false,
+            self.manager.clone(),
+            &self.pack_io.clone(),
+            path_list,
+            metadata,
+            end_pos,
         )
     }
 }

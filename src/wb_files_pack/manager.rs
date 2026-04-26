@@ -11,7 +11,7 @@ use crate::wb_files_pack::pack_io::{
 use crate::wb_files_pack::{
     Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata,
     PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
-    PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN,
+    PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, DATA_BLOCK_LEN,
 };
 use core::slice::Iter;
 use std::collections::HashMap;
@@ -1272,7 +1272,7 @@ impl WBFPManager /* 核心 */ {
     //获取可用的文件位置
     fn get_file_pos(&mut self, length: u64) -> io::Result<(u64, u64)> {
         //块对齐
-        const DATA_BLOCK_LEN_U64: u64 = MANIFEST_DATA_BLOCK_LEN as u64;
+        const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
@@ -1331,7 +1331,7 @@ impl WBFPManager /* 核心 */ {
             .lock()
             .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
-            > (MANIFEST_DATA_BLOCK_LEN as u64) * 1024
+            > (DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
                 > 10_000
         {

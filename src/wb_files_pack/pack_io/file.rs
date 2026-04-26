@@ -3,7 +3,9 @@
  */
 use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::{PackFileMetadata, PackFileMetadataType, DATA_DATA_BLOCK_LEN};
+use crate::wb_files_pack::{
+    PackFileMetadata, PackFileMetadataType, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
+};
 use blake3::{Hash, Hasher};
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
@@ -15,7 +17,6 @@ pub struct PackFileWR {
     //管理器实例
     manager: Arc<Mutex<WBFPManager>>,
     //包文件io
-    #[cfg(target_os = "windows")]
     pack_io: Arc<Mutex<PackIO>>,
     //包文件文件实例
     #[cfg(not(target_os = "windows"))]
@@ -119,7 +120,6 @@ impl PackFileWR {
         let pack_file = pack_io.clone().lock().unwrap().try_clone_pack_file()?;
         Ok(PackFileWR {
             manager,
-            #[cfg(target_os = "windows")]
             pack_io: pack_io.clone(),
             #[cfg(not(target_os = "windows"))]
             pack_file,
@@ -196,18 +196,78 @@ impl PackFileWR {
             //附加索引
             pos_index += 1;
         }
-        if is_read {
-            Ok(r_pos)
-        } else {
-            Err(Error::other("空间越界"))
+        Ok(r_pos)
+    }
+
+    //增加分配大小
+    fn add_running_len(&mut self, add_len: u64) -> io::Result<()> {
+        if let Some(metadata) = &mut self.metadata
+            && let PackFileMetadataType::File { data_pos_list, .. } = &mut metadata.file_type
+        {
+            let pack_file = self.pack_io.clone();
+            let mut pack_file = pack_file
+                .lock()
+                .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+            data_pos_list.list.push(pack_file.get_file_pos(add_len))
         }
+        Ok(())
     }
 
     //设置文件大小
-    //TODO:动态扩容实现
-    /*fn _set_len(&mut self, _manager: &mut WBFPManager) -> io::Result<()> {
-        Err(Error::other("未实现动态扩容"))
-    }*/
+    pub fn set_len(&mut self, len: u64) -> io::Result<()> {
+        const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
+        //大小判断
+        if let Some(metadata) = &mut self.metadata
+            && let PackFileMetadataType::File { data_pos_list, .. } = &mut metadata.file_type
+        {
+            let pack_file = self.pack_io.clone();
+            let mut pack_file = pack_file
+                .lock()
+                .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+            if len > metadata.len {
+                //增加大小
+                let add_len = len - metadata.len;
+                //获取分配
+                let add_pos = pack_file.get_file_pos(add_len);
+                data_pos_list.list.push(add_pos);
+                metadata.len += add_len;
+            } else {
+                //减少大小
+                metadata.len = len;
+                //更新数据块列表和垃圾回收提交
+                let mut back_len = 0;
+
+                let mut new_pos_list = Vec::new();
+                let mut gc_list = Vec::new();
+                for value in &data_pos_list.list {
+                    let (pos, len) = *value;
+                    back_len += len;
+                    let back_len_c = back_len / DATA_BLOCK_LEN_U64;
+                    let this_back_len_c = metadata.len / DATA_BLOCK_LEN_U64 + 1;
+                    //大于实际大小
+                    if back_len_c > this_back_len_c {
+                        let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
+                        if len > s_len {
+                            //删除的大小小于快大小
+                            new_pos_list.push((pos, len - s_len));
+                            gc_list.push((pos + s_len, s_len));
+                        } else {
+                            //删除的大小等于快大小
+                            assert_eq!(s_len, len); //逻辑判断
+                            //不执行任何操作
+                        }
+                    } else {
+                        new_pos_list.push(*value);
+                    }
+                }
+                //垃圾提交
+                pack_file.file_gc_add(gc_list);
+                //更新元数据
+                data_pos_list.list = new_pos_list;
+            }
+        }
+        Ok(())
+    }
 
     //设置文件位置
     fn set_pos(&mut self, pos: u64) -> io::Result<()> {
@@ -329,6 +389,11 @@ impl PackFileWR {
                 *hash_value = read_hash.get_hash_value();
             }
         }
+        //预分配空间释放
+        if let Some(metadata) = &self.metadata {
+            let metadata_len = metadata.len();
+            self.set_len(metadata_len)?; //通过设置大小触发释放
+        }
         //返还元数据
         if let Some(path_list) = self.path_list.take()
             && let Some(metadata) = self.metadata.take()
@@ -375,7 +440,11 @@ impl Seek for PackFileWR {
                     self.sub_pos((-pos).cast_unsigned())?;
                     Ok(self.pos)
                 }
-                ..0 => Err(Error::other("未实现动态扩容")),
+                ..0 => {
+                    self.add_running_len(pos as u64)?;
+                    self.add_pos(pos.cast_unsigned())?;
+                    Ok(self.pos)
+                }
             },
         }
     }
@@ -430,7 +499,15 @@ impl Write for PackFileWR {
             .lock()
             .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
         //当前大小所需的位置列表
-        let pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
+        let mut pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
+        //如果没有空间就尝试分配
+        if pos_s.is_empty() {
+            let data_len = buf.len() as u64;
+            let add_running_len = ((data_len / DATA_DATA_BLOCK_LEN) + 1) * DATA_DATA_BLOCK_LEN;
+            self.add_running_len(add_running_len)?;
+            pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
+            assert!(!pos_s.is_empty());
+        }
         //当前已写入大小
         let mut write_len = 0;
         //写入
@@ -451,6 +528,12 @@ impl Write for PackFileWR {
             //TODO:未来功能：写入优化、写时复制
         }
         self.add_pos(write_len as u64)?;
+        //大小判断，更新大小
+        if let Some(metadata) = &mut self.metadata {
+            if self.pos > metadata.len {
+                metadata.len = self.pos
+            }
+        }
         Ok(write_len)
     }
 

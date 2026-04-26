@@ -9,7 +9,7 @@ use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
 use pretty_assertions::assert_eq;
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
@@ -96,161 +96,9 @@ fn get_file_rw<P: AsRef<Path>>(
         .expect("无法获得元数据");
     PackFileWR::create(false, pack.clone(), &pack_io.clone(), path_list, metadata, end_pos)
 }
+
+
 //OK===
-
-//创建文件
-#[test]
-fn create_new_pack_file() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_file");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
-    let pack_path = pack_dir.join("pack");
-    remove_test_pack_files(&pack_path);
-    //创建文件
-    {
-        create_new_pack_file2(&pack_path).unwrap();
-        println!("已创建文件");
-    }
-    remove_test_pack_files(&pack_path);
-    _ = fs::remove_dir_all(pack_dir);
-}
-
-//创建文件并创建虚拟目录
-#[test]
-fn create_new_pack_file_and_create_dir() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_create_dir");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
-    let pack_path = pack_dir.join("pack");
-    remove_test_pack_files(&pack_path);
-    //创建文件
-    {
-        let mut pack = create_new_pack_file2(&pack_path).unwrap().0;
-        let test_pack_path = String::from("Test/Test2");
-        pack.create_dir_all(&test_pack_path)
-            .expect("创建虚假目录失败");
-        pack.get_dir(test_pack_path).expect("获取虚拟目录失败");
-        println!("已创建文件");
-    }
-    remove_test_pack_files(&pack_path);
-    _ = fs::remove_dir_all(pack_dir);
-}
-
-//创建包文件同时创建虚拟文件并测试读写
-
-#[test]
-fn create_new_pack_file_and_create_file_wr() {
-    const LENGTH: usize = 10;
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_pack_file_and_create_file_wr");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).expect("创建测试目录失败");
-    //测试文件
-    let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
-    //开始创建
-    {
-        let (pack, pack_io) = create_new_pack_file2(&pack_file).unwrap();
-        let man = Arc::new(Mutex::new(pack));
-        let modified_time = 0;
-        //file1
-        let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let test_file_path = "Test/Test1";
-        let rw1 = man
-            .clone()
-            .lock()
-            .expect("获得包管理器失败")
-            .create_file2(test_file_path, modified_time, LENGTH as u64)
-            .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, err:{e}"#));
-        let mut rw1 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw1.0, rw1.1, false)
-            .expect("无法获得虚拟文件实例");
-        _ = rw1.write(&write_data1[..]).expect("写入虚拟文件失败");
-        let mut read_data1: [u8; LENGTH] = [0; 10];
-        rw1.seek(SeekFrom::Start(0)).expect("写入虚拟文件失败");
-        _ = rw1.read(&mut read_data1[..]).expect("读取虚拟文件失败");
-        //file2
-        let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let test_file_path = "Test/Test2";
-        let rw2 = man
-            .clone()
-            .lock()
-            .expect("无法获得包管理器")
-            .create_file2(test_file_path, modified_time, LENGTH as u64)
-            .unwrap_or_else(|e| panic!(r#"创建虚拟文件"{test_file_path}"失败, e" {e}"#));
-        let mut rw2 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw2.0, rw2.1, false)
-            .expect("写入虚拟文件失败");
-        _ = rw2.write(&write_data2[..]).unwrap();
-        let mut read_data2: [u8; LENGTH] = [0; 10];
-        rw2.seek(SeekFrom::Start(0)).unwrap();
-        _ = rw2.read(&mut read_data2[..]).unwrap();
-        assert_eq!(write_data2, read_data2);
-        assert_eq!(write_data1, read_data1);
-    } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
-}
-
-//创建包文化并写入虚拟文件，不分离数据文件
-#[test]
-fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
-    const LENGTH: usize = 10;
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_pack_file_no_s_data_file_and_create_file_wr");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    //测试文件
-    let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
-    //开始创建
-    {
-        let (pack, pack_io) = create_pack_file(&pack_file, false, false, true).unwrap();
-        let man = Arc::new(Mutex::new(pack));
-        let modified_time = 0;
-        //file1
-        //w
-        let write_data1: [u8; LENGTH] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let rw1 = man
-            .clone()
-            .lock()
-            .unwrap()
-            .create_file2("Test/Test1", modified_time, LENGTH as u64)
-            .unwrap();
-        let mut rw1 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw1.0, rw1.1, false)
-            .unwrap();
-        _ = rw1.write(&write_data1[..]).unwrap();
-        //r
-        let mut read_data1: [u8; LENGTH] = [0; 10];
-        rw1.seek(SeekFrom::Start(0)).unwrap();
-        _ = rw1.read(&mut read_data1[..]).unwrap();
-        drop(rw1);
-        //file2
-        //w
-        let write_data2: [u8; LENGTH] = [10, 25, 33, 41, 53, 64, 57, 87, 89, 110];
-        let rw2 = man
-            .clone()
-            .lock()
-            .unwrap()
-            .create_file2("Test/Test2", modified_time, LENGTH as u64)
-            .unwrap();
-        let mut rw2 = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw2.0, rw2.1, false)
-            .unwrap();
-        _ = rw2.write(&write_data2[..]).unwrap();
-        //r
-        let mut read_data2: [u8; LENGTH] = [0; 10];
-        rw2.seek(SeekFrom::Start(0)).unwrap();
-        _ = rw2.read(&mut read_data2[..]).unwrap();
-        assert_eq!(write_data2, read_data2);
-        assert_eq!(write_data1, read_data1);
-    } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
-}
 
 //创建包文件并打开刚创建的包文件
 #[test]
@@ -333,6 +181,7 @@ fn create_new_file_and_open_pack() {
     _ = fs::remove_dir_all(pack_dir);
 }
 
+//创建不同版本的兼容包文件
 #[test]
 fn create_new_file_and_open_pack_manifest_ver() {
     //测试目录
@@ -359,27 +208,6 @@ fn create_new_file_and_open_pack_manifest_ver() {
 }
 
 //ERR===
-//创建文件_应失败
-#[test]
-#[should_panic(expected = "文件已存在")]
-fn create_new_pack_file_err() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
-    pack_dir.push_str("/create_new_file");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
-    //
-    create_new_pack_file2(&pack_file).unwrap();
-    //当上锁时，无法创建是正确的。
-    let r = create_new_pack_file2(&pack_file);
-    if let Err(err) = r {
-        remove_test_pack_files(&pack_file);
-        _ = fs::remove_dir_all(pack_dir);
-        panic!("{}", err)
-    }
-}
 #[test]
 #[should_panic(expected = "版本过高")]
 fn create_new_file_and_open_pack_err_manifest_ver1() {

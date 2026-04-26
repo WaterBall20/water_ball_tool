@@ -1,6 +1,6 @@
 use crate::tools;
 use crate::wb_files_pack::{
-    DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, MANIFEST_DATA_BLOCK_LEN,
+    DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, DATA_BLOCK_LEN,
 };
 use std::fs::File;
 use std::io;
@@ -36,11 +36,11 @@ pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH: usize = FILE_HEADER_
 
 //文件头清单属性
 pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: usize =
-    MANIFEST_DATA_BLOCK_LEN;
+    DATA_BLOCK_LEN;
 
 //文件头块长度
 pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize =
-    MANIFEST_DATA_BLOCK_LEN + MANIFEST_ATTRIBUTE_BLOCK_LEN;
+    DATA_BLOCK_LEN + MANIFEST_ATTRIBUTE_BLOCK_LEN;
 
 #[derive(Default, Debug)]
 pub(crate) struct RunData {
@@ -177,13 +177,13 @@ impl PackIO /*核心*/ {
                     //合并，将下一个占用的大小加到当前大小
                     *this_len += next_len;
                     assert!(
-                        this_pos.is_multiple_of(MANIFEST_DATA_BLOCK_LEN as u64)
-                            && this_len.is_multiple_of(MANIFEST_DATA_BLOCK_LEN as u64)
+                        this_pos.is_multiple_of(DATA_BLOCK_LEN as u64)
+                            && this_len.is_multiple_of(DATA_BLOCK_LEN as u64)
                     );
                     let r = pos_list.remove(index + 1);
                     assert!(
-                        r.0.is_multiple_of(MANIFEST_DATA_BLOCK_LEN as u64)
-                            && r.1.is_multiple_of(MANIFEST_DATA_BLOCK_LEN as u64)
+                        r.0.is_multiple_of(DATA_BLOCK_LEN as u64)
+                            && r.1.is_multiple_of(DATA_BLOCK_LEN as u64)
                     );
                 } else {
                     //否则什么都不做，并附加索引
@@ -196,7 +196,7 @@ impl PackIO /*核心*/ {
     //获取可用的文件位置
     pub(crate) fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
         //块对齐
-        const DATA_BLOCK_LEN_U64: u64 = MANIFEST_DATA_BLOCK_LEN as u64;
+        const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
         let length = if length.is_multiple_of(DATA_BLOCK_LEN_U64) {
             length
         } else {
@@ -282,7 +282,7 @@ impl PackIO /*核心*/ {
 impl PackIO /*读*/ {
     pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
         let mut file = &self.file;
-        let block_data_buf = vec![0; MANIFEST_DATA_BLOCK_LEN];
+        let block_data_buf = vec![0; DATA_BLOCK_LEN];
         let mut block_data_buf = block_data_buf;
         //设置文件指针
         file.seek(SeekFrom::Start(file_pos))?;
@@ -298,7 +298,7 @@ impl PackIO /*读*/ {
                 block_len
             )))?;
         }
-        let l_len = usize::try_from(block_len).unwrap() - MANIFEST_DATA_BLOCK_LEN;
+        let l_len = usize::try_from(block_len).unwrap() - DATA_BLOCK_LEN;
         let block_data = if l_len > 0 {
             let mut l_block_buf = vec![0; l_len];
             file.read_exact(&mut l_block_buf)?;

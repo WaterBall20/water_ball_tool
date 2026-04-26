@@ -27,7 +27,7 @@ const DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
 //总大小
 const DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
 //数据块大小
-const MANIFEST_DATA_BLOCK_LEN: usize = 96; //1024;
+const DATA_BLOCK_LEN: usize = 96; //1024;
 
 const DATA_DATA_BLOCK_LEN: u64 = 4 * 1024 * 1024;
 
@@ -1017,7 +1017,7 @@ impl ManifestDataBlock /*函数*/ {
     }
 
     fn from_block_data_new(block_data: Vec<u8>, file_pos: u64) -> io::Result<Self> {
-        if block_data.len().is_multiple_of(MANIFEST_DATA_BLOCK_LEN) {
+        if block_data.len().is_multiple_of(DATA_BLOCK_LEN) {
             let (is_a_data, data) = Self::get_data2(&block_data)?;
             let data_len = data.len() as u64;
             let hash_value = Self::get_hash(&block_data)?.to_vec();
@@ -1072,7 +1072,7 @@ impl ManifestDataBlock /*函数*/ {
     }
     fn get_data2(data: &[u8]) -> io::Result<(bool, &[u8])> {
         //对齐判断
-        if data.len().is_multiple_of(MANIFEST_DATA_BLOCK_LEN) {
+        if data.len().is_multiple_of(DATA_BLOCK_LEN) {
             let ab_block_data_len = data.len() / 2;
             //AB数据分开
             let a_data = &data[..ab_block_data_len];
@@ -1211,10 +1211,10 @@ impl ManifestDataBlock /*函数*/ {
             + MANIFEST_DATA_BLOCK_DATA_VER_LEN * 2
             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN;
         let block_len = block_ab_len * 2;
-        let block_ab_len = block_len / MANIFEST_DATA_BLOCK_LEN;
+        let block_ab_len = block_len / DATA_BLOCK_LEN;
         let block_len = block_ab_len + 1;
-        let block_len = block_len * MANIFEST_DATA_BLOCK_LEN;
-        assert!(block_len.is_multiple_of(MANIFEST_DATA_BLOCK_LEN));
+        let block_len = block_len * DATA_BLOCK_LEN;
+        assert!(block_len.is_multiple_of(DATA_BLOCK_LEN));
         block_len
     }
 
@@ -1306,13 +1306,13 @@ impl ManifestDataBlock /*实例*/ {
 fn get_block_len_us() {
     assert_eq!(
         ManifestDataBlock::get_block_len_us(
-            MANIFEST_DATA_BLOCK_LEN / 2
+            DATA_BLOCK_LEN / 2
                 - MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                 - MANIFEST_DATA_BLOCK_DATA_VER_LEN
                 - MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                 + 1
         ),
-        MANIFEST_DATA_BLOCK_LEN * 2
+        DATA_BLOCK_LEN * 2
     );
 }
 
