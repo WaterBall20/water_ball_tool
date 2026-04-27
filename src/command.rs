@@ -35,12 +35,7 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
         None => false,
     };
     //进度条
-    let pb = if let Some(mp) = mp {
-        let pb = mp.add(ProgressBar::new_spinner());
-        Some(pb)
-    } else {
-        None
-    };
+    let pb = create_pb(mp);
 
     let files_list = m_search(path, skip_symlink, Option::from(&pb)).unwrap();
 
@@ -63,9 +58,18 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
     } /**/
 }
 
+fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
+    if let Some(mp) = mp {
+        let pb = mp.add(ProgressBar::new_spinner());
+        pb.enable_steady_tick(Duration::from_millis(100)); // 让转标自己动起来
+        Some(pb)
+    } else {
+        None
+    }
+}
+
 fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Result<FilesList> {
     if let Some(pb) = &pb {
-        pb.enable_steady_tick(Duration::from_millis(100)); // 让转标自己动起来
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg} ({pos} 个文件和目录)")
@@ -143,12 +147,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     };
 
     //进度条
-    let pb = if let Some(mp) = mp {
-        let pb = mp.add(ProgressBar::new_spinner());
-        Some(pb)
-    } else {
-        None
-    };
+    let pb = create_pb(mp);
     info!("开始准备打包");
     info!("创建新包文件并初始化");
     let mut pack =
@@ -180,7 +179,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         &files_list,
         in_dir_path.as_ref(),
     )
-        .expect("写入包文件错误");
+    .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
@@ -366,12 +365,7 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     let out_dir_path = &args[1];
 
     //进度条
-    let pb = if let Some(mp) = mp {
-        let pb = mp.add(ProgressBar::new_spinner());
-        Some(pb)
-    } else {
-        None
-    };
+    let pb = create_pb(mp);
     info!("开始准备解包");
     info!("打开包文件");
     let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
@@ -577,12 +571,7 @@ fn wbfp_h(args: &[String], mp: Option<&MultiProgress>) {
     let pack_path = &args[0];
 
     //进度条
-    let pb = if let Some(mp) = mp {
-        let pb = mp.add(ProgressBar::new_spinner());
-        Some(pb)
-    } else {
-        None
-    };
+    let pb = create_pb(mp);
     info!("开始准备哈希校验");
     info!("打开包文件");
     let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
@@ -657,7 +646,10 @@ fn verify_hash_inner<'a>(
             let items_name = match pack.get_struct_item_name_list(path) {
                 Ok(v) => v,
                 Err(err) => {
-                    error!(r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#, path.display());
+                    error!(
+                        r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#,
+                        path.display()
+                    );
                     return pb_c;
                 }
             };
