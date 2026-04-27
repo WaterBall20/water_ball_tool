@@ -4,9 +4,11 @@
 
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::io;
+use std::{io, thread};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -141,35 +143,32 @@ impl FileFinder {
         }
     }
 
-    fn m_search<'a>(
-        &'a self,
+    fn m_search(
         path: &Path,
         skip_symlink: bool,
-        hash_map: &mut HashMap<String, FileInfo>,
-        mut callback: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
-    ) -> MSearchReturn<'a> {
+        //父目录发送对象
+        s_tx: Sender<(FileInfo, MSearchReturn)>,
+        //进度发送对象
+        pb: Sender<(u64, u64)>,
+    ) {
         let mut data_length = 0;
         let mut file_count = 0;
         let mut dir_count = 0;
+
         //获取文件列表
         for entry in match path.read_dir() {
             Ok(rd) => rd,
             Err(err) => match err.kind() {
                 ErrorKind::PermissionDenied => {
                     error!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, path.display());
-                    return MSearchReturn {
-                        callback,
-                        add_length: 0,
-                        add_file_count: 0,
-                        add_dir_count: 0,
-                    };
+                    return;
                 }
                 _ => {
                     panic!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, path.display());
                 }
             },
         }
-        .flatten()
+            .flatten()
         {
             let path_buf = entry.path();
             //println!("[消息]找到: '{path_buf:?}' ");
@@ -177,9 +176,8 @@ impl FileFinder {
                 info!("已跳过符号链接:{path_buf:?}");
             } else if path_buf.is_file() {
                 file_count += 1;
-                if let Some(ref mut cb) = callback {
-                    cb(1, 0);
-                }
+                //更新进度条d
+                pb.send((1, 0)).expect("发送进度更新失败");
                 //文件
                 let name = Self::get_file_name(&path_buf);
                 if let Some(name) = name {
@@ -194,7 +192,15 @@ impl FileFinder {
                             modified_time,
                             file_kind: FileKind::File,
                         };
-                        hash_map.insert(name, file_info);
+                        s_tx.send((
+                            file_info,
+                            MSearchReturn {
+                                add_length: len,
+                                add_file_count: 1,
+                                add_dir_count: 0,
+                            },
+                        ))
+                            .unwrap_or_else(|e| panic!("多线程发送错误，文件:{path_buf:?}, err:{e}"));
                         data_length += len;
                     } else {
                         error!("无法获取文件:{path_buf:?}的元数据");
@@ -202,88 +208,116 @@ impl FileFinder {
                 }
             } else if path_buf.is_dir() {
                 //目录
-                //循环链接判断
-                if path_buf.is_symlink() {
-                    warn!("目录：{path_buf:?}'，是符号链接");
-                    //链接循环检测
-                    let link_path = path_buf.read_link();
-                    if let Ok(link_path) = link_path
-                        && let Some(link_path) = link_path.to_str()
-                        && let Some(path) = path_buf.to_str()
-                    {
-                        //判断链接的目标路径是否为父路径
-                        if path.starts_with(link_path)
-                            || (link_path.starts_with('.') && link_path.ends_with('.'))
+                let pb = pb.clone();
+                let s_tx = s_tx.clone();
+                let t_path_buf = path_buf.clone();
+                thread::spawn(move || {
+                    let path_buf = t_path_buf;
+                    //循环链接判断
+                    if path_buf.is_symlink() {
+                        warn!("目录：{path_buf:?}'，是符号链接");
+                        //链接循环检测
+                        let link_path = path_buf.read_link();
+                        if let Ok(link_path) = link_path
+                            && let Some(link_path) = link_path.to_str()
+                            && let Some(path) = path_buf.to_str()
                         {
-                            warn!(r#"检测到符号链接循环，已跳过:"{path}" 链接到 "{link_path}""#);
-                            continue;
+                            //判断链接的目标路径是否为父路径
+                            if path.starts_with(link_path)
+                                || (link_path.starts_with('.') && link_path.ends_with('.'))
+                            {
+                                warn!(
+                                    r#"检测到符号链接循环，已跳过:"{path}" 链接到 "{link_path}""#
+                                );
+                            }
                         }
                     }
-                }
-                let name = Self::get_file_name(&path_buf);
-                if let Some(name) = name {
-                    let name = String::from(name);
-                    //获取目录元数据
-                    if let Ok(metadata) = path_buf.metadata() {
-                        dir_count += 1;
-                        if let Some(ref mut cb) = callback {
-                            cb(0, 1);
+                    let name = Self::get_file_name(&path_buf);
+                    if let Some(name) = name {
+                        let name = String::from(name);
+                        //获取目录元数据
+                        if let Ok(metadata) = path_buf.metadata() {
+                            dir_count += 1;
+                            pb.send((0, 1)).expect("发送进度失败");
+                            let (tx, rx) = mpsc::channel();
+                            let mut files_list = HashMap::new();
+                            let modified_time = Self::get_file_modified(&metadata);
+                            let mut r = MSearchReturn {
+                                add_length: 0,
+                                add_file_count: 0,
+                                add_dir_count: 0,
+                            };
+                            Self::m_search(
+                                path_buf.as_path(),
+                                skip_symlink,
+                                tx.clone(),
+                                pb.clone(),
+                            );
+                            drop(tx);
+                            for (info, sr) in rx {
+                                files_list.insert(info.name.clone(), info);
+                                r.add_length += sr.add_length;
+                                r.add_file_count += sr.add_file_count;
+                                r.add_dir_count += sr.add_dir_count;
+                            }
+                            let file_info = FileInfo {
+                                name: String::from(&name),
+                                length: r.add_length,
+                                modified_time,
+                                file_kind: FileKind::Dir(Dir {
+                                    files_list,
+                                    file_count: r.add_file_count,
+                                    dir_count: r.add_dir_count,
+                                }),
+                            };
+                            data_length += r.add_length;
+                            file_count += r.add_file_count;
+                            dir_count += r.add_dir_count;
+                            s_tx.send((
+                                file_info,
+                                MSearchReturn {
+                                    add_length: data_length,
+                                    add_file_count: file_count,
+                                    add_dir_count: dir_count,
+                                },
+                            ))
+                                .expect(&format!("多线程发送失败，目录: {path_buf:?}"));
+                        } else {
+                            error!("无法获取目录: {path_buf:?}的元数据");
                         }
-                        let mut files_list = HashMap::new();
-                        let modified_time = Self::get_file_modified(&metadata);
-
-                        let r = self.m_search(
-                            path_buf.as_path(),
-                            skip_symlink,
-                            &mut files_list,
-                            callback,
-                        );
-                        callback = r.callback;
-
-                        let file_info = FileInfo {
-                            name: String::from(&name),
-                            length: r.add_length,
-                            modified_time,
-                            file_kind: FileKind::Dir(Dir {
-                                files_list,
-                                file_count: r.add_file_count,
-                                dir_count: r.add_dir_count,
-                            }),
-                        };
-                        hash_map.insert(name, file_info);
-                        data_length += r.add_length;
-                        file_count += r.add_file_count;
-                        dir_count += r.add_dir_count;
-                    } else {
-                        error!("无法获取目录: {path_buf:?}的元数据");
                     }
-                }
+                });
             } else if path_buf.is_symlink() {
                 warn!("符号链接 {path_buf:?} 已断。");
             } else {
                 error!("{path_buf:?} 无法访问");
             }
         }
-        MSearchReturn {
-            callback,
-            add_length: data_length,
-            add_file_count: file_count,
-            add_dir_count: dir_count,
-        }
     }
 
-    pub fn search<'a>(
-        &'a self,
+    pub fn search(
+        &self,
         path: &Path,
         skip_symlink: bool,
-        callback: Option<&'a mut dyn FnMut(u64, u64)>,
+        pb: Sender<(u64, u64)>,
     ) -> io::Result<FilesList> {
         //判断是否为目录
         if path.is_dir() {
             let mut files_list = HashMap::new();
-            let mut r = self.m_search(path, skip_symlink, &mut files_list, callback);
-            if let Some(ref mut cb) = r.callback {
-                cb(0, 0);
+            //多线程通道
+            let (tx, rx) = mpsc::channel();
+            let mut r = MSearchReturn {
+                add_length: 0,
+                add_dir_count: 0,
+                add_file_count: 0,
+            };
+            Self::m_search(path, skip_symlink, tx.clone(), pb);
+            drop(tx);
+            for (file, sr) in rx {
+                files_list.insert(file.name.clone(), file);
+                r.add_length += sr.add_length;
+                r.add_file_count += sr.add_file_count;
+                r.add_dir_count += sr.add_dir_count;
             }
             //返回值
             Ok(FilesList {
@@ -312,8 +346,7 @@ impl FileFinder {
     }
 }
 
-struct MSearchReturn<'a> {
-    callback: Option<&'a mut dyn FnMut(u64, u64)>,
+struct MSearchReturn {
     add_length: u64,
     add_file_count: u64,
     add_dir_count: u64,

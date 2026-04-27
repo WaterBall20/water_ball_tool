@@ -7,7 +7,8 @@ use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{fs, io};
+use std::{fs, io, thread};
+use std::sync::mpsc;
 use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
 use water_ball_tool::wb_files_pack::allocator::Allocator;
@@ -68,7 +69,11 @@ fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
     }
 }
 
-fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Result<FilesList> {
+fn m_search(
+    path: &str,
+    skip_symlink: bool,
+    pb: Option<&ProgressBar>,
+) -> io::Result<FilesList> {
     if let Some(pb) = &pb {
         pb.set_style(
             ProgressStyle::default_spinner()
@@ -83,24 +88,27 @@ fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Res
     //搜索
     let ff = FileFinder;
     if let Some(pb) = &pb {
-        ff.search(
-            path.as_ref(),
-            skip_symlink,
-            Some(
-                &mut (|add_file_count, add_dir_count| {
-                    file_count += add_file_count;
-                    dir_count += add_dir_count;
-                    let all_count = file_count + dir_count;
-                    pb.set_position(all_count);
-                    //10的倍数才更新
-                    if all_count.is_multiple_of(10) {
-                        pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
-                    }
-                }),
-            ),
-        )
+        let (tx, rx) = mpsc::channel();
+        let (rtx, rrx) = mpsc::channel();
+        let t_path = path.to_string();
+        thread::spawn(move || {
+            rtx.send(ff.search(t_path.as_ref(), skip_symlink, tx))
+                .expect("线程发送结果错误");
+        });
+        for (add_file, add_dir) in rx {
+            file_count += add_file;
+            dir_count += add_dir;
+            let all_count = file_count + dir_count;
+            pb.set_position(all_count);
+            //10的倍数才更新
+            if all_count.is_multiple_of(10) {
+                pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
+            }
+        }
+        rrx.recv().expect("无法获取结果")
     } else {
-        ff.search(path.as_ref(), skip_symlink, None)
+        let (tx, _) = mpsc::channel();
+        ff.search(path.as_ref(), skip_symlink, tx)
     }
 }
 
