@@ -4,12 +4,12 @@
 
 use std::collections::HashMap;
 use std::fs::Metadata;
-use std::{io, thread};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
 use std::time::UNIX_EPOCH;
+use std::{io, thread};
 
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
@@ -151,10 +151,6 @@ impl FileFinder {
         //进度发送对象
         pb: Sender<(u64, u64)>,
     ) {
-        let mut data_length = 0;
-        let mut file_count = 0;
-        let mut dir_count = 0;
-
         //获取文件列表
         for entry in match path.read_dir() {
             Ok(rd) => rd,
@@ -175,7 +171,6 @@ impl FileFinder {
             if path_buf.is_symlink() && skip_symlink {
                 info!("已跳过符号链接:{path_buf:?}");
             } else if path_buf.is_file() {
-                file_count += 1;
                 //更新进度条d
                 pb.send((1, 0)).expect("发送进度更新失败");
                 //文件
@@ -201,7 +196,6 @@ impl FileFinder {
                             },
                         ))
                             .unwrap_or_else(|e| panic!("多线程发送错误，文件:{path_buf:?}, err:{e}"));
-                        data_length += len;
                     } else {
                         error!("无法获取文件:{path_buf:?}的元数据");
                     }
@@ -237,7 +231,6 @@ impl FileFinder {
                         let name = String::from(name);
                         //获取目录元数据
                         if let Ok(metadata) = path_buf.metadata() {
-                            dir_count += 1;
                             pb.send((0, 1)).expect("发送进度失败");
                             let (tx, rx) = mpsc::channel();
                             let mut files_list = HashMap::new();
@@ -245,7 +238,7 @@ impl FileFinder {
                             let mut r = MSearchReturn {
                                 add_length: 0,
                                 add_file_count: 0,
-                                add_dir_count: 0,
+                                add_dir_count: 1,
                             };
                             Self::m_search(
                                 path_buf.as_path(),
@@ -270,18 +263,11 @@ impl FileFinder {
                                     dir_count: r.add_dir_count,
                                 }),
                             };
-                            data_length += r.add_length;
-                            file_count += r.add_file_count;
-                            dir_count += r.add_dir_count;
-                            s_tx.send((
-                                file_info,
-                                MSearchReturn {
-                                    add_length: data_length,
-                                    add_file_count: file_count,
-                                    add_dir_count: dir_count,
-                                },
-                            ))
-                                .expect(&format!("多线程发送失败，目录: {path_buf:?}"));
+                            {
+                                s_tx.send((file_info, r)).unwrap_or_else(|e| {
+                                    panic!("多线程发送失败，目录: {path_buf:?}, err:{e}")
+                                });
+                            }
                         } else {
                             error!("无法获取目录: {path_buf:?}的元数据");
                         }
