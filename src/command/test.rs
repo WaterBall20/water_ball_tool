@@ -59,7 +59,6 @@ fn ff_out_file_longtime() {
     #[cfg(target_os = "windows")]
     let args: Vec<String> = vec![String::from("C:/"), out_file_path.clone()];
     ff(args.as_slice(), Some(&mp));
-    _ = fs::remove_file(&out_file_path);
 }
 //文件查找器不输出文件
 #[test]

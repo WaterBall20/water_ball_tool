@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::fs::Metadata;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::sync::mpsc::Sender;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
@@ -150,6 +150,10 @@ impl FileFinder {
         s_tx: Sender<(FileInfo, MSearchReturn)>,
         //进度发送对象
         pb: Sender<(u64, u64)>,
+        //
+        thread_count: Arc<Mutex<usize>>,
+        //
+        max_thread_count: usize,
     ) {
         //获取文件列表
         for entry in match path.read_dir() {
@@ -205,7 +209,9 @@ impl FileFinder {
                 let pb = pb.clone();
                 let s_tx = s_tx.clone();
                 let t_path_buf = path_buf.clone();
-                thread::spawn(move || {
+                let thread_count = thread_count.clone();
+                let t_thread_count = thread_count.clone();
+                let fn1 = move |is_thread| {
                     let path_buf = t_path_buf;
                     //循环链接判断
                     if path_buf.is_symlink() {
@@ -245,6 +251,8 @@ impl FileFinder {
                                 skip_symlink,
                                 tx.clone(),
                                 pb.clone(),
+                                t_thread_count.clone(),
+                                max_thread_count,
                             );
                             drop(tx);
                             for (info, sr) in rx {
@@ -272,7 +280,22 @@ impl FileFinder {
                             error!("无法获取目录: {path_buf:?}的元数据");
                         }
                     }
-                });
+                    if is_thread {
+                        let mut thread_count =
+                            t_thread_count.lock().expect("获取thread_count锁错误");
+                        *thread_count -= 1;
+                    }
+                };
+                {
+                    let mut thread_count = thread_count.lock().expect("获取thread_count锁错误");
+                    if *thread_count < max_thread_count {
+                        *thread_count += 1;
+                        thread::spawn(|| fn1(true));
+                    } else {
+                        drop(thread_count);
+                        fn1(false)
+                    }
+                }
             } else if path_buf.is_symlink() {
                 warn!("符号链接 {path_buf:?} 已断。");
             } else {
@@ -286,6 +309,7 @@ impl FileFinder {
         path: &Path,
         skip_symlink: bool,
         pb: Sender<(u64, u64)>,
+        max_thread_count: usize,
     ) -> io::Result<FilesList> {
         //判断是否为目录
         if path.is_dir() {
@@ -297,7 +321,14 @@ impl FileFinder {
                 add_dir_count: 0,
                 add_file_count: 0,
             };
-            Self::m_search(path, skip_symlink, tx.clone(), pb);
+            Self::m_search(
+                path,
+                skip_symlink,
+                tx.clone(),
+                pb,
+                Arc::new(Mutex::new(0)),
+                max_thread_count,
+            );
             drop(tx);
             for (file, sr) in rx {
                 files_list.insert(file.name.clone(), file);
