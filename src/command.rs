@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 use std::{fs, io, thread};
-use std::sync::mpsc;
 use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
 use water_ball_tool::wb_files_pack::allocator::Allocator;
@@ -20,6 +20,8 @@ use water_ball_tool::wb_files_pack::{
 mod test;
 
 static BUF_LEN: usize = 1024 * 1024;
+
+const PROGRESS_STYLE_TEMPLATE: &str = "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
 
 //文件查找器
 pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
@@ -69,11 +71,9 @@ fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
     }
 }
 
-fn m_search(
-    path: &str,
-    skip_symlink: bool,
-    pb: Option<&ProgressBar>,
-) -> io::Result<FilesList> {
+const SEARCH_MAX_THREAD_COUNT: usize = 64;
+
+fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Result<FilesList> {
     if let Some(pb) = &pb {
         pb.set_style(
             ProgressStyle::default_spinner()
@@ -92,7 +92,7 @@ fn m_search(
         let (rtx, rrx) = mpsc::channel();
         let t_path = path.to_string();
         thread::spawn(move || {
-            rtx.send(ff.search(t_path.as_ref(), skip_symlink, tx))
+            rtx.send(ff.search(t_path.as_ref(), skip_symlink, tx, SEARCH_MAX_THREAD_COUNT))
                 .expect("线程发送结果错误");
         });
         for (add_file, add_dir) in rx {
@@ -108,7 +108,7 @@ fn m_search(
         rrx.recv().expect("无法获取结果")
     } else {
         let (tx, _) = mpsc::channel();
-        ff.search(path.as_ref(), skip_symlink, tx)
+        ff.search(path.as_ref(), skip_symlink, tx, SEARCH_MAX_THREAD_COUNT)
     }
 }
 
@@ -168,13 +168,10 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     //包文件===
     if let Some(pb) = &pb {
         let total_files = files_list.data_length();
-        // 关键点：原地修改进度条属性
         pb.set_length(total_files);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
-                )
+                .template(PROGRESS_STYLE_TEMPLATE)
                 .unwrap()
                 .progress_chars("=>-"),
         );
@@ -187,7 +184,7 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
         &files_list,
         in_dir_path.as_ref(),
     )
-    .expect("写入包文件错误");
+        .expect("写入包文件错误");
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
@@ -198,12 +195,12 @@ fn write_pack(
 ) -> io::Result<()> {
     fn s_write_pack<'a>(
         pack: &mut Allocator,
-        mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
+        mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String, String) + 'a)>,
         info_list: &HashMap<String, FileInfo>,
         in_s_path_buf: &Path,
         pack_s_path_buf: &Path,
         run_buf: &mut [u8],
-    ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64)>> {
+    ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String, String)>> {
         for (name, info) in info_list {
             let this_in_path = in_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
@@ -236,14 +233,16 @@ fn write_pack(
     let mut this_all_write_len = 0;
     let mut this_all_write_file_count = 0;
     let all_file_count = files_list.file_count();
-    let mut binding = |add_len, add_file_count| {
+    let mut binding = |add_len, add_file_count, f_path: String, p_path: String| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (files_list.data_length() as f64)) * 100.0;
             pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
+                \nFile path: {f_path}\
+                \nPack path: {p_path}"
             ));
         }
     };
@@ -263,7 +262,7 @@ fn write_pack(
 
 fn from_file_write_to_pack(
     pack_man: &mut Allocator,
-    pb_c: &mut Option<&mut dyn FnMut(u64, u64)>,
+    pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
     run_buf: &mut [u8],
     info: &FileInfo,
     this_in_path: &PathBuf,
@@ -281,7 +280,12 @@ fn from_file_write_to_pack(
         );
     }
     if let Some(pb_c) = pb_c {
-        pb_c(0, 1);
+        pb_c(
+            0,
+            1,
+            this_in_path.display().to_string(),
+            this_pack_path.display().to_string(),
+        );
     }
     //尝试打开文件
     let mut in_file = match File::open(this_in_path) {
@@ -338,7 +342,12 @@ fn from_file_write_to_pack(
                         if let Some(pb_c) = pb_c {
                             let l_len = write_len - lase_up_pb_c_write_len;
                             if l_len > 10 * (BUF_LEN as u64) {
-                                pb_c(l_len, 0);
+                                pb_c(
+                                    l_len,
+                                    0,
+                                    this_in_path.display().to_string(),
+                                    this_pack_path.display().to_string(),
+                                );
                                 lase_up_pb_c_write_len = write_len;
                             }
                         }
@@ -357,7 +366,12 @@ fn from_file_write_to_pack(
     }
     //不论是否写入成功都对齐进度条
     if let Some(pb_c) = pb_c {
-        pb_c(info.length() - write_len, 0);
+        pb_c(
+            info.length() - write_len,
+            0,
+            this_in_path.display().to_string(),
+            this_pack_path.display().to_string(),
+        );
     }
 }
 //水球包文件解包
@@ -391,12 +405,12 @@ fn read_pack(
 ) -> io::Result<()> {
     fn s_read_pack<'a>(
         pack_man: &mut Allocator,
-        mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
+        mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String, String) + 'a)>,
         pack_struct_items: &HashMap<String, PackStructItem>,
         out_s_path_buf: &Path,
         pack_s_path_buf: &Path,
         run_buf: &mut [u8],
-    ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64)>> {
+    ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String, String)>> {
         for (name, item) in pack_struct_items {
             let this_out_path = out_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
@@ -438,8 +452,10 @@ fn read_pack(
         Ok(pb_c)
     }
 
-    //加载所有结构和元数据
+    //
+    info!("加载所有结构项和元数据");
     pack_man.load_all_data(false)?;
+    info!("加载完成");
 
     //获取根列表
     let root_struct_list = pack_man.get_root_struct_items()?;
@@ -454,22 +470,22 @@ fn read_pack(
         pb.set_length(data_len);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
-                )
+                .template(PROGRESS_STYLE_TEMPLATE)
                 .unwrap()
                 .progress_chars("=>-"),
         );
         pb.set_message("0.00%");
     }
-    let mut binding = |add_len, add_file_count| {
+    let mut binding = |add_len, add_file_count, f_path, p_path| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
             pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]\
+                \nPack path: {p_path}\
+                \nFile path: {f_path}"
             ));
         }
     };
@@ -489,7 +505,7 @@ fn read_pack(
 
 fn pack_read_write_to_file(
     pack_man: &mut Allocator,
-    pb_c: &mut Option<&mut dyn FnMut(u64, u64)>,
+    pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
     run_buf: &mut [u8],
     metadata: &PackFileMetadata,
     this_out_path: &PathBuf,
@@ -507,7 +523,12 @@ fn pack_read_write_to_file(
         );
     }
     if let Some(pb_c) = pb_c {
-        pb_c(0, 1);
+        pb_c(
+            0,
+            1,
+            this_pack_path.display().to_string(),
+            this_out_path.display().to_string(),
+        );
     }
     //尝试打开虚拟文件
     let mut in_file = match pack_man.get_file_wr(this_pack_path, false) {
@@ -551,7 +572,12 @@ fn pack_read_write_to_file(
                         if let Some(pb_c) = pb_c {
                             let l_len = write_len - lase_up_pb_c_write_len;
                             if l_len > 10 * (BUF_LEN as u64) {
-                                pb_c(l_len, 0);
+                                pb_c(
+                                    l_len,
+                                    0,
+                                    this_pack_path.display().to_string(),
+                                    this_out_path.display().to_string(),
+                                );
                                 lase_up_pb_c_write_len = write_len;
                             }
                         }
@@ -570,7 +596,12 @@ fn pack_read_write_to_file(
     }
     //不论是否写入成功都对齐进度条
     if let Some(pb_c) = pb_c {
-        pb_c(metadata.len() - write_len, 0);
+        pb_c(
+            metadata.len() - write_len,
+            0,
+            this_pack_path.display().to_string(),
+            this_out_path.display().to_string(),
+        );
     }
 }
 //包文件哈希校验
@@ -590,7 +621,9 @@ fn wbfp_h(args: &[String], mp: Option<&MultiProgress>) {
 }
 
 fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()> {
+    info!("加载所有结构项和元数据");
     pack.load_all_data(false)?;
+    info!("加载完成");
     let root_name_list = pack.get_root_struct_item_name_list()?;
     let mut this_all_write_len = 0;
     let mut this_all_write_file_count = 0;
@@ -604,21 +637,22 @@ fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()>
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(
-                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {msg:>7} ({eta})",
+                    PROGRESS_STYLE_TEMPLATE
                 )
                 .unwrap()
                 .progress_chars("=>-"),
         );
         pb.set_message("0.00%");
     }
-    let mut binding = |add_len, add_file_count| {
+    let mut binding = |add_len, add_file_count, p_path| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
             pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]"
+                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
+                \nPack path: {p_path}"
             ));
         }
     };
@@ -640,8 +674,8 @@ fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()>
 fn verify_hash_inner<'a>(
     pack: &mut Allocator,
     path: &Path,
-    mut pb_c: Option<&'a mut (dyn FnMut(u64, u64) + 'a)>,
-) -> Option<&'a mut dyn FnMut(u64, u64)> {
+    mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String) + 'a)>,
+) -> Option<&'a mut dyn FnMut(u64, u64, String)> {
     let item = match pack.get_pack_struct_item(path) {
         Ok(v) => v,
         Err(err) => {
@@ -686,7 +720,7 @@ fn verify_hash_inner<'a>(
                 _ => (),
             }
             if let Some(pb) = &mut pb_c {
-                pb(rw.get_len(), 1);
+                pb(rw.get_len(), 1, path.display().to_string());
             }
             pb_c
         }
