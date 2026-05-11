@@ -4,23 +4,18 @@
 use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{
-    PackFileMetadata, PackFileMetadataType, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
+    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, PackFileMetadata, PackFileMetadataType,
 };
 use blake3::{Hash, Hasher};
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
-#[cfg(not(target_os = "windows"))]
-use std::{fs::File, os::unix::fs::FileExt};
 
 pub struct PackFileWR {
     //管理器实例
     manager: Arc<Mutex<WBFPManager>>,
     //包文件io
     pack_io: Arc<Mutex<PackIO>>,
-    //包文件文件实例
-    #[cfg(not(target_os = "windows"))]
-    pack_file: File,
     //文件位置
     pos: u64,
     //缓存_文件分配的位置当前索引
@@ -116,13 +111,9 @@ impl PackFileWR {
         metadata: PackFileMetadata,
         end_pos: bool,
     ) -> io::Result<PackFileWR> {
-        #[cfg(not(target_os = "windows"))]
-        let pack_file = pack_io.clone().lock().unwrap().try_clone_pack_file()?;
         Ok(PackFileWR {
             manager,
             pack_io: pack_io.clone(),
-            #[cfg(not(target_os = "windows"))]
-            pack_file,
             pos: if end_pos { metadata.len } else { 0 },
             temp_pos_index: 0,
             temp_pos_this_len: 0,
@@ -452,9 +443,7 @@ impl Seek for PackFileWR {
 
 impl Read for PackFileWR {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        #[cfg(target_os = "windows")]
         let pack_file = self.pack_io.clone();
-        #[cfg(target_os = "windows")]
         let mut pack_file = pack_file
             .lock()
             .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
@@ -465,15 +454,11 @@ impl Read for PackFileWR {
         //读取
         for (pos, len) in pos_s {
             let this_buf = &mut buf[read_len..read_len + usize::try_from(len).unwrap()];
-            #[cfg(target_os = "windows")]
-            {
-                //更改文件位置
-                pack_file.set_pos_read(pos)?;
-                //读取数据
-                pack_file.read_exact(this_buf)?;
-            }
-            #[cfg(not(target_os = "windows"))]
-            self.pack_file.read_exact_at(this_buf, pos)?;
+
+            //更改文件位置
+            pack_file.set_pos_read(pos)?;
+            //读取数据
+            pack_file.read_exact(this_buf)?;
             read_len += usize::try_from(len).unwrap();
         }
         self.add_pos(read_len as u64)?;
@@ -484,17 +469,12 @@ impl Read for PackFileWR {
 impl Write for PackFileWR {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.is_write = true;
-        #[cfg(target_os = "windows")]
         let manager = self.manager.clone();
-        #[cfg(target_os = "windows")]
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        #[cfg(target_os = "windows")]
         manager.this_write_lock()?;
-        #[cfg(target_os = "windows")]
         let pack_file = self.pack_io.clone();
-        #[cfg(target_os = "windows")]
         let mut pack_file = pack_file
             .lock()
             .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
@@ -514,25 +494,22 @@ impl Write for PackFileWR {
         for (pos, len) in pos_s {
             let len = usize::try_from(len).unwrap();
             let this_data = &buf[write_len..write_len + len];
-            #[cfg(target_os = "windows")]
-            {
-                //更改文件位置
-                pack_file.set_pos_write(pos)?;
-                //写入数据
-                pack_file.write_all(this_data)?;
-            }
-            #[cfg(not(target_os = "windows"))]
-            self.pack_file.write_all_at(this_data, pos)?;
+
+            //更改文件位置
+            pack_file.set_pos_write(pos)?;
+            //写入数据
+            pack_file.write_all(this_data)?;
+
             write_len += len;
 
             //TODO:未来功能：写入优化、写时复制
         }
         self.add_pos(write_len as u64)?;
         //大小判断，更新大小
-        if let Some(metadata) = &mut self.metadata {
-            if self.pos > metadata.len {
-                metadata.len = self.pos
-            }
+        if let Some(metadata) = &mut self.metadata
+            && self.pos > metadata.len
+        {
+            metadata.len = self.pos
         }
         Ok(write_len)
     }

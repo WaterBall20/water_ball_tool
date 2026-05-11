@@ -698,7 +698,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "indicatif",
- "log",
  "pretty_assertions",
  "rand",
  "serde",
