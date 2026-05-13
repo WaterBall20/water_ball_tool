@@ -1,4 +1,4 @@
-use crate::wb_files_pack::allocator::Allocator;
+use crate::{tools::TestTool, wb_files_pack::allocator::Allocator};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -7,20 +7,6 @@ use std::path::Path;
 static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/allocator/ok";
 static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/allocator/err";
 
-fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
-    let pack_path = path
-        .as_ref()
-        .to_str()
-        .expect("无法将路径转换成String")
-        .to_string();
-    _ = fs::remove_file(&pack_path);
-    let mut pack_json_path = pack_path.clone();
-    pack_json_path.push_str(".wbm");
-    _ = fs::remove_file(pack_json_path);
-    let mut pack_lock_path = pack_path.clone();
-    pack_lock_path.push_str(".lock");
-    _ = fs::remove_file(pack_lock_path);
-}
 //OK===
 
 //哈希校验===
@@ -46,13 +32,13 @@ fn create_new_pack_file() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     let pack_path = pack_dir.join("pack");
-    remove_test_pack_files(&pack_path);
+    TestTool::remove_test_pack_files(&pack_path);
     //创建文件
     {
         Allocator::create_new_pack_file2(&pack_path).unwrap();
         println!("已创建文件");
     }
-    remove_test_pack_files(&pack_path);
+    TestTool::remove_test_pack_files(&pack_path);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -65,7 +51,7 @@ fn create_new_pack_file_and_create_dir() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     let pack_path = pack_dir.join("pack");
-    remove_test_pack_files(&pack_path);
+    TestTool::remove_test_pack_files(&pack_path);
     //创建文件
     {
         let mut pack = Allocator::create_new_pack_file2(&pack_path).unwrap();
@@ -75,7 +61,7 @@ fn create_new_pack_file_and_create_dir() {
         pack.get_dir(test_pack_path).expect("获取虚拟目录失败");
         println!("已创建文件");
     }
-    remove_test_pack_files(&pack_path);
+    TestTool::remove_test_pack_files(&pack_path);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -91,7 +77,7 @@ fn create_new_pack_file_and_create_file_wr() {
     fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     //测试文件
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = Allocator::create_new_pack_file2(&pack_file).unwrap();
@@ -119,7 +105,7 @@ fn create_new_pack_file_and_create_file_wr() {
         pretty_assertions::assert_eq!(write_data2, read_data2);
         pretty_assertions::assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -136,7 +122,7 @@ fn create_new_pack_file_and_create_file_wr_and_open_pack_file_wr() {
     fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     //测试文件
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //开始创建
     let test_file_path1 = "Test/Test1";
     let test_file_path2 = "Test/Test2";
@@ -184,7 +170,7 @@ fn create_new_pack_file_and_create_file_wr_and_open_pack_file_wr() {
         pretty_assertions::assert_eq!(write_data1, read_data1);
         pretty_assertions::assert_eq!(write_data2, read_data2);
     }
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 //创建包文化并写入虚拟文件，不分离数据文件
@@ -198,7 +184,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
     fs::create_dir_all(pack_dir).unwrap();
     //测试文件
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = Allocator::create_pack_file(&pack_file, false, false, true).unwrap();
@@ -229,7 +215,7 @@ fn create_new_pack_file_no_s_data_file_and_create_file_wr() {
         pretty_assertions::assert_eq!(write_data2, read_data2);
         pretty_assertions::assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -245,7 +231,7 @@ fn create_new_pack_file_no_len_and_create_file_wr() {
     fs::create_dir_all(pack_dir).expect("创建测试目录失败");
     //测试文件
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = Allocator::create_new_pack_file2(&pack_file).unwrap();
@@ -272,7 +258,7 @@ fn create_new_pack_file_no_len_and_create_file_wr() {
         pretty_assertions::assert_eq!(write_data2, read_data2);
         pretty_assertions::assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -287,7 +273,7 @@ fn create_new_pack_file_no_len_and_no_s_data_file_and_create_file_wr() {
     fs::create_dir_all(pack_dir).unwrap();
     //测试文件
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //开始创建
     {
         let mut pack = Allocator::create_pack_file(&pack_file, false, false, true).unwrap();
@@ -313,7 +299,7 @@ fn create_new_pack_file_no_len_and_no_s_data_file_and_create_file_wr() {
         pretty_assertions::assert_eq!(write_data2, read_data2);
         pretty_assertions::assert_eq!(write_data1, read_data1);
     } //使用作用域实现自动释放
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -328,13 +314,13 @@ fn create_new_pack_file_err() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //
     Allocator::create_new_pack_file2(&pack_file).unwrap();
     //当上锁时，无法创建是正确的。
     let r = Allocator::create_new_pack_file2(&pack_file);
     if let Err(err) = r {
-        remove_test_pack_files(&pack_file);
+        TestTool::remove_test_pack_files(&pack_file);
         _ = fs::remove_dir_all(pack_dir);
         panic!("{}", err)
     }

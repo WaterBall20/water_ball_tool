@@ -2,6 +2,7 @@
 创建时间：2026/02/24 08:51
 */
 use crate::tools::PathTool;
+use crate::tools::TestTool;
 use crate::wb_files_pack::manager::{
     WBFPManager, DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_S_MANIFEST_FILE,
 };
@@ -17,20 +18,6 @@ use std::{fs, io};
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 
-fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
-    let pack_path = path
-        .as_ref()
-        .to_str()
-        .expect("无法将路径转换成String")
-        .to_string();
-    _ = fs::remove_file(&pack_path);
-    let mut pack_json_path = pack_path.clone();
-    pack_json_path.push_str(".wbm");
-    _ = fs::remove_file(pack_json_path);
-    let mut pack_lock_path = pack_path.clone();
-    pack_lock_path.push_str(".lock");
-    _ = fs::remove_file(pack_lock_path);
-}
 fn create_new_pack_file2(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     create_pack_file(pack_path, DEFAULT_COW, DEFAULT_S_MANIFEST_FILE, true)
 }
@@ -109,7 +96,7 @@ fn create_new_file_and_open_pack() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     let test_file_path = String::from("/Test/Test2/Test3");
     let test_data = vec![51, 31, 55, 6, 7, 8, 3, 67, 93];
     //
@@ -177,7 +164,7 @@ fn create_new_file_and_open_pack() {
             assert_eq!(a_item, b_item);
         }
     }
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -190,7 +177,7 @@ fn create_new_file_and_open_pack_manifest_ver() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //
     {
         //创建文件
@@ -203,7 +190,7 @@ fn create_new_file_and_open_pack_manifest_ver() {
     {
         open_pack_file(&pack_file);
     }
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -217,7 +204,7 @@ fn create_new_file_and_open_pack_err_manifest_ver1() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //
     {
         //创建文件
@@ -230,7 +217,7 @@ fn create_new_file_and_open_pack_err_manifest_ver1() {
     {
         open_pack_file(&pack_file);
     }
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }
 
@@ -243,7 +230,7 @@ fn create_new_file_and_open_pack_err_manifest_ver2() {
     let pack_dir: &Path = pack_dir.as_ref();
     fs::create_dir_all(pack_dir).unwrap();
     let pack_file = pack_dir.join("pack");
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     //
     {
         //创建文件
@@ -256,6 +243,6 @@ fn create_new_file_and_open_pack_err_manifest_ver2() {
     {
         open_pack_file(&pack_file);
     }
-    remove_test_pack_files(&pack_file);
+    TestTool::remove_test_pack_files(&pack_file);
     _ = fs::remove_dir_all(pack_dir);
 }

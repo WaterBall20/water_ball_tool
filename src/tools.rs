@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::fs;
 use std::path::Path;
 
 //内部路径工具
@@ -26,7 +28,7 @@ impl PathTool {
     }
 }
 
-#[must_use] 
+#[must_use]
 pub fn bytes_len_to_string(len: u64) -> String {
     const B_LEN: u64 = 1024;
     const K_LEN: u64 = B_LEN * 1024;
@@ -42,3 +44,23 @@ pub fn bytes_len_to_string(len: u64) -> String {
 }
 
 struct _WBFPTool {}
+
+#[cfg(test)]
+pub struct TestTool;
+#[cfg(test)]
+impl TestTool {
+    pub fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
+        let pack_path = path
+            .as_ref()
+            .to_str()
+            .expect("无法将路径转换成String")
+            .to_string();
+        _ = fs::remove_file(&pack_path);
+        let mut pack_json_path = pack_path.clone();
+        pack_json_path.push_str(".wbm");
+        _ = fs::remove_file(pack_json_path);
+        let mut pack_lock_path = pack_path.clone();
+        pack_lock_path.push_str(".lock");
+        _ = fs::remove_file(pack_lock_path);
+    }
+}

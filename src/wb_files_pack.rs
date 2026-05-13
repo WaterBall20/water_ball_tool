@@ -7,6 +7,7 @@ mod pack_io;
 #[cfg(test)]
 mod test;
 pub mod allocator;
+mod net_server;
 
 use crate::wb_files_pack::pack_io::PackIO;
 use std::collections::HashMap;

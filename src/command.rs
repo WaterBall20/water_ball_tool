@@ -21,7 +21,8 @@ mod test;
 
 static BUF_LEN: usize = 1024 * 1024;
 
-const PROGRESS_STYLE_TEMPLATE: &str = "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
+const PROGRESS_STYLE_TEMPLATE: &str =
+    "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
 
 //文件查找器
 pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
@@ -61,6 +62,7 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
     } /**/
 }
 
+//创建进度实例
 fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
     if let Some(mp) = mp {
         let pb = mp.add(ProgressBar::new_spinner());
@@ -68,6 +70,40 @@ fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
         Some(pb)
     } else {
         None
+    }
+}
+//设置进度样式：显示进度条
+fn set_pb_style2(pb: Option<&ProgressBar>, data_len: u64) {
+    if let Some(pb) = pb {
+        pb.set_length(data_len);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(PROGRESS_STYLE_TEMPLATE)
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb.set_message("0.00%");
+    }
+}
+
+fn update_pb(
+    pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
+    path1: &Path,
+    path2: &Path,
+    lase_up_pb_c_write_len: &mut u64,
+    write_len: &mut u64,
+) {
+    if let Some(pb_c) = pb_c {
+        let l_len = *write_len - *lase_up_pb_c_write_len;
+        if l_len > 10 * (BUF_LEN as u64) {
+            pb_c(
+                l_len,
+                0,
+                path1.display().to_string(),
+                path2.display().to_string(),
+            );
+            *lase_up_pb_c_write_len = *write_len;
+        }
     }
 }
 
@@ -330,18 +366,13 @@ fn from_file_write_to_pack(
                         }
                         write_len += this_write_len as u64;
                         //更新进度
-                        if let Some(pb_c) = pb_c {
-                            let l_len = write_len - lase_up_pb_c_write_len;
-                            if l_len > 10 * (BUF_LEN as u64) {
-                                pb_c(
-                                    l_len,
-                                    0,
-                                    this_in_path.display().to_string(),
-                                    this_pack_path.display().to_string(),
-                                );
-                                lase_up_pb_c_write_len = write_len;
-                            }
-                        }
+                        update_pb(
+                            pb_c,
+                            this_in_path,
+                            this_pack_path,
+                            &mut lase_up_pb_c_write_len,
+                            &mut write_len,
+                        );
                     }
                     Err(err) => {
                         error!("写入虚拟文件{this_pack_path:?}错误, 将跳过，err:{err}");
@@ -365,6 +396,7 @@ fn from_file_write_to_pack(
         );
     }
 }
+
 //水球包文件解包
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
@@ -456,17 +488,8 @@ fn read_pack(
     let attribute = pack_man.get_manifest_attribute()?;
     let all_file_count = attribute.file_count();
     let data_len = attribute.data_len();
-    //进度条
-    if let Some(pb) = pb {
-        pb.set_length(data_len);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(PROGRESS_STYLE_TEMPLATE)
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        pb.set_message("0.00%");
-    }
+    //设置进度条样式
+    set_pb_style2(pb, data_len);
     let mut binding = |add_len, add_file_count, f_path, p_path| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
@@ -560,6 +583,13 @@ fn pack_read_write_to_file(
                         }
                         write_len += this_write_len as u64;
                         //更新进度
+                        update_pb(
+                            pb_c,
+                            this_pack_path,
+                            this_out_path,
+                            &mut lase_up_pb_c_write_len,
+                            &mut write_len,
+                        );
                         if let Some(pb_c) = pb_c {
                             let l_len = write_len - lase_up_pb_c_write_len;
                             if l_len > 10 * (BUF_LEN as u64) {
@@ -622,19 +652,8 @@ fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()>
     let all_file_count = attribute.file_count();
     let data_len = attribute.data_len();
 
-    //进度条
-    if let Some(pb) = pb {
-        pb.set_length(data_len);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(
-                    PROGRESS_STYLE_TEMPLATE
-                )
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        pb.set_message("0.00%");
-    }
+    //设置进度条样式
+    set_pb_style2(pb, data_len);
     let mut binding = |add_len, add_file_count, p_path| {
         this_all_write_len += add_len;
         this_all_write_file_count += add_file_count;
