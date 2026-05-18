@@ -20,6 +20,9 @@ fn main() {
             "wbfp" => command::wbfp(args, Some(&mp)),
             v => panic!("未知命令： {v}"),
         }
+    } else {
+        //TODO:优化提示
+        panic!("未提供命令,可用命令:ff、wbfp")
     }
 }
 
@@ -39,6 +42,7 @@ impl Write for MultiProgressWriter {
     }
 }
 
+//AI===
 //初始化
 pub fn init_global_logging(mp: &MultiProgress) {
     #[cfg(debug_assertions)]
@@ -59,3 +63,4 @@ pub fn init_global_logging(mp: &MultiProgress) {
         )
         .try_init();
 }
+//AI_END===

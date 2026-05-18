@@ -11,7 +11,7 @@ use crate::wb_files_pack::pack_io::{
 use crate::wb_files_pack::{
     Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata,
     PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
-    PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_DATA_BLOCK_LEN, DATA_BLOCK_LEN,
+    PackStructItemType, WBFilesPackManifest, WBFilesPackManifestRun, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
 };
 use core::slice::Iter;
 use std::collections::HashMap;
@@ -655,18 +655,7 @@ impl WBFPManager /* 写入 */ {
                         if new_pos {
                             *struct_file_pos = pos;
                         }
-                        if let PackFileMetadataRun::Loaded(metadata) = &mut struct_item.metadata {
-                            metadata.len += r.length;
-                            if let PackFileMetadataType::Dir { file_count, .. } =
-                                &mut metadata.file_type
-                            {
-                                *file_count += r.file_count;
-                            }
-                            let (new_pos, pos) = self.save_metadata_write(metadata)?;
-                            if new_pos {
-                                struct_item.metadata_file_pos = pos;
-                            }
-                        }
+                        self.save_metadata(&mut struct_item, &r)?;
                         self.manifest
                             .root_struct
                             .items
@@ -726,6 +715,25 @@ impl WBFPManager /* 写入 */ {
         }
         self.save_root_pack_struct()
     }
+
+    fn save_metadata(
+        &mut self,
+        struct_item: &mut PackStructItem,
+        r: &DirFileAddReturn,
+    ) -> Result<(), Error> {
+        if let PackFileMetadataRun::Loaded(metadata) = &mut struct_item.metadata {
+            metadata.len += r.length;
+            if let PackFileMetadataType::Dir { file_count, .. } = &mut metadata.file_type {
+                *file_count += r.file_count;
+            }
+            let (new_pos, pos) = self.save_metadata_write(metadata)?;
+            if new_pos {
+                struct_item.metadata_file_pos = pos;
+            }
+        }
+        Ok(())
+    }
+
     fn file_metadata_update_inner(
         &mut self,
         mut path_list: IntoIter<String>,
@@ -755,18 +763,7 @@ impl WBFPManager /* 写入 */ {
                             if new_pos {
                                 *struct_file_pos = pos;
                             }
-                            if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata {
-                                metadata.len += r.length;
-                                if let PackFileMetadataType::Dir { file_count, .. } =
-                                    &mut metadata.file_type
-                                {
-                                    *file_count += r.file_count;
-                                }
-                                let (new_pos, pos) = self.save_metadata_write(metadata)?;
-                                if new_pos {
-                                    item.metadata_file_pos = pos;
-                                }
-                            }
+                            self.save_metadata(item, &r)?;
                             Ok(r)
                         } else {
                             panic!("逻辑错误")
@@ -1010,6 +1007,8 @@ impl WBFPManager /* 写入 */ {
             let this_path = s_path.join(name);
             //判断目录是否存在
             if let Some(item) = s_pack_struct.items.get_mut(name) {
+                //加载元数据
+                self.load_metadata_to_item(&this_path, item)?;
                 match &mut item.item_type {
                     PackStructItemType::Dir {
                         struct_file_pos,
@@ -1023,19 +1022,6 @@ impl WBFPManager /* 写入 */ {
                             //递归
                             let r =
                                 self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
-                            //更新元数据
-                            if let PackFileMetadataRun::NoLoad = item.metadata {
-                                //加载元数据
-                                item.metadata = PackFileMetadataRun::Loaded(
-                                    match self.load_pack_file_metadata(item.metadata_file_pos) {
-                                        Ok(v) => Box::from(v),
-                                        Err(err) => Err(Error::other(format!(
-                                            r#"虚拟路径"{}"的元数据无法加载, err: {err}"#,
-                                            this_path.display()
-                                        )))?,
-                                    },
-                                );
-                            }
                             if r.dir_count != 0 || r.file_count != 0 {
                                 let (new_block, pos) = self.save_pack_struct_write(pack_struct)?;
 
@@ -1099,9 +1085,9 @@ impl WBFPManager /* 写入 */ {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
                     if let PackFileMetadataRun::Loaded(metadata) = &mut item.metadata
                         && let PackFileMetadataType::Dir {
-                            file_count,
-                            dir_count,
-                        } = &mut metadata.file_type
+                        file_count,
+                        dir_count,
+                    } = &mut metadata.file_type
                     {
                         *dir_count += r.dir_count;
                         *file_count += r.file_count;
@@ -1333,7 +1319,7 @@ impl WBFPManager /* 核心 */ {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-                > 10_000
+            > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -1735,7 +1721,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-        .expect("无法解析数据块");
+            .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         //锁文件
         let mut write_lock_file_path = pack_path.clone();
