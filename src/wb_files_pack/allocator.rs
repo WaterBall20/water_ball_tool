@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
 
+#[derive(Clone)]
 pub struct Allocator {
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
