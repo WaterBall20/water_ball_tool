@@ -1,9 +1,9 @@
 use crate::tools::PathTool;
 use crate::wb_files_pack::manager::{
-    WBFPManager, DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_S_MANIFEST_FILE,
+    DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_S_MANIFEST_FILE, WBFPManager,
 };
-use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
+use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
 
+#[derive(Clone)]
 pub struct Allocator {
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
@@ -194,7 +195,6 @@ impl Allocator /*写*/ {
         )
     }
 
-
     pub fn create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -247,8 +247,11 @@ impl Allocator /*写*/ {
         self.get_file_wr(path, end_pos)
     }
 
-    pub fn get_file_wr<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) ->
-    io::Result<PackFileWR> {
+    pub fn get_file_wr<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        end_pos: bool,
+    ) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()

@@ -4,3 +4,4 @@ pub mod wb_files_pack;
 
 pub mod tools;
 
+pub mod gakumasu;

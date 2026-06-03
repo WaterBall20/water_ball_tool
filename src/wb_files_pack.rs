@@ -120,12 +120,6 @@ pub struct Attribute {
     version_compatible: u16,
     //写时复制
     cow: bool,
-    //文件数，不含目录
-    file_count: u64,
-    //目录数
-    dir_count: u64,
-    //数据大小
-    data_len: u64,
     //空数据列表的文件指针位置
     empty_data_pos_list_pos: u64,
     //清单..
@@ -134,6 +128,12 @@ pub struct Attribute {
     manifest_file_len: u64,
     // 根结构位置
     root_struct_pos: u64,
+    //文件数，不含目录
+    file_count: u64,
+    //目录数
+    dir_count: u64,
+    //数据大小
+    data_len: u64,
     //数据块
     data_block: ManifestDataBlock,
 } //包文件属性
@@ -143,13 +143,13 @@ impl Default for Attribute {
             version: MANIFEST_VERSION,
             version_compatible: MANIFEST_VERSION_COMPATIBLE,
             cow: manager::DEFAULT_COW,
-            file_count: 0,
-            dir_count: 0,
-            data_len: 0,
             empty_data_pos_list_pos: 0,
             manifest_empty_data_pos_list_pos: 0,
             manifest_file_len: 0,
             root_struct_pos: 0,
+            file_count: 0,
+            dir_count: 0,
+            data_len: 0,
             data_block: ManifestDataBlock::default(),
         }
     }
