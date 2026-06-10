@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 //流派类型
 enum CardType {
-    Emotion, //感性
+    Sense, //感性
     Logic, //理性
-    Esper, //非凡
+    Anomaly, //非凡
     Neutral, //通用
 }
 //指针类型
