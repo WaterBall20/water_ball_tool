@@ -99,7 +99,7 @@ impl Write for PackIO {
             self.run_data.pos += len;
             self.run_data.all_write_len += len;
         }
-        self.up_len();
+        self.sync_file_length();
         Ok(len)
     }
 
@@ -113,7 +113,7 @@ impl Write for PackIO {
         let len = buf.len() as u64;
         self.run_data.pos += len;
         self.run_data.all_write_len += len;
-        self.up_len();
+        self.sync_file_length();
         Ok(())
     }
 }
@@ -252,7 +252,7 @@ impl PackIO /*核心*/ {
     }
 
     //更新文件大小
-    pub(crate) fn up_len(&mut self) {
+    pub(crate) fn sync_file_length(&mut self) {
         //判断是否需要设置
         if self.run_data.pos > self.len {
             self.len = self.run_data.pos;
@@ -263,7 +263,7 @@ impl PackIO /*核心*/ {
     pub(crate) fn set_len(&mut self, len: u64) -> io::Result<()> {
         self.file.set_len(len)?;
         self.len = len;
-        self.up_len();
+        self.sync_file_length();
         Ok(())
     }
 

@@ -28,7 +28,7 @@ const DATA_POS_LIST_ITEM_LEN_LEN: usize = 8;
 //总大小
 const DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST_ITEM_LEN_LEN;
 //数据块大小
-const DATA_BLOCK_LEN: usize = 96; //1024;
+const DATA_BLOCK_LEN: usize = 128;
 
 const DATA_DATA_BLOCK_LEN: u64 = 4 * 1024 * 1024;
 
@@ -1201,7 +1201,7 @@ impl ManifestDataBlock /*函数*/ {
             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN;
         for (index, value) in data.iter().enumerate() {
             let data_index = data_index + index;
-            assert_ne!(data_index, ab_block_data.len(), "逻辑错误");
+            assert!(data_index < ab_block_data.len() - MANIFEST_DATA_BLOCK_DATA_VER_LEN, "数据超出块容量 / data exceeds block capacity");
             ab_block_data[data_index] = *value;
         }
     }

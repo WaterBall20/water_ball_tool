@@ -162,7 +162,7 @@ impl PackFileWR {
             && let PackFileMetadataType::File { data_pos_list, .. } = &metadata.file_type
             && pos_index < data_pos_list.list.len()
         {
-            let (mut pos, mut len) = *data_pos_list.list.get(start_pos_list_item_index).unwrap();
+            let (mut pos, mut len) = *data_pos_list.list.get(pos_index).unwrap();
             //当前校准
             if pos_index == start_pos_list_item_index {
                 //位置偏移
@@ -301,20 +301,25 @@ impl PackFileWR {
         self.pos += length;
     }
 
-    //减少文件位置
-    fn sub_pos(&mut self, length: u64) -> io::Result<()> {
-        self.sub_pos2(length, Vec::new())
-    }
-    fn sub_pos2(&mut self, length: u64, _sub_pos_s: Vec<(u64, u64)>) -> io::Result<()> {
-        //TODO：暂时使用从头计算，可能存在性能损失，部分功能未实现
-        let r_pos = self.pos.cast_signed() - length.cast_signed();
-        if r_pos < 0 {
-            self.set_pos(0)?;
-            Ok(())
-        } else {
-            self.set_pos(r_pos.cast_unsigned())?;
-            Ok(())
+    //减少文件位置 / Move file position backward
+    fn sub_pos(&mut self, mut length: u64) -> io::Result<()> {
+        if length == 0 {
+            return Ok(());
         }
+        if length > self.pos {
+            length = self.pos;
+        }
+        let new_pos = self.pos - length;
+        // 如果仍在当前数据块内，直接递减偏移量（快速路径）
+        // If still within the current data block, just decrement the offset (fast path)
+        if length <= self.temp_pos_this_len {
+            self.temp_pos_this_len -= length;
+            self.pos = new_pos;
+        } else {
+            // 跨越块边界，从头计算位置 / Crossed block boundary, recalculate from new position
+            self.set_pos(new_pos)?;
+        }
+        Ok(())
     }
 
     //
@@ -425,16 +430,22 @@ impl Seek for PackFileWR {
                     Ok(self.pos)
                 }
             },
-            SeekFrom::End(pos) => match pos {
-                0 => Ok(self.pos),
-                1.. => {
-                    self.sub_pos((-pos).cast_unsigned())?;
-                    Ok(self.pos)
-                }
-                ..0 => {
-                    self.add_running_len(pos as u64)?;
-                    self.add_pos(pos.cast_unsigned())?;
-                    Ok(self.pos)
+            SeekFrom::End(pos) => {
+                let end = self.get_len();
+                if pos > 0 {
+                    let add = pos as u64;
+                    let new_end = end + add;
+                    self.set_len(new_end)?;
+                    self.set_pos(new_end)?;
+                    Ok(new_end)
+                } else if pos < 0 {
+                    let sub = (-pos) as u64;
+                    let new_pos = if sub <= end { end - sub } else { 0 };
+                    self.set_pos(new_pos)?;
+                    Ok(new_pos)
+                } else {
+                    self.set_pos(end)?;
+                    Ok(end)
                 }
             },
         }
@@ -515,7 +526,10 @@ impl Write for PackFileWR {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        todo!()
+        self.pack_io
+            .lock()
+            .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?
+            .flush()
     }
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {

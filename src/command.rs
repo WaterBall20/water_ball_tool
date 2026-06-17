@@ -41,7 +41,7 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
     //进度条
     let pb = create_pb(mp);
 
-    let files_list = m_search(path, skip_symlink, Option::from(&pb)).unwrap();
+    let files_list = search_files(path, skip_symlink, Option::from(&pb)).unwrap();
 
     //输出到输出文件(若存在参数)
     if let Some(out_path) = args.get(1) {
@@ -109,7 +109,8 @@ fn update_pb(
 
 const SEARCH_MAX_THREAD_COUNT: usize = 64;
 
-fn m_search(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Result<FilesList> {
+/// 搜索文件并显示进度 / Search files with progress display
+fn search_files(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io::Result<FilesList> {
     if let Some(pb) = &pb {
         pb.set_style(
             ProgressStyle::default_spinner()
@@ -179,15 +180,15 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     //输出的包文件路径
     let pack_path = &args[1];
     //分离数据文件
-    let s_data_file = match args.get(2) {
+    let separate_manifest = match args.get(2) {
         Some(value) => {
             if value.contains("-f") {
-                !water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE
+                !water_ball_tool::wb_files_pack::manager::DEFAULT_SEPARATE_MANIFEST
             } else {
-                water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE
+                water_ball_tool::wb_files_pack::manager::DEFAULT_SEPARATE_MANIFEST
             }
         }
-        None => water_ball_tool::wb_files_pack::manager::DEFAULT_S_MANIFEST_FILE,
+        None => water_ball_tool::wb_files_pack::manager::DEFAULT_SEPARATE_MANIFEST,
     };
 
     //进度条
@@ -195,12 +196,12 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     info!("开始准备打包");
     info!("创建新包文件并初始化");
     let mut pack =
-        Allocator::create_new_pack_file(&pack_path, false, s_data_file).expect("创建包文件错误");
+        Allocator::create_new_pack_file(&pack_path, false, separate_manifest).expect("创建包文件错误");
     //逻辑实现=== ===
     //搜索文件===
     info!("搜索文件");
     warn!("目前搜索将跳过符号链接");
-    let files_list = m_search(in_dir_path, true, Option::from(&pb)).unwrap();
+    let files_list = search_files(in_dir_path, true, Option::from(&pb)).unwrap();
     //包文件===
     if let Some(pb) = &pb {
         let total_files = files_list.data_length();
@@ -229,7 +230,8 @@ fn write_pack(
     files_list: &FilesList,
     in_dir_path: &Path,
 ) -> io::Result<()> {
-    fn s_write_pack<'a>(
+    /// 递归将文件列表写入包 / Recursively write file list into pack
+    fn write_pack_recursive<'a>(
         pack: &mut Allocator,
         mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String, String) + 'a)>,
         info_list: &HashMap<String, FileInfo>,
@@ -241,7 +243,7 @@ fn write_pack(
             let this_in_path = in_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
             match info.file_kind() {
-                FileKind::File => from_file_write_to_pack(
+                FileKind::File => copy_file_into_pack(
                     pack,
                     &mut pb_c,
                     run_buf,
@@ -251,7 +253,7 @@ fn write_pack(
                 ),
                 FileKind::Dir(dir) => {
                     //目录仅递归处理
-                    pb_c = s_write_pack(
+                    pb_c = write_pack_recursive(
                         pack,
                         pb_c,
                         dir.files_list(),
@@ -282,7 +284,7 @@ fn write_pack(
             ));
         }
     };
-    s_write_pack(
+    write_pack_recursive(
         pack_man,
         match pb {
             Some(_) => Some(&mut binding),
@@ -296,7 +298,7 @@ fn write_pack(
     Ok(())
 }
 
-fn from_file_write_to_pack(
+fn copy_file_into_pack(
     pack_man: &mut Allocator,
     pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
     run_buf: &mut [u8],
@@ -333,7 +335,7 @@ fn from_file_write_to_pack(
     };
     //尝试创建虚拟文件
     let mut out_file =
-        match pack_man.create_file2(this_pack_path, info.modified_time(), info.length()) {
+        match pack_man.create_file(this_pack_path, info.modified_time(), info.length()) {
             Ok(v) => v,
             Err(err) => {
                 error!(
@@ -426,7 +428,8 @@ fn read_pack(
     pb: Option<&ProgressBar>,
     out_dir_path: &Path,
 ) -> io::Result<()> {
-    fn s_read_pack<'a>(
+    /// 递归从包读取文件 / Recursively read files from pack
+    fn read_pack_recursive<'a>(
         pack_man: &mut Allocator,
         mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String, String) + 'a)>,
         pack_struct_items: &HashMap<String, PackStructItem>,
@@ -440,7 +443,7 @@ fn read_pack(
             match item.item_type() {
                 PackStructItemType::File => {
                     if let PackFileMetadataRun::Loaded(metadata) = item.metadata() {
-                        pack_read_write_to_file(
+                        copy_pack_file_to_disk(
                             pack_man,
                             &mut pb_c,
                             run_buf,
@@ -458,7 +461,7 @@ fn read_pack(
                         //创建目录
                         fs::create_dir_all(&this_out_path)?;
                         //目录仅递归处理
-                        pb_c = s_read_pack(
+                        pb_c = read_pack_recursive(
                             pack_man,
                             pb_c,
                             pack_struct.items(),
@@ -503,7 +506,7 @@ fn read_pack(
             ));
         }
     };
-    s_read_pack(
+    read_pack_recursive(
         pack_man,
         match pb {
             Some(_) => Some(&mut binding),
@@ -517,7 +520,7 @@ fn read_pack(
     Ok(())
 }
 
-fn pack_read_write_to_file(
+fn copy_pack_file_to_disk(
     pack_man: &mut Allocator,
     pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
     run_buf: &mut [u8],
@@ -590,18 +593,6 @@ fn pack_read_write_to_file(
                             &mut lase_up_pb_c_write_len,
                             &mut write_len,
                         );
-                        if let Some(pb_c) = pb_c {
-                            let l_len = write_len - lase_up_pb_c_write_len;
-                            if l_len > 10 * (BUF_LEN as u64) {
-                                pb_c(
-                                    l_len,
-                                    0,
-                                    this_pack_path.display().to_string(),
-                                    this_out_path.display().to_string(),
-                                );
-                                lase_up_pb_c_write_len = write_len;
-                            }
-                        }
                     }
                     Err(err) => {
                         error!("写入文件{this_pack_path:?}错误, 将跳过，err:{err}");

@@ -1,6 +1,6 @@
 use crate::tools::PathTool;
 use crate::wb_files_pack::manager::{
-    DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_S_MANIFEST_FILE, WBFPManager,
+    DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST, WBFPManager,
 };
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file::PackFileWR;
@@ -31,24 +31,24 @@ impl Allocator {
     }
 
     pub fn create_new_pack_file2<P: AsRef<Path>>(path: &P) -> io::Result<Allocator> {
-        Self::create_new_pack_file(path, DEFAULT_COW, DEFAULT_S_MANIFEST_FILE)
+        Self::create_new_pack_file(path, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST)
     }
     pub fn create_new_pack_file<P: AsRef<Path>>(
         path: &P,
         cow: bool,
-        s_manifest_file: bool,
+        separate_manifest: bool,
     ) -> io::Result<Allocator> {
         //判断文件是否存在
         match path.as_ref().try_exists() {
             Ok(true) => Err(Error::other("文件可能已存在，无法创建！")),
-            Ok(false) | Err(_) => Self::create_pack_file(path, cow, s_manifest_file, true),
+            Ok(false) | Err(_) => Self::create_pack_file(path, cow, separate_manifest, true),
         }
     }
 
     pub fn create_pack_file<P: AsRef<Path>>(
         path: &P,
         cow: bool,
-        s_manifest_file: bool,
+        separate_manifest: bool,
         create_new: bool,
     ) -> io::Result<Allocator> {
         //创建包文件文件
@@ -63,7 +63,7 @@ impl Allocator {
         let pack_io = PackIO::new(pack_file);
         let pack_io = Arc::new(Mutex::new(pack_io));
         let mut manager =
-            WBFPManager::create_pack_file(path, pack_io.clone(), cow, s_manifest_file, create_new)?;
+            WBFPManager::create_pack_file(path, pack_io.clone(), cow, separate_manifest, create_new)?;
         manager.init_new_pack()?;
         let manager = Arc::new(Mutex::new(manager));
         Ok(Self { manager, pack_io })
@@ -71,12 +71,12 @@ impl Allocator {
 }
 
 impl Allocator /*读*/ {
-    pub fn file_is_some<P: AsRef<Path>>(&mut self, path: P) -> io::Result<bool> {
+    pub fn path_exists<P: AsRef<Path>>(&mut self, path: P) -> io::Result<bool> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        Ok(manager.file_is_some(path))
+        Ok(manager.path_exists(path))
     }
     pub fn get_manifest_attribute(&self) -> io::Result<Attribute> {
         let manager = self.manager.clone();
@@ -174,53 +174,49 @@ impl Allocator /*写*/ {
         manager.create_dir_all(path)
     }
 
-    pub fn create_file2<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        modified: u128,
-        len: u64,
-    ) -> io::Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        let (path_list, metadata) = manager.create_file2(path, modified, len)?;
-        PackFileWR::create(
-            true,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
-    }
-
-    pub fn create_file_no_len<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        let (path_list, metadata) = manager.create_file_no_len(path)?;
-        PackFileWR::create(
-            true,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
-    }
-    pub fn create_file3<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        modified: u128,
-        len: u64,
-        cow: bool,
-    ) -> io::Result<PackFileWR> {
-        self.create_file(path, modified, len, cow, DEFAULT_HASH_TYPE)
-    }
-
+    /// 创建虚拟文件（使用默认写时复制和哈希设置）
+    /// Create a virtual file (using default COW and hash settings)
     pub fn create_file<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        modified: u128,
+        len: u64,
+    ) -> io::Result<PackFileWR> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        let (path_list, metadata) = manager.create_file(path, modified, len)?;
+        PackFileWR::create(
+            true,
+            self.manager.clone(),
+            &self.pack_io.clone(),
+            path_list,
+            metadata,
+            false,
+        )
+    }
+
+    /// 创建虚拟文件（自动分配初始大小，无需预先指定长度）
+    /// Create a virtual file (auto-allocate initial size, no need to pre-specify length)
+    pub fn create_file_auto_sized<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        let (path_list, metadata) = manager.create_file_auto_sized(path)?;
+        PackFileWR::create(
+            true,
+            self.manager.clone(),
+            &self.pack_io.clone(),
+            path_list,
+            metadata,
+            false,
+        )
+    }
+    /// 创建虚拟文件（完整参数版本，用于需要自定义写时复制和哈希算法的场景）
+    /// Create a virtual file (full parameter version, for custom COW and hash algorithm scenarios)
+    pub fn create_file_raw<P: AsRef<Path>>(
         &mut self,
         path: P,
         modified: u128,
@@ -232,7 +228,7 @@ impl Allocator /*写*/ {
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        let (path_list, metadata) = manager.create_file(path, modified, len, cow, hash_type)?;
+        let (path_list, metadata) = manager.create_file_raw(path, modified, len, cow, hash_type)?;
         PackFileWR::create(
             true,
             self.manager.clone(),

@@ -181,25 +181,22 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
         ];
         wbfp(args.as_slice(), Some(&mp));
     }
-    //哈希校验
+    //哈希校验（仅需包路径）
     {
-        out_dir_path.push_str("/s");
-        //命令行参数处理
         let args: Vec<String> = vec![
             String::from("-h"),
             out_file_path.clone(),
-            out_dir_path.clone(),
         ];
         wbfp(args.as_slice(), Some(&mp));
     }
     //解包
     {
-        out_dir_path.push_str("/s");
-        //命令行参数处理
+        let mut s_out_path = out_dir_path.clone();
+        s_out_path.push_str("/s");
         let args: Vec<String> = vec![
             String::from("-s"),
             out_file_path.clone(),
-            out_dir_path.clone(),
+            s_out_path,
         ];
         wbfp(args.as_slice(), Some(&mp));
     }

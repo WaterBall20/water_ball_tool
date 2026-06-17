@@ -1,10 +1,7 @@
-/*
-创建时间：2026/02/24 08:51
-*/
 use crate::tools::PathTool;
 use crate::tools::TestTool;
 use crate::wb_files_pack::manager::{
-    WBFPManager, DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_S_MANIFEST_FILE,
+    WBFPManager, DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_SEPARATE_MANIFEST,
 };
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
@@ -18,14 +15,12 @@ use std::{fs, io};
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 
-fn create_new_pack_file2(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
-    create_pack_file(pack_path, DEFAULT_COW, DEFAULT_S_MANIFEST_FILE, true)
-}
-fn create_pack_file(
+// === 辅助函数：直接操作内部 API / Helpers bypassing Allocator ===
+
+fn create_manager(
     pack_path: &Path,
     cow: bool,
-    s_manifest_file: bool,
-    create_new: bool,
+    separate_manifest: bool,
 ) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     let pack_file = File::options()
         .read(true)
@@ -40,22 +35,25 @@ fn create_pack_file(
             }
             _ => panic!("创建文件错误. err:{e}"),
         })?;
-    //创建包文件数据文件
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
     let mut manager = WBFPManager::create_pack_file(
         &pack_path,
         pack_io.clone(),
         cow,
-        s_manifest_file,
-        create_new,
+        separate_manifest,
+        true,
     )
-        .expect("无法创建包管理器");
+    .expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
     Ok((manager, pack_io))
 }
-fn open_pack_file<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO>>) {
-    //打开水球包文件
+
+fn create_manager_default(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
+    create_manager(pack_path, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST)
+}
+
+fn open_manager<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO>>) {
     let pack_file = File::options()
         .read(true)
         .write(true)
@@ -64,185 +62,156 @@ fn open_pack_file<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<Pack
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
     (
-        WBFPManager::open_pack_file(pack_path, pack_io.clone()).expect("无法创建包文件"),
+        WBFPManager::open_pack_file(pack_path, pack_io.clone()).expect("无法打开包文件"),
         pack_io,
     )
 }
-fn get_file_rw<P: AsRef<Path>>(
+
+fn open_file_rw<P: AsRef<Path>>(
     pack_path: &P,
-    pack: &Arc<Mutex<WBFPManager>>,
+    manager: &Arc<Mutex<WBFPManager>>,
     pack_io: &Arc<Mutex<PackIO>>,
     end_pos: bool,
 ) -> io::Result<PackFileWR> {
     let path_list = PathTool::path_to_string_vec(pack_path);
-    let metadata = pack
-        .clone()
+    let metadata = manager
         .lock()
         .expect("无法获得包文件锁")
         .file_metadata_lock(&path_list)
         .expect("无法获得元数据");
-    PackFileWR::create(false, pack.clone(), &pack_io.clone(), path_list, metadata, end_pos)
+    PackFileWR::create(false, manager.clone(), pack_io, path_list, metadata, end_pos)
+}
+
+fn setup_ok_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::path::PathBuf::from(TEST_TEMP_OK_DIR_PATH).join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let pack = dir.join("pack");
+    TestTool::remove_test_pack_files(&pack);
+    (dir, pack)
+}
+
+fn setup_err_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::path::PathBuf::from(TEST_TEMP_ERR_DIR_PATH).join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let pack = dir.join("pack");
+    TestTool::remove_test_pack_files(&pack);
+    (dir, pack)
 }
 
 
-//OK===
+// === 创建并重新打开（内部压力测试）/ Create and reopen (internal stress test) ===
 
-//创建包文件并打开刚创建的包文件
 #[test]
-fn create_new_file_and_open_pack() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_open_pack");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    let pack_file = pack_dir.join("pack");
-    TestTool::remove_test_pack_files(&pack_file);
-    let test_file_path = String::from("/Test/Test2/Test3");
+fn create_stress_and_reopen() {
+    let (dir, pack_file) = setup_ok_test("create_stress_and_reopen");
+    let test_path = "/Test/Test2/Test3";
     let test_data = vec![51, 31, 55, 6, 7, 8, 3, 67, 93];
-    //
-    let (root_struct, other_name_list) = {
-        //创建文件
-        let (pack, pack_io) = create_new_pack_file2(&pack_file).unwrap();
-        let man = Arc::new(Mutex::new(pack));
-        //随机创建文件
-        let mut other_name_list = Vec::new();
-        for index in 0..1000 {
+
+    let (initial_root, random_names) = {
+        let (manager, pack_io) = create_manager_default(&pack_file).unwrap();
+        let man = Arc::new(Mutex::new(manager));
+
+        let mut random_names = Vec::new();
+        for i in 0..1000 {
             let name = rand::random_range(0..100_000_000).to_string();
             let len = rand::random_range(0..1_000_100);
             let modified = rand::random_range(0..100_000_000_000);
-            other_name_list.push(name.clone());
-            let wr = man
-                .clone()
-                .lock()
-                .unwrap()
-                .create_file(&name, modified, len, false, DEFAULT_HASH_TYPE)
+            random_names.push(name.clone());
+
+            let (path_list, metadata) = man.lock().unwrap()
+                .create_file_raw(&name, modified, len, false, DEFAULT_HASH_TYPE)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
-            let mut wr = PackFileWR::create(true, man.clone(), &pack_io.clone(), wr.0, wr.1, false)
-                .unwrap();
+            let mut wr = PackFileWR::create(
+                true, man.clone(), &pack_io, path_list, metadata, false,
+            ).unwrap();
             wr.write_all(&test_data)
-                .unwrap_or_else(|_| panic!("循环第{index}次，无法写入虚拟随机文件:{name}"));
+                .unwrap_or_else(|_| panic!("循环第{i}次，无法写入虚拟随机文件:{name}"));
         }
-        let rw = man
-            .clone()
-            .lock()
-            .unwrap()
-            .create_file2(&test_file_path, 0, test_data.len() as u64)
+
+        let (path_list, metadata) = man.lock().unwrap()
+            .create_file(test_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
-        let mut rw = PackFileWR::create(true, man.clone(), &pack_io.clone(), rw.0, rw.1, false)
-            .unwrap();
-        _ = rw.write(&test_data).expect("无法写入虚拟文件");
-        drop(rw);
-        (
-            man.clone().lock().unwrap().manifest.root_struct.clone(),
-            other_name_list,
-        )
+        let mut wr = PackFileWR::create(
+            true, man.clone(), &pack_io, path_list, metadata, false,
+        ).unwrap();
+        _ = wr.write(&test_data).expect("无法写入虚拟文件");
+        drop(wr);
+
+        let root = man.lock().unwrap().manifest.root_struct.clone();
+        (root, random_names)
     };
-    //打开已创建并关闭的文件
+
+    // 重新打开，验证数据一致性
     {
-        let (pack, pack_io) = open_pack_file(&pack_file);
-        let pack = Arc::new(Mutex::new(pack));
-        let mut rw = get_file_rw(&test_file_path, &pack.clone(), &pack_io, false).unwrap();
-        let mut test_data_read = vec![0; test_data.len()];
-        let len = rw.read(&mut test_data_read).expect("无法读取虚拟文件");
+        let (manager, pack_io) = open_manager(&pack_file);
+        let man = Arc::new(Mutex::new(manager));
+
+        let mut rw = open_file_rw(&test_path, &man, &pack_io, false).unwrap();
+        let mut read_buf = vec![0; test_data.len()];
+        let bytes_read = rw.read(&mut read_buf).expect("无法读取虚拟文件");
+        assert_eq!(bytes_read, test_data.len());
+        assert_eq!(test_data, read_buf);
         drop(rw);
-        pack.clone()
-            .lock()
-            .unwrap()
+
+        man.lock().unwrap()
             .load_all_data(false)
             .expect("无法加载所有元数据");
-        assert_eq!(len, test_data.len());
-        assert_eq!(test_data, test_data_read);
-        //细分判断
-        for name in &other_name_list {
-            let pack = pack.clone();
-            let pack = pack.lock().unwrap();
-            let a_item = root_struct
-                .items
-                .get(name)
-                .unwrap_or_else(|| panic!("获取列表项失败: name={name}"));
-            let b_item = pack.manifest.root_struct.items.get(name).unwrap();
-            assert_eq!(a_item, b_item);
+
+        // 逐个比对随机文件的结构项
+        let reopened = &man.lock().unwrap().manifest.root_struct;
+        for name in &random_names {
+            let a = initial_root.items.get(name)
+                .unwrap_or_else(|| panic!("初始结构缺少项: name={name}"));
+            let b = reopened.items.get(name)
+                .unwrap_or_else(|| panic!("重开后结构缺少项: name={name}"));
+            assert_eq!(a, b);
         }
     }
+
     TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
+    _ = fs::remove_dir_all(&dir);
 }
 
-//创建不同版本的兼容包文件
+
+// === 版本兼容性 / Version compatibility ===
+
 #[test]
-fn create_new_file_and_open_pack_manifest_ver() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_OK_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_open_pack_manifest_ver");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    let pack_file = pack_dir.join("pack");
-    TestTool::remove_test_pack_files(&pack_file);
-    //
+fn open_pack_compatible_version() {
+    let (dir, pack_file) = setup_ok_test("open_pack_compatible_version");
     {
-        //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
-        //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
-        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        manager.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
+        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
-    //打开已创建并关闭的文件
-    {
-        open_pack_file(&pack_file);
-    }
+    { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
+    _ = fs::remove_dir_all(&dir);
 }
 
-//ERR===
 #[test]
 #[should_panic(expected = "版本过高")]
-fn create_new_file_and_open_pack_err_manifest_ver1() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_open_pack_err_json_ver1");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    let pack_file = pack_dir.join("pack");
-    TestTool::remove_test_pack_files(&pack_file);
-    //
+fn open_pack_version_too_high_should_panic() {
+    let (dir, pack_file) = setup_err_test("open_pack_version_too_high_should_panic");
     {
-        //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
-        //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
-        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
+        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        manager.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
+        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
     }
-    //打开已创建并关闭的文件
-    {
-        open_pack_file(&pack_file);
-    }
+    { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
+    _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 #[should_panic(expected = "版本过低")]
-fn create_new_file_and_open_pack_err_manifest_ver2() {
-    //测试目录
-    let mut pack_dir = String::from(TEST_TEMP_ERR_DIR_PATH);
-    pack_dir.push_str("/create_new_file_and_open_pack_err_json_ver2");
-    let pack_dir: &Path = pack_dir.as_ref();
-    fs::create_dir_all(pack_dir).unwrap();
-    let pack_file = pack_dir.join("pack");
-    TestTool::remove_test_pack_files(&pack_file);
-    //
+fn open_pack_version_too_low_should_panic() {
+    let (dir, pack_file) = setup_err_test("open_pack_version_too_low_should_panic");
     {
-        //创建文件
-        let mut pack = create_new_pack_file2(&pack_file).unwrap().0;
-        //更改实例内部的数据版本
-        pack.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
-        pack.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        manager.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
     }
-    //打开已创建并关闭的文件
-    {
-        open_pack_file(&pack_file);
-    }
+    { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(pack_dir);
+    _ = fs::remove_dir_all(&dir);
 }

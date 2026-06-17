@@ -36,7 +36,7 @@ mod new_test;*/
 pub const DEFAULT_COW: bool = false;
 
 //默认分离数据为单独文件
-pub const DEFAULT_S_MANIFEST_FILE: bool = true;
+pub const DEFAULT_SEPARATE_MANIFEST: bool = true;
 //默认哈希算法
 pub const DEFAULT_HASH_TYPE: u8 = 1;
 
@@ -48,7 +48,7 @@ pub(crate) struct WBFPManager {
     // 启用写时复制
     cow: bool,
     // 清单分离
-    s_manifest_file: bool,
+    separate_manifest: bool,
     //运行时数据结构体
     run_data: WBFPManagerRun,
 } //水球包文件管理器
@@ -75,7 +75,7 @@ impl WBFPManager {
         pack_path: P,
         manifest: WBFilesPackManifest,
         pack_file: Arc<Mutex<PackIO>>,
-        s_manifest_file: bool,
+        separate_manifest: bool,
         write_lock_file: Option<File>,
     ) -> Self {
         let cow = manifest.attribute().cow();
@@ -87,7 +87,7 @@ impl WBFPManager {
             manifest,
             pack_file,
             cow,
-            s_manifest_file,
+            separate_manifest,
             run_data: WBFPManagerRun::new(write_lock_path, write_lock_file),
         }
     }
@@ -114,7 +114,7 @@ impl WBFPManager {
         if self.cow {
             header_tag |= 0b1000_0000;
         }
-        if self.s_manifest_file {
+        if self.separate_manifest {
             header_tag |= 0b0100_0000;
         }
         file_header_buf[FILE_HEADER_BOOL_DATA_INDEX] = header_tag;
@@ -157,7 +157,7 @@ impl WBFPManager {
         self.save_empty_data_list()
             .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err:{err}")))?;
 
-        if self.s_manifest_file {
+        if self.separate_manifest {
             self.save_manifest_empty_data_list()
                 .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err: {err}")))?;
         }
@@ -170,7 +170,7 @@ impl WBFPManager {
 
 //读取===
 impl WBFPManager /* 读取 */ {
-    pub(crate) fn file_is_some<P: AsRef<Path>>(&mut self, path: P) -> bool {
+    pub(crate) fn path_exists<P: AsRef<Path>>(&mut self, path: P) -> bool {
         self.get_pack_struct_item(path).is_ok()
     }
 
@@ -933,11 +933,11 @@ impl WBFPManager /* 写入 */ {
 
     //创建文件
 
-    pub(crate) fn create_file_no_len<P: AsRef<Path>>(
+    pub(crate) fn create_file_auto_sized<P: AsRef<Path>>(
         &mut self,
         path: P,
     ) -> io::Result<(Vec<String>, PackFileMetadata)> {
-        self.create_file(
+        self.create_file_raw(
             path,
             if let Ok(d) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
                 d.as_millis()
@@ -950,16 +950,16 @@ impl WBFPManager /* 写入 */ {
         )
     }
 
-    pub(crate) fn create_file2<P: AsRef<Path>>(
+    pub(crate) fn create_file<P: AsRef<Path>>(
         &mut self,
         path: P,
         modified: u128,
         len: u64,
     ) -> io::Result<(Vec<String>, PackFileMetadata)> {
-        self.create_file(path, modified, len, self.cow, DEFAULT_HASH_TYPE)
+        self.create_file_raw(path, modified, len, self.cow, DEFAULT_HASH_TYPE)
     }
 
-    pub(crate) fn create_file<P: AsRef<Path>>(
+    pub(crate) fn create_file_raw<P: AsRef<Path>>(
         &mut self,
         path: P,
         modified: u128,
@@ -968,7 +968,7 @@ impl WBFPManager /* 写入 */ {
         hash_type: u8,
     ) -> io::Result<(Vec<String>, PackFileMetadata)> {
         let path_list = PathTool::path_to_string_vec(&path);
-        if self.file_is_some(&path) {
+        if self.path_exists(&path) {
             Err(Error::other(format!(
                 r#"虚拟路径"{}"文件或目录已存在"#,
                 path.as_ref().display()
@@ -1248,7 +1248,7 @@ impl WBFPManager /* 写入 */ {
             pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count;
         }
         self.save_root_pack_struct()?;
-        self.low_save_all()?;
+        self.throttled_save()?;
         Ok(())
     }
 }
@@ -1311,7 +1311,7 @@ impl WBFPManager /* 核心 */ {
     }
 
     //慢保存代码
-    fn low_save_all(&mut self) -> io::Result<()> {
+    fn throttled_save(&mut self) -> io::Result<()> {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
@@ -1336,7 +1336,6 @@ impl WBFPManager /* 核心 */ {
         self.file_gc()?;
         self.manifest_file_gc()?;
         self.save_root_pack_struct()?;
-        self.save_manifest_attribute()?;
         self.save_pack_length()?;
         Ok(())
     }
@@ -1418,7 +1417,7 @@ impl WBFPManager /* 核心 */ {
         let mut pack_file = pack_file
             .lock()
             .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
-        pack_file.up_len();
+        pack_file.sync_file_length();
         //修改包文件位置
         pack_file.set_pos_write(FILE_HEADER_DATA_LENGTH_INDEX as u64)?;
         //写入数据
@@ -1448,7 +1447,7 @@ impl WBFPManager /* 核心 */ {
     }
 
     fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
-        if !self.s_manifest_file {
+        if !self.separate_manifest {
             let pack_file = self.pack_file.clone();
             let pack_file = pack_file
                 .lock()
@@ -1468,7 +1467,7 @@ impl WBFPManager /* 核心 */ {
         old_pos: u64,
         old_block_len: u64,
     ) -> io::Result<u64> {
-        if self.s_manifest_file {
+        if self.separate_manifest {
             if let Some(file) = &mut self.manifest.file {
                 file.manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
             } else {
@@ -1705,7 +1704,7 @@ impl WBFPManager {
         let bool_data = header[FILE_HEADER_BOOL_DATA_INDEX];
         //写时复制 TODO:未使用变量
         //let cow = (bool_data >> 7) == 1;
-        let s_manifest_file = ((bool_data << 1) >> 7) == 1;
+        let separate_manifest = ((bool_data << 1) >> 7) == 1;
         let pack_len = u64::from_le_bytes(
             header[FILE_HEADER_DATA_LENGTH_INDEX
                 ..(FILE_HEADER_DATA_LENGTH_INDEX + FILE_HEADER_DATA_LENGTH_LENGTH)]
@@ -1728,12 +1727,12 @@ impl WBFPManager {
         write_lock_file_path.push_str(".lock");
         let write_lock_file = Self::write_lock_file(&PathBuf::from(write_lock_file_path))?;
         //如果分离数据文件
-        if s_manifest_file {
-            Self::open_pack_file_s_manifest_file(
+        if separate_manifest {
+            Self::open_pack_file_separate_manifest(
                 pack_file,
                 &mut m_pack_file,
                 &pack_path,
-                s_manifest_file,
+                separate_manifest,
                 attribute,
                 write_lock_file,
             )?
@@ -1763,17 +1762,17 @@ impl WBFPManager {
                 pack_path,
                 manifest,
                 pack_file,
-                s_manifest_file,
+                separate_manifest,
                 Some(write_lock_file),
             ))
         }
     }
 
-    fn open_pack_file_s_manifest_file(
+    fn open_pack_file_separate_manifest(
         pack_file: Arc<Mutex<PackIO>>,
         m_pack_file: &mut MutexGuard<PackIO>,
         pack_path: &String,
-        s_manifest_file: bool,
+        separate_manifest: bool,
         attribute: Attribute,
         write_lock_file: File,
     ) -> Result<Result<WBFPManager, Error>, Error> {
@@ -1816,7 +1815,7 @@ impl WBFPManager {
             pack_path,
             manifest,
             pack_file,
-            s_manifest_file,
+            separate_manifest,
             Some(write_lock_file),
         )))
     }
@@ -1827,7 +1826,7 @@ impl WBFPManager {
         path: &P,
         pack_file: Arc<Mutex<PackIO>>,
         cow: bool,
-        s_manifest_file: bool,
+        separate_manifest: bool,
         create_new: bool,
     ) -> io::Result<WBFPManager> {
         let mut write_lock_path = path
@@ -1839,7 +1838,7 @@ impl WBFPManager {
         let write_lock_path = PathBuf::from(write_lock_path);
         let write_lock_file = Self::write_lock(false, &write_lock_path)?;
 
-        let manifest_file = if s_manifest_file {
+        let manifest_file = if separate_manifest {
             let mut manifest_path =
                 String::from(path.as_ref().to_str().expect("无法将路径转换成文件"));
             manifest_path.push_str(".wbm");
@@ -1859,7 +1858,7 @@ impl WBFPManager {
             path,
             cow,
             pack_file,
-            s_manifest_file,
+            separate_manifest,
             manifest_file,
             write_lock_file,
         ))
@@ -1871,7 +1870,7 @@ impl WBFPManager {
         pack_path: &P,
         cow: bool,
         pack_file: Arc<Mutex<PackIO>>,
-        s_manifest_file: bool,
+        separate_manifest: bool,
         manifest_file: Option<PackIO>,
         write_lock_file: Option<File>,
     ) -> WBFPManager {
@@ -1887,7 +1886,7 @@ impl WBFPManager {
                 _run_data: WBFilesPackManifestRun::default(),
             },
             pack_file,
-            s_manifest_file,
+            separate_manifest,
             write_lock_file,
         )
     }
