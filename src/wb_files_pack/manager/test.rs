@@ -137,7 +137,8 @@ fn create_stress_and_reopen() {
         _ = wr.write(&test_data).expect("无法写入虚拟文件");
         drop(wr);
 
-        let root = man.lock().unwrap().manifest.root_struct.clone();
+        let man_guard = man.lock().unwrap();
+        let root = man_guard.manifest.root_struct().clone();
         (root, random_names)
     };
 
@@ -158,11 +159,12 @@ fn create_stress_and_reopen() {
             .expect("无法加载所有元数据");
 
         // 逐个比对随机文件的结构项
-        let reopened = &man.lock().unwrap().manifest.root_struct;
+        let man_guard = man.lock().unwrap();
+        let reopened = man_guard.manifest.root_struct();
         for name in &random_names {
-            let a = initial_root.items.get(name)
+            let a = initial_root.items().get(name)
                 .unwrap_or_else(|| panic!("初始结构缺少项: name={name}"));
-            let b = reopened.items.get(name)
+            let b = reopened.items().get(name)
                 .unwrap_or_else(|| panic!("重开后结构缺少项: name={name}"));
             assert_eq!(a, b);
         }
@@ -180,8 +182,8 @@ fn open_pack_compatible_version() {
     let (dir, pack_file) = setup_ok_test("open_pack_compatible_version");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
-        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
+        manager.manifest.attribute_mut().set_version_compatible(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
     }
     { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);
@@ -194,8 +196,8 @@ fn open_pack_version_too_high_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_high_should_panic");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager.manifest.attribute.version = super::super::MANIFEST_VERSION + 1;
-        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION + 1;
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
+        manager.manifest.attribute_mut().set_version_compatible(super::super::MANIFEST_VERSION + 1);
     }
     { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);
@@ -208,8 +210,8 @@ fn open_pack_version_too_low_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_low_should_panic");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager.manifest.attribute.version = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
-        manager.manifest.attribute.version_compatible = super::super::MANIFEST_VERSION_COMPATIBLE - 1;
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
+        manager.manifest.attribute_mut().set_version_compatible(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
     }
     { open_manager(&pack_file); }
     TestTool::remove_test_pack_files(&pack_file);

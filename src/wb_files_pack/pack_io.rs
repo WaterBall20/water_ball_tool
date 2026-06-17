@@ -65,26 +65,28 @@ pub(crate) struct PackIO {
     pub(crate) run_data: RunData,
 }
 impl PackIO {
+    /// 创建新的 PackIO 实例（文件长度从文件本身获取）。
+    /// Create a new PackIO instance (file length obtained from the file itself).
     pub(crate) fn new(file: File) -> Self {
+        let mut empty_data_list = DataPosList::new(Vec::new());
+        empty_data_list.set_data_block(Some(ManifestDataBlock::default()));
         Self {
             file,
             len: 0,
-            empty_data_list: DataPosList {
-                data_block: Some(ManifestDataBlock::default()),
-                list: Vec::new(),
-            },
+            empty_data_list,
             run_data: RunData::default(),
         }
     }
 
+    /// 创建新的 PackIO 实例并指定文件长度。
+    /// Create a new PackIO instance with a specified file length.
     pub(crate) fn new2(file: File, len: u64) -> Self {
+        let mut empty_data_list = DataPosList::new(Vec::new());
+        empty_data_list.set_data_block(Some(ManifestDataBlock::default()));
         Self {
             file,
             len,
-            empty_data_list: DataPosList {
-                data_block: Some(ManifestDataBlock::default()),
-                list: Vec::new(),
-            },
+            empty_data_list,
             run_data: RunData::default(),
         }
     }
@@ -128,20 +130,24 @@ impl Read for PackIO {
 }
 
 impl PackIO /*核心*/ {
+    /// 提交垃圾回收项到暂存列表（稍后由 `file_gc` 处理排序和合并）。
+    /// Submit garbage collection items to the staging list (sorted and merged later by `file_gc`).
     //垃圾回收提交
     pub(crate) fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         for pos in gc_pos_list {
             //直接添加
             if pos.0 != 0 && pos.1 != 0 {
-                self.run_data.gc_data_pos_list.list.push(pos);
+                self.run_data.gc_data_pos_list.list_mut().push(pos);
             }
         }
     }
+    /// 执行垃圾回收：将暂存的 GC 项排序插入空闲列表，合并相邻块。
+    /// Execute garbage collection: sort and insert staged GC items into the free list, merging adjacent blocks.
     //垃圾回收
     pub(crate) fn file_gc(&mut self) {
         //准备：排序
-        let pos_gc_list = &self.run_data.gc_data_pos_list.list;
-        let pos_list = &mut self.empty_data_list.list;
+        let pos_gc_list = self.run_data.gc_data_pos_list.list();
+        let pos_list = &mut self.empty_data_list.list_mut();
         'gc_for: for (gc_pos, gc_len) in pos_gc_list {
             let gc_pos = *gc_pos;
             let gc_len = *gc_len;
@@ -160,7 +166,7 @@ impl PackIO /*核心*/ {
             pos_list.push((gc_pos, gc_len));
         }
         //清空缓存
-        self.run_data.gc_data_pos_list.list.clear();
+        self.run_data.gc_data_pos_list.list_mut().clear();
 
         //合并功能
         //当前索引
@@ -193,6 +199,13 @@ impl PackIO /*核心*/ {
         }
     }
 
+    /// 分配文件空间：优先从空闲列表复用，无可用空间时从文件末尾扩容。
+    ///
+    /// 返回 `(起始位置, 长度)`，长度已对齐到 `DATA_BLOCK_LEN`。
+    ///
+    /// Allocate file space: reuse from the free list if possible, otherwise extend the file.
+    ///
+    /// Returns `(start_position, length)`, with length aligned to `DATA_BLOCK_LEN`.
     //获取可用的文件位置
     pub(crate) fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
         //块对齐
@@ -203,7 +216,7 @@ impl PackIO /*核心*/ {
             let length = length / DATA_BLOCK_LEN_U64 + 1;
             length * DATA_BLOCK_LEN_U64
         };
-        let empty_data_pos = &mut self.empty_data_list.list;
+        let empty_data_pos = &mut self.empty_data_list.list_mut();
 
         let value = if let Some(value) = Self::get_pos_gc(length, empty_data_pos) {
             value
@@ -251,6 +264,8 @@ impl PackIO /*核心*/ {
         None
     }
 
+    /// 同步已记录的文件长度（当写入指针超出当前记录长度时更新）。
+    /// Synchronize the tracked file length (updated when the write pointer exceeds the current recorded length).
     //更新文件大小
     pub(crate) fn sync_file_length(&mut self) {
         //判断是否需要设置
@@ -259,6 +274,8 @@ impl PackIO /*核心*/ {
         }
     }
 
+    /// 设置底层文件的大小（截断或扩展）并同步内部长度记录。
+    /// Set the underlying file size (truncate or extend) and sync the internal length record.
     //设置包文件大小
     pub(crate) fn set_len(&mut self, len: u64) -> io::Result<()> {
         self.file.set_len(len)?;
@@ -267,10 +284,14 @@ impl PackIO /*核心*/ {
         Ok(())
     }
 
+    /// 同步底层文件数据到磁盘。
+    /// Sync the underlying file data to disk.
     pub(crate) fn _sync_data(&mut self) -> io::Result<()> {
         self.file.sync_data()
     }
 
+    /// 尝试克隆底层文件句柄（Unix only，Windows 不支持）。
+    /// Try to clone the underlying file handle (Unix only, not supported on Windows).
     #[cfg(not(target_os = "windows"))]
     pub(crate) fn try_clone_pack_file(&self) -> io::Result<File> {
         self.file
@@ -280,6 +301,8 @@ impl PackIO /*核心*/ {
 }
 
 impl PackIO /*读*/ {
+    /// 从指定文件位置读取清单数据块。
+    /// Read a manifest data block from the given file position.
     pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
         let mut file = &self.file;
         let block_data_buf = vec![0; DATA_BLOCK_LEN];
@@ -317,6 +340,8 @@ impl PackIO /*读*/ {
         ManifestDataBlock::from_block_data_new(block_data, file_pos)
     }
 
+    /// 设置文件读取指针位置。
+    /// Set the file read pointer position.
     //设置文件地址
     pub(crate) fn set_pos_read(&self, pos: u64) -> io::Result<()> {
         if self.run_data.pos != pos {
@@ -329,14 +354,20 @@ impl PackIO /*读*/ {
 
 //写
 impl PackIO /*写*/ {
+    /// 释放底层文件的排他锁。
+    /// Release the exclusive lock on the underlying file.
     pub(crate) fn unlock(&mut self) -> io::Result<()> {
         self.file.unlock()
     }
 
+    /// 获取底层文件的排他锁。
+    /// Acquire the exclusive lock on the underlying file.
     pub(crate) fn lock(&mut self) -> io::Result<()> {
         self.file.lock()
     }
 
+    /// 设置文件写入指针位置并更新内部位置跟踪。
+    /// Set the file write pointer position and update internal position tracking.
     //设置文件地址
     pub(crate) fn set_pos_write(&mut self, pos: u64) -> io::Result<()> {
         self.set_pos_read(pos)?;
@@ -344,6 +375,15 @@ impl PackIO /*写*/ {
         Ok(())
     }
 
+    /// 将清单数据块写入文件。
+    ///
+    /// 如果 `new_block` 为 `true`（块大小发生变化），则在文件新位置写入
+    /// 并将旧位置提交垃圾回收。返回实际写入的文件位置。
+    ///
+    /// Write a manifest data block to file.
+    ///
+    /// If `new_block` is `true` (block size changed), writes at a new file position
+    /// and submits the old position for garbage collection. Returns the actual file position written.
     pub(crate) fn manifest_data_block_write(
         &mut self,
         block_data: &[u8],

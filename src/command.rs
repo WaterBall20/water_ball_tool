@@ -24,7 +24,21 @@ static BUF_LEN: usize = 1024 * 1024;
 const PROGRESS_STYLE_TEMPLATE: &str =
     "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
 
-//文件查找器
+/// 文件查找器——多线程扫描目录并输出 JSON 文件列表。
+///
+/// 参数格式: `[搜索路径, 输出路径?, 跳过符号链接标记?]`
+///
+/// - 第一个参数为搜索路径，默认使用当前目录 `"."`。
+/// - 第二个参数为可选的 JSON 输出文件路径，未提供时输出到日志。
+/// - 第三个参数包含 `-s` 时跳过符号链接。
+///
+/// File finder — multi-threaded directory scanner that outputs a JSON file list.
+///
+/// Argument format: `[search_path, output_path?, skip_symlink_flag?]`
+///
+/// - First argument is the search path, defaults to `"."`.
+/// - Second argument is an optional JSON output file path; logs to console if omitted.
+/// - Third argument containing `-s` enables symlink skipping.
 pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[指定搜索路径,输出路径,跳过符号链接]
     //获取参数中的指定的路径，若没有则使用程序路径
@@ -149,7 +163,17 @@ fn search_files(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io:
     }
 }
 
-//水球包文件
+/// 水球包文件路由入口，根据第一个参数分派到打包/解包/哈希校验子命令。
+///
+/// - `-s` : 解包文件 → `<包文件路径> <输出目录>`
+/// - `-m` : 打包文件 → `<输入目录> <包文件路径> [-f]`（`-f` 不分离清单）
+/// - `-h` : 哈希校验 → `<包文件路径>`
+///
+/// WaterBall pack file router, dispatches to pack/unpack/verify subcommands.
+///
+/// - `-s` : Unpack → `<pack_path> <output_dir>`
+/// - `-m` : Pack → `<input_dir> <pack_path> [-f]` (`-f` disables separate manifest)
+/// - `-h` : Hash verify → `<pack_path>`
 pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     let arg = args.first().expect("参数不足");
     match arg.as_str() {
@@ -168,7 +192,20 @@ pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
     }
 }
 
-//水球包文件打包
+/// 打包目录为水球包文件。
+///
+/// 参数: `<输入目录> <包文件路径> [-f]`
+///
+/// 使用 `FileFinder` 多线程扫描源目录，将每个文件写入包的虚拟文件系统。
+/// `-f` 标志强制将清单数据嵌入 `.pack` 文件而非分离的 `.wbm` 文件。
+///
+/// Pack a directory into a WaterBall pack file.
+///
+/// Args: `<input_dir> <pack_path> [-f]`
+///
+/// Uses `FileFinder` to multi-threaded scan the source directory, then writes
+/// each file into the pack's virtual filesystem. The `-f` flag forces manifest
+/// data to be embedded in the `.pack` file instead of a separate `.wbm`.
 pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
     assert!(
@@ -399,7 +436,19 @@ fn copy_file_into_pack(
     }
 }
 
-//水球包文件解包
+/// 解包水球包文件到磁盘目录。
+///
+/// 参数: `<包文件路径> <输出目录>`
+///
+/// 加载包内所有元数据和文件结构，将每个虚拟文件写入输出目录。
+/// 大文件（>512MiB）在日志中单独提示。
+///
+/// Unpack a WaterBall pack file to a disk directory.
+///
+/// Args: `<pack_path> <output_dir>`
+///
+/// Loads all metadata and file structure from the pack, then writes each
+/// virtual file to the output directory. Large files (>512MiB) are noted in logs.
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
     assert!(

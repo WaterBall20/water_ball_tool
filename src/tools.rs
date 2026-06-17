@@ -6,7 +6,13 @@ use std::path::Path;
 pub(crate) struct PathTool;
 
 impl PathTool {
-    //将路径转换为Vec
+    /// 将文件路径分割为字符串数组，排除根目录分隔符。
+    ///
+    /// 例如 `"a/b/c"` 返回 `["a", "b", "c"]`。
+    ///
+    /// Split a file path into a vector of string segments, excluding root separators.
+    ///
+    /// For example, `"a/b/c"` returns `["a", "b", "c"]`.
     pub(crate) fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         let path = path.as_ref();
         /*TODO:路径前部处理
@@ -28,6 +34,13 @@ impl PathTool {
     }
 }
 
+/// 将字节数格式化为人类可读的字符串。
+///
+/// 支持 B、KiB、MiB、GiB 单位，保留两位小数。
+///
+/// Format a byte count into a human-readable string.
+///
+/// Supports B, KiB, MiB, GiB units with two decimal places.
 #[must_use]
 pub fn bytes_len_to_string(len: u64) -> String {
     const B_LEN: u64 = 1024;
@@ -48,6 +61,9 @@ struct _WBFPTool {}
 pub struct TestTool;
 #[cfg(test)]
 impl TestTool {
+    /// 清理测试产生的包文件及其关联文件（`.wbm`、`.lock`）。
+    ///
+    /// Clean up test-generated pack files and their associated files (`.wbm`, `.lock`).
     pub fn remove_test_pack_files<P: AsRef<Path>>(path: &P) {
         let pack_path = path
             .as_ref()

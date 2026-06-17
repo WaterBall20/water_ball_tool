@@ -103,6 +103,13 @@ impl PackFileHash {
 }
 
 impl PackFileWR {
+    /// 创建虚拟文件读写器。
+    ///
+    /// `new` = `true` 表示新创建的文件（写入模式），`false` 表示打开已存在的文件。
+    ///
+    /// Create a virtual file read-writer.
+    ///
+    /// `new` = `true` means newly created file (write mode), `false` means opening an existing file.
     pub(in crate::wb_files_pack) fn create(
         new: bool,
         manager: Arc<Mutex<WBFPManager>>,
@@ -114,7 +121,7 @@ impl PackFileWR {
         Ok(PackFileWR {
             manager,
             pack_io: pack_io.clone(),
-            pos: if end_pos { metadata.len } else { 0 },
+            pos: if end_pos { metadata.len() } else { 0 },
             temp_pos_index: 0,
             temp_pos_this_len: 0,
             path_list: Some(path_list),
@@ -123,10 +130,12 @@ impl PackFileWR {
         })
     }
 
+    /// 返回虚拟文件的总长度（字节）。
+    /// Returns the total length of this virtual file in bytes.
     //获取大小
     pub fn get_len(&self) -> u64 {
         if let Some(metadata) = &self.metadata {
-            metadata.len
+            metadata.len()
         } else {
             panic!("逻辑错误");
         }
@@ -159,10 +168,10 @@ impl PackFileWR {
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
         while let Some(metadata) = &self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = &metadata.file_type
-            && pos_index < data_pos_list.list.len()
+            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type()
+            && pos_index < data_pos_list.list().len()
         {
-            let (mut pos, mut len) = *data_pos_list.list.get(pos_index).unwrap();
+            let (mut pos, mut len) = *data_pos_list.list().get(pos_index).unwrap();
             //当前校准
             if pos_index == start_pos_list_item_index {
                 //位置偏移
@@ -178,8 +187,8 @@ impl PackFileWR {
             }
             //大于就添加完所有空闲块
             //读取额外判断
-            if is_read && start_pos + len > metadata.len {
-                len = metadata.len - start_pos;
+            if is_read && start_pos + len > metadata.len() {
+                len = metadata.len() - start_pos;
             }
             r_pos.push((pos, len));
             //增值
@@ -193,69 +202,83 @@ impl PackFileWR {
     //增加分配大小
     fn add_running_len(&mut self, add_len: u64) -> io::Result<()> {
         if let Some(metadata) = &mut self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = &mut metadata.file_type
+            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
-            data_pos_list.list.push(pack_file.get_file_pos(add_len))
+            data_pos_list.list_mut().push(pack_file.get_file_pos(add_len))
         }
         Ok(())
     }
 
+    /// 设置虚拟文件的大小。
+    ///
+    /// 增大时自动分配新的数据块，减小时释放多余空间并提交垃圾回收。
+    ///
+    /// Set the size of this virtual file.
+    ///
+    /// When increasing, new data blocks are automatically allocated.
+    /// When decreasing, excess space is released and submitted for garbage collection.
     //设置文件大小
     pub fn set_len(&mut self, len: u64) -> io::Result<()> {
         const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
+        //提前读取len避免借用冲突
+        let metadata_len = self.metadata.as_ref().map(|m| m.len());
         //大小判断
         if let Some(metadata) = &mut self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = &mut metadata.file_type
+            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
-            if len > metadata.len {
+            let old_metadata_len = metadata_len.unwrap_or(0);
+            if len > old_metadata_len {
                 //增加大小
-                let add_len = len - metadata.len;
+                let add_len = len - old_metadata_len;
                 //获取分配
                 let add_pos = pack_file.get_file_pos(add_len);
-                data_pos_list.list.push(add_pos);
-                metadata.len += add_len;
+                data_pos_list.list_mut().push(add_pos);
+                metadata.add_len(add_len);
             } else {
                 //减少大小
-                metadata.len = len;
                 //更新数据块列表和垃圾回收提交
-                let mut back_len = 0;
+                let mut back_len_cnt = 0u64;
 
                 let mut new_pos_list = Vec::new();
                 let mut gc_list = Vec::new();
-                for value in &data_pos_list.list {
-                    let (pos, len) = *value;
-                    back_len += len;
-                    let back_len_c = back_len / DATA_BLOCK_LEN_U64;
-                    let this_back_len_c = metadata.len / DATA_BLOCK_LEN_U64 + 1;
+                for value in data_pos_list.list() {
+                    let (pos, item_len) = *value;
+                    back_len_cnt += item_len;
+                    let back_len_c = back_len_cnt / DATA_BLOCK_LEN_U64;
+                    let this_back_len_c = len / DATA_BLOCK_LEN_U64 + 1;
                     //大于实际大小
                     if back_len_c > this_back_len_c {
                         let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
-                        if len > s_len {
+                        if item_len > s_len {
                             //删除的大小小于快大小
-                            new_pos_list.push((pos, len - s_len));
+                            new_pos_list.push((pos, item_len - s_len));
                             gc_list.push((pos + s_len, s_len));
                         } else {
                             //删除的大小等于快大小
-                            assert_eq!(s_len, len); //逻辑判断
+                            assert_eq!(s_len, item_len); //逻辑判断
                             //不执行任何操作
                         }
                     } else {
                         new_pos_list.push(*value);
                     }
                 }
+                //更新元数据
+                *data_pos_list.list_mut() = new_pos_list;
                 //垃圾提交
                 pack_file.file_gc_add(gc_list);
-                //更新元数据
-                data_pos_list.list = new_pos_list;
             }
+        }
+        // Now update metadata length outside the file_type_mut borrow
+        if let Some(metadata) = &mut self.metadata {
+            metadata.set_len(len);
         }
         Ok(())
     }
@@ -322,7 +345,13 @@ impl PackFileWR {
         Ok(())
     }
 
-    //
+    /// 验证文件数据的完整性哈希。
+    ///
+    /// 从文件开头重新读取全部数据计算哈希，与元数据中存储的哈希值比较。
+    ///
+    /// Verify the integrity hash of the file data.
+    ///
+    /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
     pub fn verify_hash(&mut self) -> io::Result<bool> {
         //缓冲区
         let old_pos = self.pos;
@@ -334,9 +363,9 @@ impl PackFileWR {
             hash_type,
             hash_value,
             ..
-        } = &metadata.file_type
+        } = metadata.file_type()
         {
-            let in_hash = PackFileHash::from_new(*hash_type, hash_value);
+            let in_hash = PackFileHash::from_new(*hash_type, hash_value.as_slice());
             //循环读取
             let mut read_hash = self.read_hash_v()?;
             self.set_pos(old_pos)?;
@@ -349,9 +378,9 @@ impl PackFileWR {
     fn read_hash_v(&mut self) -> io::Result<PackFileHash> {
         //计算哈希
         if let Some(metadata) = &self.metadata
-            && let PackFileMetadataType::File { hash_type, .. } = &metadata.file_type
+            && let PackFileMetadataType::File { hash_type, .. } = metadata.file_type()
         {
-            let len = metadata.len;
+            let len = metadata.len();
             let hash_type = *hash_type;
             let mut buf = vec![0; usize::try_from(DATA_DATA_BLOCK_LEN).unwrap()];
             //设置位置
@@ -369,6 +398,13 @@ impl PackFileWR {
         }
     }
 
+    /// 提交文件写入：计算最终哈希、释放预分配空间、保存元数据。
+    ///
+    /// 通常在 `drop` 时自动调用。
+    ///
+    /// Submit the file write: compute the final hash, release pre-allocated space, save metadata.
+    ///
+    /// Typically called automatically in `drop`.
     pub fn submit(self) -> io::Result<()> {
         let mut m = self;
         m.commit_data()
@@ -380,7 +416,7 @@ impl PackFileWR {
             let read_hash = self.read_hash_v();
             if let Ok(read_hash) = read_hash
                 && let Some(metadata) = &mut self.metadata
-                && let PackFileMetadataType::File { hash_value, .. } = &mut metadata.file_type
+                && let PackFileMetadataType::File { hash_value, .. } = metadata.file_type_mut()
             {
                 *hash_value = read_hash.get_hash_value();
             }
@@ -518,9 +554,9 @@ impl Write for PackFileWR {
         self.add_pos(write_len as u64)?;
         //大小判断，更新大小
         if let Some(metadata) = &mut self.metadata
-            && self.pos > metadata.len
+            && self.pos > metadata.len()
         {
-            metadata.len = self.pos
+            metadata.set_len(self.pos)
         }
         Ok(write_len)
     }

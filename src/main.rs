@@ -42,8 +42,16 @@ impl Write for MultiProgressWriter {
     }
 }
 
+/// 初始化全局日志系统，将 tracing 输出重定向到 indicatif 进度条。
+///
+/// 在 debug 模式下日志级别为 `debug`，release 模式下为 `info`。
+/// 日志通过 `MultiProgressWriter` 适配器输出，与进度条共存而不互相干扰。
+///
+/// Initialize global logging, redirecting tracing output to the indicatif progress bar.
+///
+/// Log level is `debug` in debug mode and `info` in release mode.
+/// Logs are routed through a `MultiProgressWriter` adapter to coexist with the progress bar.
 //AI===
-//初始化
 pub fn init_global_logging(mp: &MultiProgress) {
     #[cfg(debug_assertions)]
     let filter = EnvFilter::new("debug"); // 开发模式看 debug
