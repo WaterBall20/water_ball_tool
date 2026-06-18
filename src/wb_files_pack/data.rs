@@ -185,9 +185,8 @@ impl ManifestDataBlock {
             + MANIFEST_DATA_BLOCK_DATA_VER_LEN * 2
             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN;
         let block_len = block_ab_len * 2;
-        let block_ab_len = block_len / DATA_BLOCK_LEN;
-        let block_len = block_ab_len + 1;
-        let block_len = block_len * DATA_BLOCK_LEN;
+        let block_ab_len = (block_len + DATA_BLOCK_LEN - 1) / DATA_BLOCK_LEN;
+        let block_len = block_ab_len * DATA_BLOCK_LEN;
         assert!(block_len.is_multiple_of(DATA_BLOCK_LEN));
         block_len
     }
@@ -271,18 +270,18 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + a_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + a_data_len]
                 } else {
                     let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
                     &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + b_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + b_data_len]
                 },
             ))
         } else {
@@ -356,7 +355,10 @@ impl ManifestDataBlock {
             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN;
         for (index, value) in data.iter().enumerate() {
             let data_index = data_index + index;
-            assert!(data_index < ab_block_data.len() - MANIFEST_DATA_BLOCK_DATA_VER_LEN, "数据超出块容量 / data exceeds block capacity");
+            assert!(
+                data_index < ab_block_data.len() - MANIFEST_DATA_BLOCK_DATA_VER_LEN,
+                "数据超出块容量 / data exceeds block capacity"
+            );
             ab_block_data[data_index] = *value;
         }
     }
@@ -370,8 +372,8 @@ impl ManifestDataBlock {
             Ok(
                 &block_data[b_data_index + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
                     ..b_data_index
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
             )
         }
     }
@@ -388,7 +390,7 @@ pub(crate) trait ManifestDataBlockTrait {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone)]
 pub struct Attribute {
     version: u16,
     version_compatible: u16,
@@ -401,6 +403,23 @@ pub struct Attribute {
     dir_count: u64,
     data_len: u64,
     data_block: ManifestDataBlock,
+    dirty: bool,
+}
+
+impl PartialEq for Attribute {
+    fn eq(&self, other: &Self) -> bool {
+        self.version == other.version
+            && self.version_compatible == other.version_compatible
+            && self.cow == other.cow
+            && self.empty_data_pos_list_pos == other.empty_data_pos_list_pos
+            && self.manifest_empty_data_pos_list_pos == other.manifest_empty_data_pos_list_pos
+            && self.manifest_file_len == other.manifest_file_len
+            && self.root_struct_pos == other.root_struct_pos
+            && self.file_count == other.file_count
+            && self.dir_count == other.dir_count
+            && self.data_len == other.data_len
+            && self.data_block == other.data_block
+    }
 }
 
 impl Default for Attribute {
@@ -417,6 +436,7 @@ impl Default for Attribute {
             dir_count: 0,
             data_len: 0,
             data_block: ManifestDataBlock::default(),
+            dirty: false,
         }
     }
 }
@@ -470,42 +490,52 @@ impl Attribute {
 
     pub(crate) fn set_root_struct_pos(&mut self, pos: u64) {
         self.root_struct_pos = pos;
+        self.dirty = true;
     }
 
     pub(crate) fn add_file_count(&mut self, delta: u64) {
         self.file_count += delta;
+        self.dirty = true;
     }
 
     pub(crate) fn add_dir_count(&mut self, delta: u64) {
         self.dir_count += delta;
+        self.dirty = true;
     }
 
     pub(crate) fn add_data_len(&mut self, delta: u64) {
         self.data_len += delta;
+        self.dirty = true;
     }
 
     pub(crate) fn set_empty_data_pos_list_pos(&mut self, pos: u64) {
         self.empty_data_pos_list_pos = pos;
+        self.dirty = true;
     }
 
     pub(crate) fn set_cow(&mut self, cow: bool) {
         self.cow = cow;
+        self.dirty = true;
     }
 
     pub(crate) fn set_version(&mut self, version: u16) {
         self.version = version;
+        self.dirty = true;
     }
 
     pub(crate) fn set_version_compatible(&mut self, version_compatible: u16) {
         self.version_compatible = version_compatible;
+        self.dirty = true;
     }
 
     pub(crate) fn set_manifest_empty_data_pos_list_pos(&mut self, pos: u64) {
         self.manifest_empty_data_pos_list_pos = pos;
+        self.dirty = true;
     }
 
     pub(crate) fn set_manifest_file_len(&mut self, len: u64) {
         self.manifest_file_len = len;
+        self.dirty = true;
     }
 
     pub(crate) fn load(data_block: ManifestDataBlock) -> io::Result<Self> {
@@ -517,7 +547,7 @@ impl Attribute {
         let version_compatible = u16::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                 ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
+                    + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
                 .try_into()
                 .unwrap(),
         );
@@ -539,21 +569,21 @@ impl Attribute {
         let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-                + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
+                    + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
                 .try_into()
                 .unwrap(),
         );
         let manifest_file_len = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
-                + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
+                    + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
                 .try_into()
                 .unwrap(),
         );
         let root_struct_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
+                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
                 .try_into()
                 .unwrap(),
         );
@@ -587,7 +617,16 @@ impl Attribute {
             manifest_file_len,
             root_struct_pos,
             data_block,
+            dirty: false,
         })
+    }
+
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub(crate) fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 }
 
@@ -673,7 +712,10 @@ impl DataPosList {
 
     pub(crate) fn load(data: &[u8], data_block: Option<ManifestDataBlock>) -> Self {
         let count = usize::from_le_bytes(data[..DATA_POS_LIST_COUNT_LEN].try_into().unwrap());
-        let data_len = count * DATA_POS_LIST_ITEM_LEN + DATA_POS_LIST_COUNT_LEN;
+        let data_len = count
+            .checked_mul(DATA_POS_LIST_ITEM_LEN)
+            .and_then(|v| v.checked_add(DATA_POS_LIST_COUNT_LEN))
+            .unwrap_or(data.len());
         let data_pos_list_data = &data[DATA_POS_LIST_COUNT_LEN..data_len];
         let mut list = Vec::with_capacity(count);
         while list.len() < count {
@@ -957,6 +999,10 @@ impl PackStruct {
         self.dirty = false;
     }
 
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     pub(crate) fn add_item(&mut self, name: String, item: PackStructItem) {
         self.items.insert(name, item);
         self.dirty = true;
@@ -998,9 +1044,9 @@ impl PackStruct {
                     self.dirty = true;
                     Ok(())
                 }
-                PackStructItemType::File => Err(Error::other(format!(
-                    r#"结构项 "{name}" 是文件不是目录"#
-                ))),
+                PackStructItemType::File => {
+                    Err(Error::other(format!(r#"结构项 "{name}" 是文件不是目录"#)))
+                }
             }
         } else {
             Err(Error::other(format!("结构项 \"{name}\" 不存在")))
@@ -1033,10 +1079,7 @@ impl PackStruct {
         }
     }
 
-    pub(crate) fn try_lock_item_metadata(
-        &mut self,
-        name: &str,
-    ) -> io::Result<PackFileMetadata> {
+    pub(crate) fn try_lock_item_metadata(&mut self, name: &str) -> io::Result<PackFileMetadata> {
         if let Some(item) = self.items.get_mut(name) {
             item.metadata.try_lock()
         } else {
@@ -1055,20 +1098,16 @@ impl PackStruct {
         }
     }
 
-    pub(crate) fn set_item_pack_struct(
-        &mut self,
-        name: &str,
-        ps: PackStruct,
-    ) -> io::Result<()> {
+    pub(crate) fn set_item_pack_struct(&mut self, name: &str, ps: PackStruct) -> io::Result<()> {
         if let Some(item) = self.items.get_mut(name) {
             match &mut item.item_type {
                 PackStructItemType::Dir { pack_struct, .. } => {
                     *pack_struct = Some(ps);
                     Ok(())
                 }
-                PackStructItemType::File => Err(Error::other(format!(
-                    r#"结构项 "{name}" 是文件不是目录"#
-                ))),
+                PackStructItemType::File => {
+                    Err(Error::other(format!(r#"结构项 "{name}" 是文件不是目录"#)))
+                }
             }
         } else {
             Err(Error::other(format!("结构项 \"{name}\" 不存在")))
@@ -1234,7 +1273,12 @@ impl PartialEq for PackFileMetadata {
 }
 
 impl PackFileMetadata {
-    pub(crate) fn new(cow: bool, len: u64, modified: u128, file_type: PackFileMetadataType) -> Self {
+    pub(crate) fn new(
+        cow: bool,
+        len: u64,
+        modified: u128,
+        file_type: PackFileMetadataType,
+    ) -> Self {
         Self {
             data_block: ManifestDataBlock::default(),
             cow,
@@ -1309,20 +1353,20 @@ impl PackFileMetadata {
     }
 
     pub(crate) fn add_file_count(&mut self, delta: u64) {
-        if delta > 0 {
-            if let PackFileMetadataType::Dir { file_count, .. } = &mut self.file_type {
-                *file_count += delta;
-                self.dirty = true;
-            }
+        if delta > 0
+            && let PackFileMetadataType::Dir { file_count, .. } = &mut self.file_type
+        {
+            *file_count += delta;
+            self.dirty = true;
         }
     }
 
     pub(crate) fn add_dir_count(&mut self, delta: u64) {
-        if delta > 0 {
-            if let PackFileMetadataType::Dir { dir_count, .. } = &mut self.file_type {
-                *dir_count += delta;
-                self.dirty = true;
-            }
+        if delta > 0
+            && let PackFileMetadataType::Dir { dir_count, .. } = &mut self.file_type
+        {
+            *dir_count += delta;
+            self.dirty = true;
         }
     }
 

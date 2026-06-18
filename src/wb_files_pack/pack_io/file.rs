@@ -4,7 +4,7 @@
 use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, PackFileMetadata, PackFileMetadataType,
+    PackFileMetadata, PackFileMetadataType, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
 };
 use blake3::{Hash, Hasher};
 use std::io;
@@ -253,7 +253,8 @@ impl PackFileWR {
                     let (pos, item_len) = *value;
                     back_len_cnt += item_len;
                     let back_len_c = back_len_cnt / DATA_BLOCK_LEN_U64;
-                    let this_back_len_c = len / DATA_BLOCK_LEN_U64 + 1;
+                    let this_back_len_c =
+                        (len + DATA_BLOCK_LEN_U64 - 1) / DATA_BLOCK_LEN_U64;
                     //大于实际大小
                     if back_len_c > this_back_len_c {
                         let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
@@ -476,14 +477,14 @@ impl Seek for PackFileWR {
                     Ok(new_end)
                 } else if pos < 0 {
                     let sub = (-pos) as u64;
-                    let new_pos = if sub <= end { end - sub } else { 0 };
+                    let new_pos = end.saturating_sub(sub);
                     self.set_pos(new_pos)?;
                     Ok(new_pos)
                 } else {
                     self.set_pos(end)?;
                     Ok(end)
                 }
-            },
+            }
         }
     }
 }
@@ -516,11 +517,6 @@ impl Read for PackFileWR {
 impl Write for PackFileWR {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.is_write = true;
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        manager.this_write_lock()?;
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()

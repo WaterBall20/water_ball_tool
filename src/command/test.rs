@@ -264,3 +264,130 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     wbfp(args.as_slice(), Some(&mp));
     _ = fs::remove_dir_all(&out_file_path);
 }
+
+// === 符号链接循环检测 / Symlink cycle detection ===
+
+use std::io;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+const SYMLINK_TEST_DIR: &str = "./temp/test/ff/symlink_cmd";
+
+#[cfg(unix)]
+fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(original, link)
+}
+
+#[cfg(windows)]
+fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
+    let original = original.canonicalize().unwrap_or_else(|_| original.to_path_buf());
+    if original.is_dir() {
+        std::os::windows::fs::symlink_dir(&original, link)
+    } else {
+        std::os::windows::fs::symlink_file(&original, link)
+    }
+}
+
+fn try_create_symlink_cmd(original: &Path, link: &Path) -> Option<()> {
+    match create_symlink_cmd(original, link) {
+        Ok(()) => Some(()),
+        Err(_) => None,
+    }
+}
+
+fn setup_symlink_dir(name: &str) -> PathBuf {
+    let dir = PathBuf::from(SYMLINK_TEST_DIR).join(name);
+    _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn create_file_cmd(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    let mut f = fs::File::create(&path).unwrap();
+    f.write_all(b"ok").unwrap();
+    path
+}
+
+/// ff 命令：搜索含符号链接的目录，符号链接应出现在 JSON 输出中
+#[test]
+fn ff_with_symlinks_in_output() {
+    let root = setup_symlink_dir("output_json");
+    create_file_cmd(&root, "real.txt");
+    let link = root.join("link.txt");
+    if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
+        _ = fs::remove_dir_all(&root);
+        return;
+    }
+
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+    let json_path = root.join("result.json");
+    _ = fs::remove_file(&json_path);
+
+    let args: Vec<String> = vec![
+        root.to_str().unwrap().to_string(),
+        json_path.to_str().unwrap().to_string(),
+    ];
+    ff(args.as_slice(), Some(&mp));
+
+    let json_str = fs::read_to_string(&json_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let file_count = parsed["file_count"].as_u64().unwrap();
+    assert!(file_count >= 1, "JSON 输出应包含文件");
+
+    _ = fs::remove_dir_all(&root);
+}
+
+/// ff -s：跳过符号链接，输出中不应包含符号链接
+#[test]
+fn ff_skip_symlinks_excludes_them() {
+    let root = setup_symlink_dir("skip_in_output");
+    create_file_cmd(&root, "real.txt");
+    let link = root.join("link.txt");
+    if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
+        _ = fs::remove_dir_all(&root);
+        return;
+    }
+
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+    let json_path = root.join("result.json");
+    _ = fs::remove_file(&json_path);
+
+    let args: Vec<String> = vec![
+        root.to_str().unwrap().to_string(),
+        json_path.to_str().unwrap().to_string(),
+        String::from("-s"),
+    ];
+    ff(args.as_slice(), Some(&mp));
+
+    let json_str = fs::read_to_string(&json_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    let file_count = parsed["file_count"].as_u64().unwrap();
+    assert_eq!(file_count, 1, "跳过符号链接后应只有 1 个真实文件");
+
+    _ = fs::remove_dir_all(&root);
+}
+
+/// ff：搜索含祖先符号链接循环的目录，不应崩溃
+#[test]
+fn ff_ancestor_symlink_does_not_crash() {
+    let root = setup_symlink_dir("ancestor_crash_test");
+    let sub = root.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    create_file_cmd(&sub, "child.txt");
+    let link_back = sub.join("back_to_root");
+    if try_create_symlink_cmd(&root, &link_back).is_none() {
+        _ = fs::remove_dir_all(&root);
+        return;
+    }
+
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+
+    let args: Vec<String> = vec![root.to_str().unwrap().to_string()];
+    ff(args.as_slice(), Some(&mp));
+
+    _ = fs::remove_dir_all(&root);
+}

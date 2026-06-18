@@ -47,13 +47,14 @@ fn reopen_write_then_read_back(pack: &mut Allocator, path: &str, data: &[u8]) {
     assert_eq!(data, buf.as_slice());
 }
 
-
 // === 基础功能 / Basics ===
 
 #[test]
 fn create_pack() {
     let (dir, pack) = setup_ok_test("create_pack");
-    { Allocator::create_new_pack_file2(&pack).unwrap(); }
+    {
+        Allocator::create_new_pack_file2(&pack).unwrap();
+    }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
 }
@@ -70,7 +71,6 @@ fn create_dir_all_and_get() {
     _ = fs::remove_dir_all(&dir);
 }
 
-
 // === 文件创建+读写（分离清单） / File create + r/w (separate manifest) ===
 
 #[test]
@@ -79,7 +79,11 @@ fn file_write_read_back() {
     {
         let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
         write_then_read_back(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        write_then_read_back(&mut alloc, "Test/B", &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110]);
+        write_then_read_back(
+            &mut alloc,
+            "Test/B",
+            &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
+        );
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -91,12 +95,15 @@ fn file_write_read_back_no_len() {
     {
         let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
         write_then_read_back_no_len(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        write_then_read_back_no_len(&mut alloc, "Test/B", &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110]);
+        write_then_read_back_no_len(
+            &mut alloc,
+            "Test/B",
+            &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
+        );
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
 }
-
 
 // === 文件创建+读写（不分离清单） / File create + r/w (no separate manifest) ===
 
@@ -106,7 +113,11 @@ fn file_write_read_back_no_separate_manifest() {
     {
         let mut alloc = Allocator::create_pack_file(&pack, false, false, true).unwrap();
         write_then_read_back(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        write_then_read_back(&mut alloc, "Test/B", &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110]);
+        write_then_read_back(
+            &mut alloc,
+            "Test/B",
+            &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
+        );
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -118,12 +129,15 @@ fn file_write_read_back_no_len_no_separate_manifest() {
     {
         let mut alloc = Allocator::create_pack_file(&pack, false, false, true).unwrap();
         write_then_read_back_no_len(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        write_then_read_back_no_len(&mut alloc, "Test/B", &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110]);
+        write_then_read_back_no_len(
+            &mut alloc,
+            "Test/B",
+            &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
+        );
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
 }
-
 
 // === 重新打开并修改 / Reopen and modify ===
 
@@ -137,22 +151,29 @@ fn reopen_and_modify_file() {
     {
         let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
         write_then_read_back(&mut alloc, path_a, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-        write_then_read_back(&mut alloc, path_b, &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110]);
+        write_then_read_back(
+            &mut alloc,
+            path_b,
+            &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
+        );
     }
 
     // 第二轮：重新打开，覆写（其中 A 从 10 字节扩到 18 字节，B 缩到不同内容）
     {
         let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        reopen_write_then_read_back(&mut alloc, path_a,
-            &[101, 124, 35, 124, 73, 24, 62, 83, 61, 124, 124, 12, 55, 21, 21, 144, 56, 1]);
-        reopen_write_then_read_back(&mut alloc, path_b,
-            &[10, 25, 33, 41, 53, 62, 5, 12, 14, 1]);
+        reopen_write_then_read_back(
+            &mut alloc,
+            path_a,
+            &[
+                101, 124, 35, 124, 73, 24, 62, 83, 61, 124, 124, 12, 55, 21, 21, 144, 56, 1,
+            ],
+        );
+        reopen_write_then_read_back(&mut alloc, path_b, &[10, 25, 33, 41, 53, 62, 5, 12, 14, 1]);
     }
 
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
 }
-
 
 // === 错误场景 / Error cases ===
 

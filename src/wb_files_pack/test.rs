@@ -1,9 +1,9 @@
+use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
 use crate::wb_files_pack::{
     Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata,
     PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
     DATA_BLOCK_LEN,
 };
-use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -404,7 +404,8 @@ fn get_ver_accepts_nonzero() {
     let ver: u32 = 42;
     let ver_bytes = ver.to_le_bytes();
     // 设置头部版本
-    data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
+    data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
+        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
         .copy_from_slice(&ver_bytes);
     // 设置尾部版本
     let tail_start = block_size - MANIFEST_DATA_BLOCK_DATA_VER_LEN;

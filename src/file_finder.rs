@@ -25,6 +25,62 @@ use std::{io, thread};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
+// === 平台相关的 inode 标识 / Platform-specific inode key ===
+
+/// 文件/目录的唯一标识，用于符号链接循环检测。
+/// Unix: `(dev << 64) | ino`；Windows: `canonicalize()` 后的路径。
+///
+/// Unique file/directory identifier used for symlink cycle detection.
+/// Unix: `(dev << 64) | ino`; Windows: canonicalized path via `canonicalize()`.
+#[cfg(unix)]
+type InodeKey = u128;
+
+#[cfg(windows)]
+type InodeKey = PathBuf;
+
+/// 从 Metadata 提取 inode 标识（Unix）/ Extract inode key from Metadata (Unix)
+#[cfg(unix)]
+fn get_inode_key(_path: &Path, metadata: &Metadata) -> InodeKey {
+    use std::os::unix::fs::MetadataExt;
+    ((metadata.dev() as u128) << 64) | (metadata.ino() as u128)
+}
+
+/// 从规范路径获取标识（Windows）/ Get key from canonical path (Windows)
+///
+/// 使用 `canonicalize()` 解析符号链接的真实路径。
+/// 如果解析失败则回退到原始路径。
+///
+/// 注意：Windows 上以 `PathBuf` 作为 `InodeKey`，不同路径名可能指向同一文件，
+/// 因此可能无法检测所有符号链接循环。这是 Windows 平台固有的限制。
+///
+/// Uses `canonicalize()` to resolve symlink real path.
+/// Falls back to the original path if resolution fails.
+///
+/// Note: On Windows, `PathBuf` is used as `InodeKey`; different path names may point
+/// to the same file, so not all symlink cycles may be detected. This is an inherent
+/// platform limitation.
+#[cfg(windows)]
+fn get_inode_key(path: &Path, _metadata: &Metadata) -> InodeKey {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+// === 工作队列项 / Work queue entry ===
+
+/// 工作队列中的目录任务，携带从根到此目录经过的符号链接链。
+///
+/// 链记录了所有通过符号链接进入的目录的 `InodeKey`，
+/// 用于在后续遇到符号链接时检测循环（同一线程内）。
+///
+/// A directory task in the work queue, carrying the symlink chain
+/// from root to this directory. The chain records `InodeKey` of all
+/// directories entered via symlinks, used to detect cycles when
+/// encountering further symlinks (within the same thread).
+#[derive(Clone)]
+struct DirEntry {
+    path: PathBuf,
+    symlink_chain: Vec<InodeKey>,
+}
+
 /// 文件搜索的完整结果 / Complete file search result
 ///
 /// 包含搜索路径下的所有文件和目录信息的树状结构。
@@ -177,8 +233,9 @@ pub enum FileKind {
 
 /// 文件搜索器 / File search engine
 ///
-/// 使用多线程工作队列并行扫描目录树。
-/// Uses a multi-threaded work-queue to scan the directory tree in parallel.
+/// 使用多线程工作队列并行扫描目录树，基于 inode 链检测符号链接循环。
+/// Uses a multi-threaded work-queue to scan the directory tree in parallel,
+/// with inode-chain-based symlink cycle detection.
 ///
 /// # 使用示例 / Usage Example
 /// ```ignore
@@ -222,9 +279,6 @@ impl FileFinder {
     /// 1. 按父路径分组所有条目 / Group all entries by parent path
     /// 2. 从根开始递归构建 / Recursively build from root
     fn build_tree(flat: &HashMap<PathBuf, FileInfo>, root: &Path) -> FilesList {
-        // 第一步 / Step 1: 按父目录分组 / Group by parent directory
-        // 将 "路径 -> FileInfo" 转换为 "父路径 -> [子路径列表]"
-        // Transform "path -> FileInfo" into "parent -> [child paths]"
         let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for path in flat.keys() {
             if let Some(parent) = path.parent() {
@@ -245,15 +299,13 @@ impl FileFinder {
             current: &Path,
         ) -> (HashMap<String, FileInfo>, u64, u64, u64) {
             let mut files = HashMap::new();
-            let mut total_len = 0u64; // 累计数据大小 / cumulative data size
-            let mut file_count = 0u64; // 累计文件数 / cumulative file count
-            let mut dir_count = 0u64; // 累计目录数 / cumulative dir count
+            let mut total_len = 0u64;
+            let mut file_count = 0u64;
+            let mut dir_count = 0u64;
 
-            // 获取当前目录的所有直接子项 / Get all direct children of current directory
             if let Some(children) = by_parent.get(current) {
                 for child_path in children {
                     if let Some(info) = flat.get(child_path) {
-                        // 提取文件名（不含路径）/ Extract file name (without path)
                         let name = child_path
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -262,19 +314,13 @@ impl FileFinder {
 
                         match info.file_kind() {
                             FileKind::File => {
-                                // 普通文件：直接累加大小和计数
-                                // Regular file: directly add size and count
                                 total_len += info.length();
                                 file_count += 1;
                                 files.insert(name, info.clone());
                             }
                             FileKind::Dir(_) => {
-                                // 目录：递归处理子目录
-                                // Directory: recursively process subdirectory
                                 let (sub_files, sub_data_len, sub_fc, sub_dc) =
                                     build_recursive(flat, by_parent, child_path);
-                                // 目录计数 = 自身(1) + 子目录累计
-                                // Dir count = self(1) + sub-directories cumulative
                                 dir_count += 1 + sub_dc;
                                 file_count += sub_fc;
                                 total_len += sub_data_len;
@@ -300,7 +346,6 @@ impl FileFinder {
             (files, total_len, file_count, dir_count)
         }
 
-        // 第二步 / Step 2: 从根开始递归构建 / Recursively build from root
         let (root_files, data_len, file_count, dir_count) = build_recursive(flat, &by_parent, root);
 
         FilesList {
@@ -314,19 +359,24 @@ impl FileFinder {
 
     /// 处理符号链接条目 / Process a symlink entry
     ///
-    /// 符号链接需要特殊处理：
-    /// 1. 如果开启了跳过标志则跳过
-    /// 2. 检测循环链接（如 a -> b -> a）
-    /// 3. 根据链接目标类型（目录/文件）分别处理
+    /// 仅符号链接会触发循环检测。核心机制：
+    /// 1. 读取链接目标，判断目标类型（目录/文件/断开）
+    /// 2. 如果目标为目录：解析真实路径 → 提取 inode → 在链中查找
+    ///    - 链中存在相同 inode → 循环！跳过
+    ///    - 链中不存在 → 将 inode 附加到链上，推入工作队列
+    /// 3. 如果目标为文件：直接处理（不检查循环——文件不能指向目录）
     ///
-    /// Symlinks require special handling:
-    /// 1. Skip if skip flag is on
-    /// 2. Detect circular links (e.g. a -> b -> a)
-    /// 3. Handle differently based on target type (directory/file)
+    /// Only symlinks trigger cycle detection. Core mechanism:
+    /// 1. Read link target, determine target type (directory/file/broken)
+    /// 2. If target is a directory: resolve real path → extract inode → look up in chain
+    ///    - Same inode found in chain → cycle! skip
+    ///    - Not in chain → append inode to chain, push to work queue
+    /// 3. If target is a file: process directly (no cycle check — files cannot point to dirs)
     fn process_symlink(
         path_buf: &Path,
         skip_symlink: bool,
-        dir_queue: &Arc<Mutex<VecDeque<PathBuf>>>,
+        chain: &[InodeKey],
+        dir_queue: &Arc<Mutex<VecDeque<DirEntry>>>,
         results: &Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
         pb: &Sender<(u64, u64)>,
         thread_file_count: &mut u64,
@@ -337,36 +387,26 @@ impl FileFinder {
             return;
         }
 
-        // 循环链接检测 / Circular link detection
-        // 使用两种简单方法检测：
-        //   1) 链接目标路径是当前路径的前缀 → 链接指向上级
-        //   2) 链接目标以 '.' 开头和结尾 → 可能是循环的相对路径
-        // Uses two simple detection methods:
-        //   1) Link target is a prefix of current path → link points to ancestor
-        //   2) Link target starts and ends with '.' → possibly circular relative path
-        if let Ok(link_path) = path_buf.read_link()
-            && let (Some(link_str), Some(path_str)) = (link_path.to_str(), path_buf.to_str())
-            && (path_str.starts_with(link_str)
-                || (link_str.starts_with('.') && link_str.ends_with('.')))
-        {
-            warn!(r#"检测到符号链接循环，已跳过:"{path_str}" 链接到 "{link_str}""#);
-            return;
-        }
-
         // 跟随符号链接判断实际类型 / Follow symlink to determine actual type
-        // is_dir() 和 is_file() 会跟随符号链接（与 symlink_metadata() 不同）
-        // is_dir() and is_file() follow symlinks (unlike symlink_metadata())
         if path_buf.is_dir() {
             *thread_dir_count += 1;
             if (*thread_dir_count).is_multiple_of(10) {
                 pb.send((0, 10)).ok();
             }
-            // 获取目标目录的元数据 / Get target directory metadata
+
+            // 获取目标目录的元数据以提取 inode / Get target metadata to extract inode
             if let Ok(metadata) = path_buf.metadata() {
+                let inode_key = get_inode_key(path_buf, &metadata);
+
+                // inode 链查重：同一线程内，同一 inode 重复出现 = 循环
+                // inode chain lookup: same inode appearing twice in one chain = cycle
+                if chain.contains(&inode_key) {
+                    warn!(r#"检测到符号链接循环，已跳过:"{}""#, path_buf.display());
+                    return;
+                }
+
                 let modified_time = Self::get_file_modified(&metadata);
                 let name = Self::get_file_name(path_buf).unwrap_or("").to_string();
-                // 插入占位目录信息，count/length 稍后在 build_tree 中填充
-                // Insert placeholder directory info, count/length filled later in build_tree
                 results.lock().unwrap().insert(
                     path_buf.to_path_buf(),
                     FileInfo {
@@ -380,12 +420,19 @@ impl FileFinder {
                         }),
                     },
                 );
+
+                // 将新的 inode 附加到链上，子目录携带扩展后的链
+                // Append new inode to chain; subdirectories carry the extended chain
+                let mut new_chain = chain.to_vec();
+                new_chain.push(inode_key);
+                dir_queue.lock().unwrap().push_back(DirEntry {
+                    path: path_buf.to_path_buf(),
+                    symlink_chain: new_chain,
+                });
             }
-            // 将目录加入工作队列，让工作线程进一步扫描
-            // Add directory to work queue for further scanning by workers
-            dir_queue.lock().unwrap().push_back(path_buf.to_path_buf());
         } else if path_buf.is_file() {
             // 符号链接指向文件 / Symlink points to a file
+            // 文件不会导致循环（文件不能包含目录），不需要 inode 检测
             Self::process_file(path_buf, results, pb, thread_file_count);
         } else {
             // 断开的符号链接 / Broken symlink
@@ -397,16 +444,17 @@ impl FileFinder {
     ///
     /// 获取文件的元数据（大小、修改时间），存入共享结果集。
     /// 每处理 50 个文件向进度通道发送一次更新。
+    /// 注意：普通文件**不做**任何符号链接循环检测。
     ///
     /// Gets file metadata (size, modified time), stores in shared results.
     /// Sends progress update every 50 files.
+    /// Note: regular files do NOT go through any symlink cycle detection.
     fn process_file(
         path_buf: &Path,
         results: &Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
         pb: &Sender<(u64, u64)>,
         thread_file_count: &mut u64,
     ) {
-        // 获取完整元数据（跟随符号链接）/ Get full metadata (follows symlinks)
         let file_metadata = match path_buf.metadata() {
             Ok(m) => m,
             Err(_) => {
@@ -419,8 +467,6 @@ impl FileFinder {
             let len = file_metadata.len();
             let modified_time = Self::get_file_modified(&file_metadata);
 
-            // 将文件信息存入共享 HashMap
-            // Store file info in the shared HashMap
             results.lock().unwrap().insert(
                 path_buf.to_path_buf(),
                 FileInfo {
@@ -431,8 +477,6 @@ impl FileFinder {
                 },
             );
 
-            // 进度更新：每 50 个文件发送一次 (50, 0) 表示新增 50 个文件
-            // Progress: send (50, 0) every 50 files, meaning 50 new files found
             *thread_file_count += 1;
             if (*thread_file_count).is_multiple_of(50) {
                 pb.send((50, 0)).ok();
@@ -442,77 +486,62 @@ impl FileFinder {
 
     /// 工作线程的主循环 / Main loop of a worker thread
     ///
-    /// 不断从共享队列取出目录，扫描其中的条目：
-    /// - 普通文件 → 记录元数据
-    /// - 目录 → 插入结果 + 推回队列
-    /// - 符号链接 → 特殊处理
+    /// 不断从共享队列取出目录任务（包含路径和链），扫描其中的条目：
+    /// - 普通文件 → 记录元数据（不检测循环）
+    /// - 普通目录 → 插入结果 + 推回队列（不检测循环，链不变）
+    /// - 符号链接 → 特殊处理（仅在符号链接→目录时检测 inode 循环）
     ///
     /// 当队列为空时线程退出。多个线程同时从队列取任务实现并行扫描。
     ///
-    /// Continuously pulls directories from the shared queue and scans entries:
-    /// - Regular files → record metadata
-    /// - Directories → insert into results + push back to queue
-    /// - Symlinks → special handling
+    /// Continuously pulls directory tasks (path + chain) from the shared queue:
+    /// - Regular files → record metadata (no cycle detection)
+    /// - Regular directories → insert result + push back (no cycle detection, chain unchanged)
+    /// - Symlinks → special handling (inode cycle detection only for symlink→dir)
     ///
     /// Thread exits when queue is empty. Multiple threads pull from queue for parallel scanning.
     fn run_worker(
-        dir_queue: Arc<Mutex<VecDeque<PathBuf>>>,
+        dir_queue: Arc<Mutex<VecDeque<DirEntry>>>,
         results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
         pb: Sender<(u64, u64)>,
         skip_symlink: bool,
     ) {
-        // 每个线程统计自己的进度，用于限频发送
-        // Each thread tracks its own progress for rate-limited sending
         let mut thread_file_count = 0u64;
         let mut thread_dir_count = 0u64;
 
         loop {
-            // 从队列头部取出一个目录（加锁-取目录-解锁）
-            // Pop a directory from the front of the queue (lock-pop-unlock)
-            //
-            // 用大括号限定 MutexGuard 的生命周期，确保在扫描目录前释放锁。
-            // The braces limit the MutexGuard's lifetime to release the lock before scanning.
-            let dir = {
+            let entry = {
                 let mut queue = dir_queue.lock().unwrap();
                 queue.pop_front()
             };
 
-            // 队列为空 → 没有更多工作，线程退出
-            // Queue is empty → no more work, thread exits
-            let dir = match dir {
+            let entry = match entry {
                 Some(d) => d,
                 None => break,
             };
 
-            // 读取目录条目 / Read directory entries
-            let rd = match dir.read_dir() {
+            let rd = match entry.path.read_dir() {
                 Ok(rd) => rd,
                 Err(err) => match err.kind() {
-                    // 权限不足 → 跳过这个目录 / Permission denied → skip this directory
                     ErrorKind::PermissionDenied => {
-                        error!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, dir.display());
+                        error!(
+                            r#"获取目录"{}"迭代器错误,err:{err:?}"#,
+                            entry.path.display()
+                        );
                         continue;
                     }
-                    // 其他错误也跳过 / Other errors also skipped
                     _ => {
-                        error!(r#"获取目录"{}"迭代器错误,err:{err:?}"#, dir.display());
+                        error!(
+                            r#"获取目录"{}"迭代器错误,err:{err:?}"#,
+                            entry.path.display()
+                        );
                         continue;
                     }
                 },
             };
 
-            // 遍历目录中的每个条目 / Iterate each entry in the directory
-            for entry in rd.flatten() {
-                let path_buf = entry.path();
+            for dir_entry in rd.flatten() {
+                let path_buf = dir_entry.path();
 
-                // 先使用 symlink_metadata() 获取文件类型
-                // symlink_metadata() 不跟随符号链接，可以准确判断是否为符号链接
-                // 相比之下 is_file()/is_dir() 会跟随符号链接，无法区分原始类型
-                //
-                // Use symlink_metadata() first to get file type
-                // symlink_metadata() does NOT follow symlinks, so we can accurately
-                // determine if it's a symlink. is_file()/is_dir() follow symlinks
-                // and would misidentify the original type.
                 let metadata = match path_buf.symlink_metadata() {
                     Ok(m) => m,
                     Err(_) => {
@@ -524,10 +553,10 @@ impl FileFinder {
                 let ft = metadata.file_type();
 
                 if ft.is_symlink() {
-                    // 符号链接 → 特殊处理 / Symlink → special handling
                     Self::process_symlink(
                         &path_buf,
                         skip_symlink,
+                        &entry.symlink_chain,
                         &dir_queue,
                         &results,
                         &pb,
@@ -535,17 +564,15 @@ impl FileFinder {
                         &mut thread_dir_count,
                     );
                 } else if ft.is_dir() {
-                    // 真实目录 / Real directory
+                    // 普通目录：不检测循环，链不变
+                    // Regular directory: no cycle detection, chain unchanged
                     thread_dir_count += 1;
-                    // 每 10 个目录发送一次进度 / Send progress every 10 dirs
                     if thread_dir_count.is_multiple_of(10) {
                         pb.send((0, 10)).ok();
                     }
 
                     let modified_time = Self::get_file_modified(&metadata);
                     let name = Self::get_file_name(&path_buf).unwrap_or("").to_string();
-                    // 插入占位目录信息（length/file_count/dir_count 稍后填充）
-                    // Insert placeholder directory info (length/counts filled later)
                     results.lock().unwrap().insert(
                         path_buf.clone(),
                         FileInfo {
@@ -559,22 +586,20 @@ impl FileFinder {
                             }),
                         },
                     );
-                    // 将目录推回队列，让工作线程继续扫描
-                    // Push directory back to queue for further scanning
-                    dir_queue.lock().unwrap().push_back(path_buf);
+                    dir_queue.lock().unwrap().push_back(DirEntry {
+                        path: path_buf,
+                        symlink_chain: entry.symlink_chain.clone(),
+                    });
                 } else if ft.is_file() {
-                    // 真实文件 / Real file
+                    // 普通文件：不检测循环
+                    // Regular file: no cycle detection
                     Self::process_file(&path_buf, &results, &pb, &mut thread_file_count);
                 } else {
-                    // 无法识别的类型 / Unknown type
                     error!("{path_buf:?} 无法访问");
                 }
             }
         }
 
-        // 线程退出前补发剩余进度 / Send remaining progress before thread exits
-        // 例如处理了 137 个文件，会在 50,100 时各发一次，剩下 37 个在这里补发
-        // e.g. processed 137 files: sent at 50 and 100, remaining 37 sent here
         let remaining_files = thread_file_count % 50;
         if remaining_files > 0 {
             pb.send((remaining_files, 0)).ok();
@@ -588,7 +613,10 @@ impl FileFinder {
     /// 搜索目录 / Search a directory
     ///
     /// 使用多线程并行扫描目录树，返回包含所有文件和子目录信息的 `FilesList`。
+    /// 符号链接循环通过 inode 链机制检测（每个线程独立维护）。
+    ///
     /// Uses multi-threaded parallel scanning to return a `FilesList` with all file and subdirectory info.
+    /// Symlink cycles are detected via per-thread inode chain mechanism.
     ///
     /// # 参数 / Parameters
     /// * `path` - 要搜索的目录路径 / Directory path to search
@@ -600,24 +628,21 @@ impl FileFinder {
     /// * `Ok(FilesList)` - 搜索成功 / Search succeeded
     /// * `Err` - 路径不存在、不是目录等情况 / Path not found, not a directory, etc.
     ///
-    /// # 工作流程 / How it works
+    /// # 符号链接循环检测 / Symlink cycle detection
     ///
-    /// ```text
-    /// [主线程]                    [工作线程1]     [工作线程2]     ...
-    ///    |                            |              |
-    ///    |-- 初始化队列(放入根路径)     |              |
-    ///    |-- 启动N个线程               |              |
-    ///    |   |                        |              |
-    ///    |   |   ┌────────────────────┘              |
-    ///    |   |   |  从队列取目录 扫描条目              |
-    ///    |   |   |  文件→保存结果  目录→推回队列       |
-    ///    |   |   |────────────────────────────────────┘
-    ///    |   |   |        (重复直到队列空)
-    ///    |   |   |
-    ///    |-- 等待所有线程完成
-    ///    |-- 从扁平 HashMap 重建树结构
-    ///    |-- 返回 FilesList
-    /// ```
+    /// 每个工作线程维护一个 inode 链。当遇到符号链接指向目录时：
+    /// 1. 提取目标目录的 `(dev, ino)` 标识
+    /// 2. 在当前线程的链中查找
+    /// 3. 存在 = 循环 → 跳过；不存在 → 附加到链，继续扫描
+    ///
+    /// 普通文件和目录**不做**任何循环检测。
+    ///
+    /// Each worker maintains an inode chain. When encountering a symlink to a directory:
+    /// 1. Extract target directory's `(dev, ino)` key
+    /// 2. Look up in the thread's chain
+    /// 3. Found = cycle → skip; not found → append to chain, continue scanning
+    ///
+    /// Regular files and directories do NOT go through any cycle detection.
     pub fn search(
         &self,
         path: &Path,
@@ -625,7 +650,6 @@ impl FileFinder {
         pb: Sender<(u64, u64)>,
         max_thread_count: usize,
     ) -> io::Result<FilesList> {
-        // 验证输入路径 / Validate input path
         if !path.is_dir() {
             if path.is_file() {
                 return Err(Error::new(
@@ -644,35 +668,25 @@ impl FileFinder {
             ));
         }
 
-        // 确保至少 1 个线程 / Ensure at least 1 thread
         let num_threads = max_thread_count.max(1);
 
-        // === 并行扫描阶段 / Parallel scan phase ===
+        // 工作队列：存放待扫描的目录任务（路径 + inode 链）
+        // Work queue: holds directory tasks to scan (path + inode chain)
+        let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
+        dir_queue.lock().unwrap().push_back(DirEntry {
+            path: path.to_path_buf(),
+            symlink_chain: Vec::new(), // 根目录无符号链接链 / root has no symlink chain
+        });
 
-        // 工作队列：存放待扫描的目录路径
-        // Work queue: holds directory paths to be scanned
-        // Arc = 多线程共享所有权, Mutex = 互斥访问（同时只有一个线程能修改）
-        // Arc = shared ownership across threads, Mutex = mutual exclusion (only one thread can modify at a time)
-        let dir_queue = Arc::new(Mutex::new(VecDeque::<PathBuf>::new()));
-        dir_queue.lock().unwrap().push_back(path.to_path_buf());
-
-        // 结果集：扁平存储，key 为完整路径，value 为文件/目录信息
-        // Results: flat storage, key = full path, value = file/dir info
         let results = Arc::new(Mutex::new(HashMap::<PathBuf, FileInfo>::new()));
 
-        // 启动工作线程 / Launch worker threads
         let mut handles = Vec::with_capacity(num_threads);
 
         for _ in 0..num_threads {
-            // 对每个线程克隆 Arc（引用计数+1）和 Sender
-            // For each thread, clone Arc (increment ref count) and Sender
             let dir_queue = Arc::clone(&dir_queue);
             let results = Arc::clone(&results);
             let pb = pb.clone();
 
-            // thread::spawn 启动一个新线程
-            // move 关键字将克隆的变量所有权移入线程闭包
-            // move keyword transfers ownership of cloned vars into the thread closure
             let handle = thread::spawn(move || {
                 Self::run_worker(dir_queue, results, pb, skip_symlink);
             });
@@ -680,22 +694,18 @@ impl FileFinder {
             handles.push(handle);
         }
 
-        // 等待所有工作线程完成 / Wait for all worker threads to finish
-        // join() 会阻塞当前线程直到对应线程结束
-        // join() blocks the current thread until the corresponding thread finishes
         for handle in handles {
             handle.join().unwrap();
         }
 
-        // 取回结果的所有权（此时所有 Arc 克隆已销毁，引用计数=1）
-        // Reclaim ownership of results (all Arc clones are dropped, ref count = 1)
         let results = Arc::try_unwrap(results)
             .expect("results Arc still has references")
             .into_inner()
             .unwrap();
 
-        // === 树构建阶段 / Tree building phase ===
-        // 将扁平结构转换为嵌套树 / Convert flat structure to nested tree
         Ok(Self::build_tree(&results, path))
     }
 }
+
+#[cfg(test)]
+mod test;

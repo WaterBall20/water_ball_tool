@@ -1,6 +1,6 @@
 use crate::tools;
 use crate::wb_files_pack::{
-    DataPosList, ManifestDataBlock, MANIFEST_ATTRIBUTE_BLOCK_LEN, DATA_BLOCK_LEN,
+    DataPosList, ManifestDataBlock, DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN,
 };
 use std::fs::File;
 use std::io;

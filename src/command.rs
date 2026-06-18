@@ -343,16 +343,7 @@ fn copy_file_into_pack(
     this_in_path: &PathBuf,
     this_pack_path: &PathBuf,
 ) {
-    //更新进度
     let mut lase_up_pb_c_write_len = 0;
-    if let Some(pb_c) = pb_c {
-        pb_c(
-            0,
-            1,
-            this_in_path.display().to_string(),
-            this_pack_path.display().to_string(),
-        );
-    }
     //尝试打开文件
     let mut in_file = match File::open(this_in_path) {
         Ok(file) => file,
@@ -382,6 +373,15 @@ fn copy_file_into_pack(
                 return;
             }
         };
+    //文件成功打开并创建后再更新进度计数
+    if let Some(pb_c) = pb_c {
+        pb_c(
+            0,
+            1,
+            this_in_path.display().to_string(),
+            this_pack_path.display().to_string(),
+        );
+    }
     //写入操作
     let mut write_len = 0;
     while write_len < info.length() {
@@ -752,7 +752,7 @@ fn verify_hash_inner<'a>(
             pb_c
         }
         PackStructItemType::File => {
-            let mut rw = match pack.get_file_wr(path, false) {
+            let mut rw = match pack.get_file_wr_readonly(path) {
                 Ok(v) => v,
                 Err(err) => {
                     error!("无法获取包文件读写器，err: {err}");

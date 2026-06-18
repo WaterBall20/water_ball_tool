@@ -1,9 +1,7 @@
 use crate::tools::PathTool;
-use crate::wb_files_pack::manager::{
-    DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST, WBFPManager,
-};
-use crate::wb_files_pack::pack_io::PackIO;
+use crate::wb_files_pack::manager::{WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST};
 use crate::wb_files_pack::pack_io::file::PackFileWR;
+use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
@@ -96,8 +94,13 @@ impl Allocator {
             .open(path)?;
         let pack_io = PackIO::new(pack_file);
         let pack_io = Arc::new(Mutex::new(pack_io));
-        let mut manager =
-            WBFPManager::create_pack_file(path, pack_io.clone(), cow, separate_manifest, create_new)?;
+        let mut manager = WBFPManager::create_pack_file(
+            path,
+            pack_io.clone(),
+            cow,
+            separate_manifest,
+            create_new,
+        )?;
         manager.init_new_pack()?;
         let manager = Arc::new(Mutex::new(manager));
         Ok(Self { manager, pack_io })
@@ -254,6 +257,7 @@ impl Allocator /*写*/ {
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file(path, modified, len)?;
         PackFileWR::create(
             true,
@@ -272,6 +276,7 @@ impl Allocator /*写*/ {
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_auto_sized(path)?;
         PackFileWR::create(
             true,
@@ -296,6 +301,7 @@ impl Allocator /*写*/ {
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_raw(path, modified, len, cow, hash_type)?;
         PackFileWR::create(
             true,
@@ -335,6 +341,7 @@ impl Allocator /*写*/ {
         let mut manager = manager
             .lock()
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        manager.this_write_lock()?;
         let path_list = PathTool::path_to_string_vec(path);
         let metadata = manager.file_metadata_lock(&path_list)?;
         PackFileWR::create(
@@ -344,6 +351,33 @@ impl Allocator /*写*/ {
             path_list,
             metadata,
             end_pos,
+        )
+    }
+
+    /// 以只读模式获取虚拟文件读写器，不获取写入锁。
+    ///
+    /// 用于哈希校验等纯读取场景，避免不必要的文件级排他锁。
+    ///
+    /// Get a read-writer for a virtual file in read-only mode, without acquiring a write lock.
+    ///
+    /// Used for read-only scenarios like hash verification, avoiding unnecessary file-level exclusive locks.
+    pub fn get_file_wr_readonly<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> io::Result<PackFileWR> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        let metadata = manager.file_metadata_lock(&path_list)?;
+        PackFileWR::create(
+            false,
+            self.manager.clone(),
+            &self.pack_io.clone(),
+            path_list,
+            metadata,
+            false,
         )
     }
 }
