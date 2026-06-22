@@ -114,7 +114,7 @@ impl WBFPManager {
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
         )
-        .expect("无法解析数据块");
+            .expect("无法解析数据块");
         let attribute = Attribute::load(attribute_data)?;
         let mut write_lock_file_path = pack_path.clone();
         write_lock_file_path.push_str(".lock");

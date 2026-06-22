@@ -1,5 +1,5 @@
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::{WBFilesPackManifest};
+use crate::wb_files_pack::WBFilesPackManifest;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

@@ -141,7 +141,7 @@ impl WBFPManager {
                                 }
                                 Ok(r)
                             } else {
-                                Err(Error::other(format!("逻辑错误")))
+                                Err(Error::other("逻辑错误"))
                             }
                         }
                         PackStructItemType::File => {

@@ -185,7 +185,7 @@ impl ManifestDataBlock {
             + MANIFEST_DATA_BLOCK_DATA_VER_LEN * 2
             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN;
         let block_len = block_ab_len * 2;
-        let block_ab_len = (block_len + DATA_BLOCK_LEN - 1) / DATA_BLOCK_LEN;
+        let block_ab_len = block_len.div_ceil(DATA_BLOCK_LEN);
         let block_len = block_ab_len * DATA_BLOCK_LEN;
         assert!(block_len.is_multiple_of(DATA_BLOCK_LEN));
         block_len
@@ -270,18 +270,18 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                            + a_data_len]
+                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                        + a_data_len]
                 } else {
                     let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
                     &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                            + b_data_len]
+                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                        + b_data_len]
                 },
             ))
         } else {
@@ -372,8 +372,8 @@ impl ManifestDataBlock {
             Ok(
                 &block_data[b_data_index + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
                     ..b_data_index
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
+                    + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
+                    + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
             )
         }
     }
@@ -547,7 +547,7 @@ impl Attribute {
         let version_compatible = u16::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                 ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                    + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
+                + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
                 .try_into()
                 .unwrap(),
         );
@@ -569,21 +569,21 @@ impl Attribute {
         let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
+                + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
                 .try_into()
                 .unwrap(),
         );
         let manifest_file_len = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
-                    + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
+                + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
                 .try_into()
                 .unwrap(),
         );
         let root_struct_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
+                + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
                 .try_into()
                 .unwrap(),
         );

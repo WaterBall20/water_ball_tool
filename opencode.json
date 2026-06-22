@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "Cherry-p_e9lgad": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cherry-p_e9lgad",
+      "options": {
+        "apiKey": "{env:OPENCODE_API_KEY_P_E9LGAD}",
+        "baseURL": "https://api.deepseek.com/v1"
+      },
+      "models": {
+        "deepseek-v4-pro": {
+          "name": "deepseek-v4-pro",
+          "reasoning": true
+        }
+      }
+    }
+  }
+}

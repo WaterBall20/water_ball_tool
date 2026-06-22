@@ -250,8 +250,8 @@ impl WBFPManager {
                     && let Some(pack_struct) = pack_struct
                 {
                     let r = self.create_dir_all_inner(pack_struct, path_list, cow, &this_path)?;
-                            let (_, pos) = self.save_pack_struct_write(pack_struct)?;
-                            *struct_file_pos = pos;
+                    let (_, pos) = self.save_pack_struct_write(pack_struct)?;
+                    *struct_file_pos = pos;
                     if let PackFileMetadataRun::Loaded(metadata) = item.metadata_mut() {
                         metadata.add_dir_count(r.dir_count);
                         metadata.add_file_count(r.file_count);

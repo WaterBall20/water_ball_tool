@@ -361,10 +361,7 @@ impl Allocator /*写*/ {
     /// Get a read-writer for a virtual file in read-only mode, without acquiring a write lock.
     ///
     /// Used for read-only scenarios like hash verification, avoiding unnecessary file-level exclusive locks.
-    pub fn get_file_wr_readonly<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-    ) -> io::Result<PackFileWR> {
+    pub fn get_file_wr_readonly<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()

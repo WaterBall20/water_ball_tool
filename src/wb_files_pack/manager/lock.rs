@@ -71,14 +71,15 @@ impl WBFPManager {
         let mut file_lock_pid_run = None;
         if path.try_exists().is_ok() {
             is_dir = path.is_dir();
-            if path.is_file() && !run_lock {
-                if let Ok(mut file) = File::open(path) {
-                    let mut buf = [0u8; 4];
-                    if file.read_exact(&mut buf).is_ok() {
-                        let pid = u32::from_le_bytes(buf);
-                        file_lock_pid = Some(pid);
-                        file_lock_pid_run = Some(is_process_running(pid, &system));
-                    }
+            if path.is_file()
+                && !run_lock
+                && let Ok(mut file) = File::open(path)
+            {
+                let mut buf = [0u8; 4];
+                if file.read_exact(&mut buf).is_ok() {
+                    let pid = u32::from_le_bytes(buf);
+                    file_lock_pid = Some(pid);
+                    file_lock_pid_run = Some(is_process_running(pid, &system));
                 }
             }
         } else {
