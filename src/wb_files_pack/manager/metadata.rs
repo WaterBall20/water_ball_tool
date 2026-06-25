@@ -15,8 +15,8 @@ impl WBFPManager {
         mut metadata: PackFileMetadata,
     ) -> io::Result<()> {
         let mut path_list = path_list.into_iter();
-        let two_name = path_list.next().ok_or(Error::other("路径为空"))?;
-        if let Some(mut struct_item) = self.manifest.root_struct_mut().remove_item(&two_name) {
+        let one_name = path_list.next().ok_or(Error::other("路径为空"))?;
+        if let Some(mut struct_item) = self.manifest.root_struct_mut().remove_item(&one_name) {
             match struct_item.item_type_mut() {
                 PackStructItemType::Dir {
                     struct_file_pos,
@@ -28,7 +28,7 @@ impl WBFPManager {
                     if let Some(pack_struct) = pack_struct {
                         let r = self.file_metadata_update_inner(
                             path_list,
-                            &PathBuf::from(&two_name),
+                            &PathBuf::from(&one_name),
                             pack_struct,
                             metadata,
                         )?;
@@ -39,7 +39,7 @@ impl WBFPManager {
                         self.save_metadata(&mut struct_item, &r)?;
                         self.manifest
                             .root_struct_mut()
-                            .add_item(two_name, struct_item);
+                            .add_item(one_name, struct_item);
                         self.manifest.attribute_mut().add_file_count(r.file_count);
                         self.manifest.attribute_mut().add_data_len(r.length);
                     } else {
@@ -55,38 +55,39 @@ impl WBFPManager {
                         struct_item.metadata_mut().unlock(metadata);
                         self.manifest
                             .root_struct_mut()
-                            .add_item(two_name, struct_item);
+                            .add_item(one_name, struct_item);
                     } else {
                         Err(Error::new(
                             ErrorKind::NotADirectory,
-                            format!(r#"虚拟路径"{two_name}"是文件不是目录"#),
+                            format!(r#"虚拟路径"{one_name}"是文件不是目录"#),
                         ))?;
                     }
                 }
             }
         } else if path_list.next().is_none() {
+            //创建并保存元数据
             let (_, metadata_file_pos) =
                 self.save_metadata_write(&mut metadata)
                     .or(Err(Error::other(format!(
                         r#"无法保存文件"{}"的元数据"#,
-                        two_name
+                        one_name
                     ))))?;
             let len = metadata.len();
             let pack_struct_item = PackStructItem::new(
-                two_name.clone(),
+                one_name.clone(),
                 PackStructItemType::File,
                 metadata_file_pos,
                 PackFileMetadataRun::Loaded(Box::from(metadata)),
             );
             self.manifest
                 .root_struct_mut()
-                .add_item(two_name, pack_struct_item);
+                .add_item(one_name, pack_struct_item);
             self.manifest.attribute_mut().add_file_count(1);
             self.manifest.attribute_mut().add_data_len(len);
         } else {
             Err(Error::new(
                 ErrorKind::NotFound,
-                format!(r#"虚拟路径"{two_name}"不存在"#),
+                format!(r#"虚拟路径"{one_name}"不存在"#),
             ))?;
         }
         self.save_root_pack_struct()
@@ -134,8 +135,7 @@ impl WBFPManager {
                                     pack_struct,
                                     metadata,
                                 )?;
-                                let (new_pos, pos) =
-                                    self.save_pack_struct_write(pack_struct)?;
+                                let (new_pos, pos) = self.save_pack_struct_write(pack_struct)?;
                                 if new_pos {
                                     *struct_file_pos = pos;
                                 }
@@ -146,8 +146,7 @@ impl WBFPManager {
                         }
                         PackStructItemType::File => {
                             if path_list.next().is_none() {
-                                let (new_pos, pos) =
-                                    self.save_metadata_write(&mut metadata)?;
+                                let (new_pos, pos) = self.save_metadata_write(&mut metadata)?;
                                 if new_pos {
                                     item.set_metadata_file_pos(pos);
                                 }
@@ -160,10 +159,7 @@ impl WBFPManager {
                             } else {
                                 Err(Error::new(
                                     ErrorKind::NotADirectory,
-                                    format!(
-                                        r#"虚拟路径"{}"是文件不是目录"#,
-                                        this_path.display()
-                                    ),
+                                    format!(r#"虚拟路径"{}"是文件不是目录"#, this_path.display()),
                                 ))
                             }
                         }

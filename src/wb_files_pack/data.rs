@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::io;
 use std::io::Error;
 
-//当前解析器版本
+/// 当前清单文件格式版本 / Current manifest file format version
 pub const MANIFEST_VERSION: u16 = 10;
 
-//当前解析器兼任版本
+/// 当前清单文件兼容的最低版本 / Minimum compatible manifest file version
 pub const MANIFEST_VERSION_COMPATIBLE: u16 = 10;
 
 //数据格式
@@ -270,18 +270,18 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + a_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + a_data_len]
                 } else {
                     let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
                     &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + b_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + b_data_len]
                 },
             ))
         } else {
@@ -372,8 +372,8 @@ impl ManifestDataBlock {
             Ok(
                 &block_data[b_data_index + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
                     ..b_data_index
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
             )
         }
     }
@@ -390,19 +390,35 @@ pub(crate) trait ManifestDataBlockTrait {
     }
 }
 
+/// 清单属性 / Manifest attribute
+///
+/// 存储包文件的全局属性信息，包括版本、文件计数、数据位置等。
+/// Stores global attribute information for the pack file, including version, file counts, data positions, etc.
 #[derive(Debug, Clone)]
 pub struct Attribute {
+    /// 格式版本 / Format version
     version: u16,
+    /// 最低兼容版本 / Minimum compatible version
     version_compatible: u16,
+    /// 是否启用写时复制 / Whether copy-on-write is enabled
     cow: bool,
+    /// 空数据位置列表的文件偏移 / File offset of the empty data position list
     empty_data_pos_list_pos: u64,
+    /// 清单空数据位置列表的文件偏移 / File offset of the manifest empty data position list
     manifest_empty_data_pos_list_pos: u64,
+    /// 清单文件长度 / Manifest file length
     manifest_file_len: u64,
+    /// 根目录结构的文件偏移 / File offset of the root struct
     root_struct_pos: u64,
+    /// 文件总数 / Total file count
     file_count: u64,
+    /// 目录总数 / Total directory count
     dir_count: u64,
+    /// 数据总长度（字节）/ Total data length (bytes)
     data_len: u64,
+    /// 数据块 / Data block
     data_block: ManifestDataBlock,
+    /// 是否脏（未写入）/ Whether dirty (not yet written)
     dirty: bool,
 }
 
@@ -442,31 +458,37 @@ impl Default for Attribute {
 }
 
 impl Attribute {
+    /// 返回包文件的格式版本 / Returns the format version of the pack file
     #[must_use]
     pub fn version(&self) -> u16 {
         self.version
     }
 
+    /// 返回包文件的最低兼容版本 / Returns the minimum compatible version
     #[must_use]
     pub fn version_compatible(&self) -> u16 {
         self.version_compatible
     }
 
+    /// 返回是否启用写时复制 / Returns whether copy-on-write is enabled
     #[must_use]
     pub fn cow(&self) -> bool {
         self.cow
     }
 
+    /// 返回包中文件总数 / Returns total file count in the pack
     #[must_use]
     pub fn file_count(&self) -> u64 {
         self.file_count
     }
 
+    /// 返回包中目录总数 / Returns total directory count in the pack
     #[must_use]
     pub fn dir_count(&self) -> u64 {
         self.dir_count
     }
 
+    /// 返回包中数据的总长度（字节）/ Returns total data length in the pack (bytes)
     #[must_use]
     pub fn data_len(&self) -> u64 {
         self.data_len
@@ -547,7 +569,7 @@ impl Attribute {
         let version_compatible = u16::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                 ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
+                    + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
                 .try_into()
                 .unwrap(),
         );
@@ -569,21 +591,21 @@ impl Attribute {
         let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-                + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
+                    + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
                 .try_into()
                 .unwrap(),
         );
         let manifest_file_len = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
-                + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
+                    + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
                 .try_into()
                 .unwrap(),
         );
         let root_struct_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
+                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
                 .try_into()
                 .unwrap(),
         );
@@ -677,8 +699,14 @@ impl ManifestDataBlockTrait for Attribute {
 const DATA_POS_LIST_COUNT_LEN: usize = 8;
 
 #[derive(Debug, Default, PartialEq, Clone)]
+/// 数据位置列表 / Data position list
+///
+/// 管理文件中的空闲块位置列表，用于空间分配和回收。
+/// Manages the list of free block positions in the file, used for space allocation and recycling.
 pub struct DataPosList {
+    /// 数据块 / Data block
     data_block: Option<ManifestDataBlock>,
+    /// 位置列表（起始位置, 长度）/ Position list (start position, length)
     list: Vec<(u64, u64)>,
 }
 
@@ -801,11 +829,19 @@ const PACK_STRUCT_ITEM_NAME_INDEX: usize =
 //虚拟文件元数据的文件指针位置
 const PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN: usize = 8;
 
+/// 包目录结构项 / Pack struct item
+///
+/// 表示包文件目录树中的一个节点，可以是文件或子目录。
+/// Represents a node in the pack file directory tree, either a file or a subdirectory.
 #[derive(Debug, PartialEq, Clone)]
 pub struct PackStructItem {
+    /// 项名称 / Item name
     name: String,
+    /// 元数据在清单文件中的位置 / Metadata position in the manifest file
     metadata_file_pos: u64,
+    /// 项类型（文件或目录）/ Item type (File or Dir)
     item_type: PackStructItemType,
+    /// 元数据运行状态 / Metadata run state
     metadata: PackFileMetadataRun,
 }
 
@@ -837,16 +873,19 @@ impl PackStructItem {
         }
     }
 
+    /// 返回该项的名称 / Returns the name of this item
     #[must_use]
     pub fn name(&self) -> &String {
         &self.name
     }
 
+    /// 返回该项的类型（文件或目录）/ Returns the item type (File or Dir)
     #[must_use]
     pub fn item_type(&self) -> &PackStructItemType {
         &self.item_type
     }
 
+    /// 返回该项的元数据运行状态 / Returns the metadata run for this item
     #[must_use]
     pub fn metadata(&self) -> &PackFileMetadataRun {
         &self.metadata
@@ -952,27 +991,39 @@ impl PackStructItem {
 
 const PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN: usize = 8;
 
+/// 包目录结构项类型 / Pack struct item type
 #[derive(Default, Debug, PartialEq, Clone)]
 pub enum PackStructItemType {
+    /// 文件类型 / File type
     #[default]
     File,
+    /// 目录类型 / Directory type
     Dir {
+        /// 子目录结构在文件中的位置 / Position of the subdirectory struct in the file
         struct_file_pos: u64,
+        /// 子目录结构（已加载时）/ Subdirectory struct (when loaded)
         pack_struct: Option<PackStruct>,
     },
 }
 
+/// 包目录结构 / Pack struct
+///
+/// 代表包文件中的一个目录节点，包含子文件和子目录的映射表。
+/// Represents a directory node in the pack file, containing a map of child files and subdirectories.
 #[derive(Clone, Debug)]
 pub struct PackStruct {
+    /// 子项映射表（名称 → 项）/ Children map (name → item)
     items: HashMap<String, PackStructItem>,
+    /// 数据块 / Data block
     data_block: ManifestDataBlock,
+    /// 是否脏（未写入）/ Whether dirty (not yet written)
     dirty: bool,
 }
 
 impl Default for PackStruct {
     fn default() -> Self {
         Self {
-            items: HashMap::new(),
+            items: HashMap::default(),
             data_block: ManifestDataBlock::default(),
             dirty: false,
         }
@@ -986,6 +1037,10 @@ impl PartialEq for PackStruct {
 }
 
 impl PackStruct {
+    /// 返回目录中的子项映射表 / Returns the items in this pack struct
+    ///
+    /// key 是文件/目录名, value 是对应的结构项。
+    /// Key is the file/directory name, value is the corresponding struct item.
     #[must_use]
     pub fn items(&self) -> &HashMap<String, PackStructItem> {
         &self.items
@@ -1170,11 +1225,19 @@ impl ManifestDataBlockTrait for PackStruct {
     }
 }
 
+/// 文件元数据运行状态 / File metadata run state
+///
+/// 状态机管理元数据的加载、锁定和释放。
+/// State machine managing metadata loading, locking, and releasing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PackFileMetadataRun {
+    /// 不存在元数据
     None,
+    /// 未加载 / Not loaded
     NoLoad,
+    /// 已加载 / Loaded
     Loaded(Box<PackFileMetadata>),
+    /// 已锁定（正在写入）/ Locked (writing in progress)
     Locked,
 }
 
@@ -1252,13 +1315,23 @@ const PACK_METADATA_DIR_FILE_COUNT_LEN: usize = 8;
 const PACK_METADATA_DIR_DIR_COUNT_INDEX: usize = PACK_METADATA_DIR_FILE_COUNT_LEN;
 const PACK_METADATA_DIR_DIR_COUNT_LEN: usize = 8;
 
+/// 文件元数据 / File metadata
+///
+/// 存储包内文件的元信息，包括大小、修改时间、类型及哈希等。
+/// Stores metadata for a file inside the pack, including size, modification time, type, and hash.
 #[derive(Debug, Clone)]
 pub struct PackFileMetadata {
+    /// 数据块 / Data block
     data_block: ManifestDataBlock,
+    /// 是否启用写时复制 / Whether copy-on-write is enabled
     cow: bool,
+    /// 文件数据长度（字节）/ File data length (bytes)
     len: u64,
+    /// 最后修改时间（毫秒）/ Last modified time (milliseconds)
     modified: u128,
+    /// 文件类型（文件或目录）/ File type (File or Dir)
     file_type: PackFileMetadataType,
+    /// 是否脏（未写入）/ Whether dirty (not yet written)
     dirty: bool,
 }
 
@@ -1311,26 +1384,31 @@ impl PackFileMetadata {
         self.dirty = false;
     }
 
+    /// 返回是否启用写时复制 / Returns whether copy-on-write is enabled
     #[must_use]
     pub fn cow(&self) -> bool {
         self.cow
     }
 
+    /// 返回文件是否为空（长度为 0）/ Returns whether the file is empty (length 0)
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// 返回文件数据长度（字节）/ Returns the file data length in bytes
     #[must_use]
     pub fn len(&self) -> u64 {
         self.len
     }
 
+    /// 返回最后修改时间（毫秒）/ Returns last modified time in milliseconds
     #[must_use]
     pub fn modified(&self) -> u128 {
         self.modified
     }
 
+    /// 返回文件元数据类型（文件或目录）/ Returns the metadata type (File or Dir)
     #[must_use]
     pub fn file_type(&self) -> &PackFileMetadataType {
         &self.file_type
@@ -1518,15 +1596,23 @@ impl ManifestDataBlockTrait for PackFileMetadata {
     }
 }
 
+/// 文件元数据类型 / File metadata type
 #[derive(PartialEq, Debug, Clone)]
 pub enum PackFileMetadataType {
+    /// 文件 / file
     File {
+        /// 哈希类型（1 = Blake3）/ Hash type (1 = Blake3)
         hash_type: u8,
+        /// 哈希值 / Hash value
         hash_value: Vec<u8>,
+        /// 数据位置列表 / Data position list
         data_pos_list: DataPosList,
     },
+    /// 目录 / Directory
     Dir {
+        /// 子文件数 / Child file count
         file_count: u64,
+        /// 子目录数 / Child directory count
         dir_count: u64,
     },
 }
@@ -1541,18 +1627,28 @@ impl PackFileMetadataType {
 }
 
 //清单数据运行数据
+/// 清单数据运行数据（预留）/ Manifest data run data (reserved)
 #[derive(Default, Debug)]
 pub struct WBFilesPackManifestRun {}
 
+/// 清单数据结构 / Manifest data structure
+///
+/// 包文件的清单，包含属性、根目录结构和文件 IO 句柄。
+/// The manifest of the pack file, containing attributes, root struct, and file IO handle.
 #[derive(Debug)]
 pub struct WBFilesPackManifest {
+    /// 清单属性 / Manifest attribute
     attribute: Attribute,
+    /// 根目录结构 / Root struct
     root_struct: PackStruct,
+    /// 清单文件 IO / Manifest file IO
     file: Option<crate::wb_files_pack::pack_io::PackIO>,
+    /// 运行数据 / Run data
     _run_data: WBFilesPackManifestRun,
 }
 
 impl WBFilesPackManifest {
+    /// 返回清单的属性信息 / Returns the manifest attribute
     #[must_use]
     pub fn attribute(&self) -> &Attribute {
         &self.attribute
@@ -1562,6 +1658,7 @@ impl WBFilesPackManifest {
         &mut self.attribute
     }
 
+    /// 返回清单的根目录结构 / Returns the root pack struct
     #[must_use]
     pub fn root_struct(&self) -> &PackStruct {
         &self.root_struct

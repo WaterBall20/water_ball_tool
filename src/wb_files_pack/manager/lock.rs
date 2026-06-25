@@ -2,7 +2,6 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::{fs, io};
-
 use tracing::info;
 
 use super::{PackLockInfo, PackLockType, WBFPManager};
@@ -63,8 +62,7 @@ impl WBFPManager {
         fn is_process_running(pid: u32, system: &sysinfo::System) -> bool {
             system.process(sysinfo::Pid::from(pid as usize)).is_some()
         }
-        let mut system = sysinfo::System::new_all();
-        system.refresh_all();
+        let system = sysinfo::System::new_all();
         let is_symlink = path.is_symlink();
         let is_dir;
         let mut file_lock_pid = None;
@@ -115,7 +113,7 @@ impl WBFPManager {
             match lock_info.file_lock_pid_run {
                 Some(true) => panic!("无法为包文件上写入锁，正在被其他进程持有。"),
                 Some(false) => panic!(
-                    "包文件未正常解锁，但相关进程(pid:{})可能已停止。如果你认为可以继续，可以删除锁文件\"{}\"强制解锁",
+                    r#"包文件未正常解锁，但相关进程(pid:{})可能已停止。如果你认为可以继续，可以删除锁文件"{}"强制解锁"#,
                     lock_info.file_lock_pid.expect("pid参数不存在"),
                     write_lock_path.display()
                 ),

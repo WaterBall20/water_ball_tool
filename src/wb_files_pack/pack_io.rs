@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 
+/// 虚拟文件读写器模块 / Virtual file reader-writer module
 pub mod file;
 
 //文件头===
@@ -65,8 +66,8 @@ pub(crate) struct PackIO {
     pub(crate) run_data: RunData,
 }
 impl PackIO {
-    /// 创建新的 PackIO 实例（文件长度从文件本身获取）。
-    /// Create a new PackIO instance (file length obtained from the file itself).
+    /// 创建新的 PackIO 实例。
+    /// Create a new PackIO instance.
     pub(crate) fn new(file: File) -> Self {
         let mut empty_data_list = DataPosList::new(Vec::new());
         empty_data_list.set_data_block(Some(ManifestDataBlock::default()));
@@ -404,3 +405,4 @@ impl PackIO /*写*/ {
         })
     }
 }
+

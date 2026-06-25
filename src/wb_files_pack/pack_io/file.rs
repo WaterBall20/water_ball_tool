@@ -11,28 +11,39 @@ use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
+/// 虚拟文件读写器 / Virtual file reader-writer
+///
+/// 提供包内文件的读写操作，管理文件位置、元数据和哈希计算。
+/// Provides read/write operations for files within a pack, managing file position, metadata, and hash computation.
 pub struct PackFileWR {
-    //管理器实例
+    /// 管理器实例 / Manager instance
     manager: Arc<Mutex<WBFPManager>>,
-    //包文件io
+    /// 包文件 IO 实例 / Pack file IO instance
     pack_io: Arc<Mutex<PackIO>>,
-    //文件位置
+    /// 当前文件位置 / Current file position
     pos: u64,
-    //缓存_文件分配的位置当前索引
+    /// 缓存：文件分配位置的当前索引 / Cache: current index in allocated positions
     temp_pos_index: usize,
-    //缓存_文件分配的当前位置已占用大小
+    /// 缓存：当前分配位置已占用大小 / Cache: used size at current allocated position
     temp_pos_this_len: u64,
-    //虚拟路径
+    /// 虚拟路径 / Virtual path
     path_list: Option<Vec<String>>,
-    //元数据
+    /// 文件元数据 / File metadata
     metadata: Option<PackFileMetadata>,
+    /// 是否为写入模式 / Whether in write mode
     is_write: bool,
 }
+
+/// 包文件哈希状态 / Pack file hash state
 #[derive(Debug, Clone)]
 pub enum PackFileHash {
+    /// 未计算哈希 / No hash computed
     None,
+    /// Blake3 哈希 / Blake3 hash
     Blake3 {
+        /// 哈希计算器 / Hash hasher
         hasher: Box<Hasher>,
+        /// 哈希值 / Hash value
         hash_value: Vec<u8>,
     },
 }

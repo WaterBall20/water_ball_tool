@@ -1,15 +1,18 @@
-/*
-开始时间：26/2/11 15：51
- */
+/// 水球包文件模块 / Water Ball Files Pack module
+///
+/// 提供容器文件格式的创建、读写、管理功能。
+/// Provides container file format creation, read/write, and management functionality.
 pub mod manager;
 
 mod data;
 mod pack_io;
 #[cfg(test)]
 mod test;
+/// 线程安全分配器模块 / Thread-safe allocator module
 pub mod allocator;
 mod net_server;
 
+// 重导出公共数据类型 / Re-export public data types
 pub use data::{
     Attribute, DataPosList, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType,
     PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest,

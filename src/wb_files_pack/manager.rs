@@ -7,8 +7,11 @@ use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
 
+/// 默认写时复制开关 / Default copy-on-write flag
 pub const DEFAULT_COW: bool = false;
+/// 默认分离清单文件开关 / Default separate manifest file flag
 pub const DEFAULT_SEPARATE_MANIFEST: bool = true;
+/// 默认哈希类型（1 = Blake3）/ Default hash type (1 = Blake3)
 pub const DEFAULT_HASH_TYPE: u8 = 1;
 
 pub(crate) struct WBFPManager {
