@@ -1,8 +1,7 @@
 /*
-开始时间：26/02/13 11：31
- */
+开始时间：2026/06/26 08:42
+*/
 use crate::wb_files_pack::manager::WBFPManager;
-use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use crate::wb_files_pack::pack_io::file_hash::PackFileHash;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{
@@ -12,11 +11,11 @@ use std::io;
 use std::io::{Error, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
-/// 虚拟文件读写器 / Virtual file reader-writer
-///
-/// 提供包内文件的读写操作，管理文件位置、元数据和哈希计算。
-/// Provides read/write operations for files within a pack, managing file position, metadata, and hash computation.
-pub struct PackFileWR {
+pub(crate) struct PackFileHandle {
+    /// 管理器实例 / Manager instance
+    manager: Arc<Mutex<WBFPManager>>,
+    /// 包文件 IO 实例 / Pack file IO instance
+    pack_io: Arc<Mutex<PackIO>>,
     /// 当前文件位置 / Current file position
     pos: u64,
     /// 缓存：文件分配位置的当前索引 / Cache: current index in allocated positions
@@ -25,11 +24,13 @@ pub struct PackFileWR {
     temp_pos_this_len: u64,
     /// 虚拟路径 / Virtual path
     path_list: Option<Vec<String>>,
-    ///虚拟文件句柄
-    handle: Arc<Mutex<PackFileHandle>>,
+    /// 文件元数据 / File metadata
+    metadata: Option<PackFileMetadata>,
+    /// 是否为写入模式 / Whether in write mode
+    is_write: bool,
 }
 
-impl PackFileWR {
+impl PackFileHandle {
     /// 创建虚拟文件读写器。
     ///
     /// `new` = `true` 表示新创建的文件（写入模式），`false` 表示打开已存在的文件。
@@ -44,8 +45,8 @@ impl PackFileWR {
         path_list: Vec<String>,
         metadata: PackFileMetadata,
         end_pos: bool,
-    ) -> io::Result<PackFileWR> {
-        Ok(PackFileWR {
+    ) -> io::Result<Self> {
+        Ok(Self {
             manager,
             pack_io: pack_io.clone(),
             pos: if end_pos { metadata.len() } else { 0 },
@@ -135,7 +136,9 @@ impl PackFileWR {
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
-            data_pos_list.list_mut().push(pack_file.get_file_pos(add_len))
+            data_pos_list
+                .list_mut()
+                .push(pack_file.get_file_pos(add_len))
         }
         Ok(())
     }
@@ -180,8 +183,7 @@ impl PackFileWR {
                     let (pos, item_len) = *value;
                     back_len_cnt += item_len;
                     let back_len_c = back_len_cnt / DATA_BLOCK_LEN_U64;
-                    let this_back_len_c =
-                        (len + DATA_BLOCK_LEN_U64 - 1) / DATA_BLOCK_LEN_U64;
+                    let this_back_len_c = (len + DATA_BLOCK_LEN_U64 - 1) / DATA_BLOCK_LEN_U64;
                     //大于实际大小
                     if back_len_c > this_back_len_c {
                         let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
@@ -368,13 +370,13 @@ impl PackFileWR {
     }
 }
 
-impl Drop for PackFileWR {
+impl Drop for PackFileHandle {
     fn drop(&mut self) {
         _ = self.commit_data();
     }
 }
 
-impl Seek for PackFileWR {
+impl Seek for PackFileHandle {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match pos {
             SeekFrom::Start(pos) => {
@@ -416,7 +418,7 @@ impl Seek for PackFileWR {
     }
 }
 
-impl Read for PackFileWR {
+impl Read for PackFileHandle {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
@@ -441,7 +443,7 @@ impl Read for PackFileWR {
     }
 }
 
-impl Write for PackFileWR {
+impl Write for PackFileHandle {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.is_write = true;
         let pack_file = self.pack_io.clone();
@@ -485,9 +487,9 @@ impl Write for PackFileWR {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.handle
+        self.pack_io
             .lock()
-            .map_err(|e| Error::other(format!("无法获得包文件句柄锁, err:{e}")))?
+            .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?
             .flush()
     }
 

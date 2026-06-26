@@ -8,6 +8,8 @@ use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 /// 虚拟文件读写器模块 / Virtual file reader-writer module
 pub mod file;
+mod file_handle;
+mod file_hash;
 
 //文件头===
 //文件头-文件名:WPFilesPack
