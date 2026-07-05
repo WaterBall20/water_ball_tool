@@ -1,16 +1,20 @@
 use crate::tools::PathTool;
 use crate::tools::TestTool;
 use crate::wb_files_pack::manager::{
-    WBFPManager, DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_SEPARATE_MANIFEST,
+    WBFPManager,
+    DEFAULT_COW,
+    DEFAULT_HASH_TYPE,
+    DEFAULT_SEPARATE_MANIFEST,
 };
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
+use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use pretty_assertions::assert_eq;
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{ Error, ErrorKind, Read, Write };
 use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::{fs, io};
+use std::sync::{ Arc, Mutex };
+use std::{ fs, io };
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
@@ -20,7 +24,7 @@ static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 fn create_manager(
     pack_path: &Path,
     cow: bool,
-    separate_manifest: bool,
+    separate_manifest: bool
 ) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     let pack_file = File::options()
         .read(true)
@@ -29,17 +33,23 @@ fn create_manager(
         .truncate(true)
         .create_new(true)
         .open(pack_path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => {
-                Error::new(ErrorKind::AlreadyExists, format!("文件已存在, err: {e}"))
+        .map_err(|e| {
+            match e.kind() {
+                ErrorKind::AlreadyExists => {
+                    Error::new(ErrorKind::AlreadyExists, format!("文件已存在, err: {e}"))
+                }
+                _ => panic!("创建文件错误. err:{e}"),
             }
-            _ => panic!("创建文件错误. err:{e}"),
         })?;
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
-    let mut manager =
-        WBFPManager::create_pack_file(&pack_path, pack_io.clone(), cow, separate_manifest, true)
-            .expect("无法创建包管理器");
+    let mut manager = WBFPManager::create_pack_file(
+        &pack_path,
+        pack_io.clone(),
+        cow,
+        separate_manifest,
+        true
+    ).expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
     Ok((manager, pack_io))
 }
@@ -49,24 +59,17 @@ fn create_manager_default(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mute
 }
 
 fn open_manager<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO>>) {
-    let pack_file = File::options()
-        .read(true)
-        .write(true)
-        .open(pack_path)
-        .expect("无法打开文件");
+    let pack_file = File::options().read(true).write(true).open(pack_path).expect("无法打开文件");
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
-    (
-        WBFPManager::open_pack_file(pack_path, pack_io.clone()).expect("无法打开包文件"),
-        pack_io,
-    )
+    (WBFPManager::open_pack_file(pack_path, pack_io.clone()).expect("无法打开包文件"), pack_io)
 }
 
 fn open_file_rw<P: AsRef<Path>>(
     pack_path: &P,
     manager: &Arc<Mutex<WBFPManager>>,
     pack_io: &Arc<Mutex<PackIO>>,
-    end_pos: bool,
+    end_pos: bool
 ) -> io::Result<PackFileWR> {
     let path_list = PathTool::path_to_string_vec(pack_path);
     let metadata = manager
@@ -74,14 +77,13 @@ fn open_file_rw<P: AsRef<Path>>(
         .expect("无法获得包文件锁")
         .file_metadata_lock(&path_list)
         .expect("无法获得元数据");
-    PackFileWR::create(
-        false,
-        manager.clone(),
-        pack_io,
-        path_list,
-        metadata,
-        end_pos,
-    )
+    //TODO:若句柄已打开则直接获取
+    let handle = Arc::new(
+        Mutex::new(
+            PackFileHandle::create(false, manager.clone(), pack_io, path_list, metadata, end_pos)?
+        )
+    );
+    Ok(PackFileWR::create(0, handle))
 }
 
 fn setup_ok_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -124,11 +126,22 @@ fn create_stress_and_reopen() {
                 .unwrap()
                 .create_file_raw(&name, modified, len, false, DEFAULT_HASH_TYPE)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
-            let mut wr =
-                PackFileWR::create(true, man.clone(), &pack_io, path_list, metadata, false)
-                    .unwrap();
-            wr.write_all(&test_data)
-                .unwrap_or_else(|_| panic!("循环第{i}次，无法写入虚拟随机文件:{name}"));
+            let handle = Arc::new(
+                Mutex::new(
+                    PackFileHandle::create(
+                        true,
+                        man.clone(),
+                        &pack_io,
+                        path_list,
+                        metadata,
+                        false
+                    ).unwrap()
+                )
+            );
+            let mut wr = PackFileWR::create(0, handle);
+            wr.write_all(&test_data).unwrap_or_else(|_|
+                panic!("循环第{i}次，无法写入虚拟随机文件:{name}")
+            );
         }
 
         let (path_list, metadata) = man
@@ -136,8 +149,20 @@ fn create_stress_and_reopen() {
             .unwrap()
             .create_file(test_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
-        let mut wr =
-            PackFileWR::create(true, man.clone(), &pack_io, path_list, metadata, false).unwrap();
+
+        let handle = Arc::new(
+            Mutex::new(
+                PackFileHandle::create(
+                    true,
+                    man.clone(),
+                    &pack_io,
+                    path_list,
+                    metadata,
+                    false
+                ).unwrap()
+            )
+        );
+        let mut wr = PackFileWR::create(0, handle);
         _ = wr.write(&test_data).expect("无法写入虚拟文件");
         drop(wr);
 
@@ -158,10 +183,7 @@ fn create_stress_and_reopen() {
         assert_eq!(test_data, read_buf);
         drop(rw);
 
-        man.lock()
-            .unwrap()
-            .load_all_data(false)
-            .expect("无法加载所有元数据");
+        man.lock().unwrap().load_all_data(false).expect("无法加载所有元数据");
 
         // 逐个比对随机文件的结构项
         let man_guard = man.lock().unwrap();
@@ -190,12 +212,8 @@ fn open_pack_compatible_version() {
     let (dir, pack_file) = setup_ok_test("open_pack_compatible_version");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager
-            .manifest
-            .attribute_mut()
-            .set_version(super::super::MANIFEST_VERSION + 1);
-        manager
-            .manifest
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
+        manager.manifest
             .attribute_mut()
             .set_version_compatible(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
     }
@@ -212,14 +230,8 @@ fn open_pack_version_too_high_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_high_should_panic");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager
-            .manifest
-            .attribute_mut()
-            .set_version(super::super::MANIFEST_VERSION + 1);
-        manager
-            .manifest
-            .attribute_mut()
-            .set_version_compatible(super::super::MANIFEST_VERSION + 1);
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
+        manager.manifest.attribute_mut().set_version_compatible(super::super::MANIFEST_VERSION + 1);
     }
     {
         open_manager(&pack_file);
@@ -234,12 +246,8 @@ fn open_pack_version_too_low_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_low_should_panic");
     {
         let mut manager = create_manager_default(&pack_file).unwrap().0;
-        manager
-            .manifest
-            .attribute_mut()
-            .set_version(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
-        manager
-            .manifest
+        manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
+        manager.manifest
             .attribute_mut()
             .set_version_compatible(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
     }

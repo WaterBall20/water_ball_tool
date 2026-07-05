@@ -1,0 +1,48 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug unit tests in library 'water_ball_tool'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test"
+        ]
+      }
+    },
+    {
+      "name": "Debug unit tests in library 'water_ball_tool'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test"
+        ]
+      }
+    },
+    {
+      "name": "Debug executable 'water_ball_tool'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=water_ball_tool"
+        ]
+      },
+      "args": []
+    },
+    {
+      "name": "Debug unit tests in executable 'water_ball_tool'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "test",
+          "--bin=water_ball_tool"
+        ]
+      }
+    }
+  ]
+}

@@ -1,14 +1,15 @@
 use crate::tools::PathTool;
-use crate::wb_files_pack::manager::{WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST};
+use crate::wb_files_pack::manager::{ WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST };
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
+use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
+use crate::wb_files_pack::{ Attribute, PackStruct, PackStructItem, PackStructItemType };
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
 use std::io::Error;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{ Arc, Mutex };
 #[cfg(test)]
 mod test;
 
@@ -21,7 +22,7 @@ mod test;
 ///
 /// Wraps `WBFPManager` and `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
 /// All externally-facing read/write operations are proxied through this struct.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Allocator {
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
@@ -64,7 +65,7 @@ impl Allocator {
     pub fn create_new_pack_file<P: AsRef<Path>>(
         path: &P,
         cow: bool,
-        separate_manifest: bool,
+        separate_manifest: bool
     ) -> io::Result<Allocator> {
         match path.as_ref().try_exists() {
             Ok(true) => Err(Error::other("文件可能已存在，无法创建！")),
@@ -83,7 +84,7 @@ impl Allocator {
         path: &P,
         cow: bool,
         separate_manifest: bool,
-        create_new: bool,
+        create_new: bool
     ) -> io::Result<Allocator> {
         let pack_file = File::options()
             .read(true)
@@ -99,7 +100,7 @@ impl Allocator {
             pack_io.clone(),
             cow,
             separate_manifest,
-            create_new,
+            create_new
         )?;
         manager.init_new_pack()?;
         let manager = Arc::new(Mutex::new(manager));
@@ -152,7 +153,7 @@ impl Allocator /*读*/ {
     /// Get the list of child item names for the given directory.
     pub fn get_struct_item_name_list<P: AsRef<Path>>(
         &mut self,
-        path: P,
+        path: P
     ) -> io::Result<Vec<String>> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -165,7 +166,7 @@ impl Allocator /*读*/ {
     /// Get all struct items for the given directory.
     pub fn get_dir_pack_struct_items<P: AsRef<Path>>(
         &mut self,
-        path: P,
+        path: P
     ) -> io::Result<HashMap<String, PackStructItem>> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -178,7 +179,7 @@ impl Allocator /*读*/ {
     /// Get the struct item for the given path, asserting it is a directory.
     pub fn get_pack_struct_item_dir<P: AsRef<Path>>(
         &mut self,
-        path: P,
+        path: P
     ) -> io::Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -251,7 +252,7 @@ impl Allocator /*写*/ {
         &mut self,
         path: P,
         modified: u128,
-        len: u64,
+        len: u64
     ) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -259,14 +260,19 @@ impl Allocator /*写*/ {
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file(path, modified, len)?;
-        PackFileWR::create(
-            true,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
+        let handle = Arc::new(
+            Mutex::new(
+                PackFileHandle::create(
+                    true,
+                    self.manager.clone(),
+                    &self.pack_io.clone(),
+                    path_list,
+                    metadata,
+                    false
+                )?
+            )
+        );
+        Ok(PackFileWR::create(0, handle))
     }
 
     /// 创建虚拟文件（自动分配初始大小，无需预先指定长度）
@@ -278,14 +284,19 @@ impl Allocator /*写*/ {
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_auto_sized(path)?;
-        PackFileWR::create(
-            true,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
+        let handle = Arc::new(
+            Mutex::new(
+                PackFileHandle::create(
+                    true,
+                    self.manager.clone(),
+                    &self.pack_io.clone(),
+                    path_list,
+                    metadata,
+                    false
+                )?
+            )
+        );
+        Ok(PackFileWR::create(0, handle))
     }
     /// 创建虚拟文件（完整参数版本，用于需要自定义写时复制和哈希算法的场景）
     /// Create a virtual file (full parameter version, for custom COW and hash algorithm scenarios)
@@ -295,7 +306,7 @@ impl Allocator /*写*/ {
         modified: u128,
         len: u64,
         cow: bool,
-        hash_type: u8,
+        hash_type: u8
     ) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -303,14 +314,19 @@ impl Allocator /*写*/ {
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_raw(path, modified, len, cow, hash_type)?;
-        PackFileWR::create(
-            true,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
+        let handle = Arc::new(
+            Mutex::new(
+                PackFileHandle::create(
+                    true,
+                    self.manager.clone(),
+                    &self.pack_io.clone(),
+                    path_list,
+                    metadata,
+                    false
+                )?
+            )
+        );
+        Ok(PackFileWR::create(0, handle))
     }
 
     /// 以读写模式打开已存在的虚拟文件。
@@ -335,7 +351,7 @@ impl Allocator /*写*/ {
     pub fn get_file_wr<P: AsRef<Path>>(
         &mut self,
         path: P,
-        end_pos: bool,
+        end_pos: bool
     ) -> io::Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
@@ -343,39 +359,13 @@ impl Allocator /*写*/ {
             .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let path_list = PathTool::path_to_string_vec(path);
-        let metadata = manager.file_metadata_lock(&path_list)?;
-        PackFileWR::create(
-            false,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
+        let handle = manager.get_or_create_file_handle(
+            &path_list,
             end_pos,
-        )
-    }
-
-    /// 以只读模式获取虚拟文件读写器，不获取写入锁。
-    ///
-    /// 用于哈希校验等纯读取场景，避免不必要的文件级排他锁。
-    ///
-    /// Get a read-writer for a virtual file in read-only mode, without acquiring a write lock.
-    ///
-    /// Used for read-only scenarios like hash verification, avoiding unnecessary file-level exclusive locks.
-    pub fn get_file_wr_readonly<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
-        let path_list = PathTool::path_to_string_vec(path);
-        let metadata = manager.file_metadata_lock(&path_list)?;
-        PackFileWR::create(
-            false,
-            self.manager.clone(),
-            &self.pack_io.clone(),
-            path_list,
-            metadata,
-            false,
-        )
+            &self.manager,
+            &self.pack_io,
+        )?;
+        Ok(PackFileWR::create(0, handle))
     }
 }
 
@@ -398,7 +388,7 @@ impl Allocator /*工具方法*/ {
     fn verify_all_file_hash_inner(
         &mut self,
         path: &Path,
-        verify_hash_r: &mut VerifyHashR,
+        verify_hash_r: &mut VerifyHashR
     ) -> io::Result<()> {
         let item = self.get_pack_struct_item(path)?;
         match item.item_type() {
@@ -409,18 +399,17 @@ impl Allocator /*工具方法*/ {
                 }
                 Ok(())
             }
-            PackStructItemType::File => {
+            PackStructItemType::File { .. } => {
                 let mut file = self.get_file_wr(path, false)?;
                 match file.verify_hash() {
-                    Ok(true) => verify_hash_r
-                        .ok_path
-                        .push(path.to_str().unwrap().to_string()),
-                    Ok(false) => verify_hash_r
-                        .err_path
-                        .push((path.to_str().unwrap().to_string(), None)),
-                    Err(err) => verify_hash_r
-                        .err_path
-                        .push((path.to_str().unwrap().to_string(), Some(err))),
+                    Ok(true) => verify_hash_r.ok_path.push(path.to_str().unwrap().to_string()),
+                    Ok(false) =>
+                        verify_hash_r.err_path.push((path.to_str().unwrap().to_string(), None)),
+                    Err(err) =>
+                        verify_hash_r.err_path.push((
+                            path.to_str().unwrap().to_string(),
+                            Some(err),
+                        )),
                 }
                 Ok(())
             }

@@ -1,19 +1,22 @@
 /*
 创建时间:26/02/24 80:40
 */
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ MultiProgress, ProgressBar, ProgressStyle };
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{ ErrorKind, Read, Write };
+use std::path::{ Path, PathBuf };
 use std::sync::mpsc;
 use std::time::Duration;
-use std::{fs, io, thread};
-use tracing::{error, info, warn};
-use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, FilesList};
+use std::{ fs, io, thread };
+use tracing::{ error, info, warn };
+use water_ball_tool::file_finder::{ FileFinder, FileInfo, FileKind, FilesList };
 use water_ball_tool::wb_files_pack::allocator::Allocator;
 use water_ball_tool::wb_files_pack::{
-    PackFileMetadata, PackFileMetadataRun, PackStructItem, PackStructItemType,
+    PackFileMetadata,
+    PackFileMetadataRun,
+    PackStructItem,
+    PackStructItemType,
 };
 
 #[cfg(test)]
@@ -67,9 +70,7 @@ pub fn ff(args: &[String], mp: Option<&MultiProgress>) {
                 f.write_all(&data).expect("保存到文件错误");
                 info!(r#"搜索结果已输出到文件: "{out_path}""#);
             }
-            Err(err) => {
-                panic!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#)
-            }
+            Err(err) => { panic!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#) }
         }
     } else {
         info!("搜索结果：{files_list:?}");
@@ -94,7 +95,7 @@ fn set_pb_style2(pb: Option<&ProgressBar>, data_len: u64) {
             ProgressStyle::default_bar()
                 .template(PROGRESS_STYLE_TEMPLATE)
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("=>-")
         );
         pb.set_message("0.00%");
     }
@@ -105,17 +106,12 @@ fn update_pb(
     path1: &Path,
     path2: &Path,
     lase_up_pb_c_write_len: &mut u64,
-    write_len: &mut u64,
+    write_len: &mut u64
 ) {
     if let Some(pb_c) = pb_c {
         let l_len = *write_len - *lase_up_pb_c_write_len;
         if l_len > 10 * (BUF_LEN as u64) {
-            pb_c(
-                l_len,
-                0,
-                path1.display().to_string(),
-                path2.display().to_string(),
-            );
+            pb_c(l_len, 0, path1.display().to_string(), path2.display().to_string());
             *lase_up_pb_c_write_len = *write_len;
         }
     }
@@ -129,7 +125,7 @@ fn search_files(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io:
         pb.set_style(
             ProgressStyle::default_spinner()
                 .template("{spinner:.green} {msg} ({pos} 个文件和目录)")
-                .unwrap(),
+                .unwrap()
         );
         pb.set_message("搜索文件中");
     }
@@ -143,8 +139,9 @@ fn search_files(path: &str, skip_symlink: bool, pb: Option<&ProgressBar>) -> io:
         let (rtx, rrx) = mpsc::channel();
         let t_path = path.to_string();
         thread::spawn(move || {
-            rtx.send(ff.search(t_path.as_ref(), skip_symlink, tx, SEARCH_MAX_THREAD_COUNT))
-                .expect("线程发送结果错误");
+            rtx.send(ff.search(t_path.as_ref(), skip_symlink, tx, SEARCH_MAX_THREAD_COUNT)).expect(
+                "线程发送结果错误"
+            );
         });
         for (add_file, add_dir) in rx {
             file_count += add_file;
@@ -180,15 +177,16 @@ pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
         "-s" => wbfp_s(&args[1..], mp),
         "-m" => wbfp_m(&args[1..], mp),
         "-h" => wbfp_h(&args[1..], mp),
-        _ => panic!(
-            "未知的路由参数: {arg}\\
+        _ =>
+            panic!(
+                "未知的路由参数: {arg}\\
     提示：
         -s  :  解包文件 | <包文件路径> <输出目录>
         -m  :  打包文件 | <输入目录> <包文件路径> [-f]
                         -f  :   不分离数据到单独的文件
         -h  :  哈希校验 | <包文件路径>
 "
-        ),
+            ),
     }
 }
 
@@ -208,10 +206,7 @@ pub fn wbfp(args: &[String], mp: Option<&MultiProgress>) {
 /// data to be embedded in the `.pack` file instead of a separate `.wbm`.
 pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
-    assert!(
-        args.len() >= 2,
-        "参数数量不够，至少需要 <输入目录> <目标路径>"
-    );
+    assert!(args.len() >= 2, "参数数量不够，至少需要 <输入目录> <目标路径>");
     //源目录路径
     let in_dir_path = &args[0];
     //输出的包文件路径
@@ -232,8 +227,9 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
     let pb = create_pb(mp);
     info!("开始准备打包");
     info!("创建新包文件并初始化");
-    let mut pack =
-        Allocator::create_new_pack_file(&pack_path, false, separate_manifest).expect("创建包文件错误");
+    let mut pack = Allocator::create_new_pack_file(&pack_path, false, separate_manifest).expect(
+        "创建包文件错误"
+    );
     //逻辑实现=== ===
     //搜索文件===
     info!("搜索文件");
@@ -247,25 +243,21 @@ pub fn wbfp_m(args: &[String], mp: Option<&MultiProgress>) {
             ProgressStyle::default_bar()
                 .template(PROGRESS_STYLE_TEMPLATE)
                 .unwrap()
-                .progress_chars("=>-"),
+                .progress_chars("=>-")
         );
         pb.set_message("0.00%");
     }
     info!("开始复制数据");
-    write_pack(
-        &mut pack,
-        Option::from(&pb),
-        &files_list,
-        in_dir_path.as_ref(),
-    )
-        .expect("写入包文件错误");
+    write_pack(&mut pack, Option::from(&pb), &files_list, in_dir_path.as_ref()).expect(
+        "写入包文件错误"
+    );
     info!("操作已完成,文件保存到{pack_path}");
 }
 fn write_pack(
     pack_man: &mut Allocator,
     pb: Option<&ProgressBar>,
     files_list: &FilesList,
-    in_dir_path: &Path,
+    in_dir_path: &Path
 ) -> io::Result<()> {
     /// 递归将文件列表写入包 / Recursively write file list into pack
     fn write_pack_recursive<'a>(
@@ -274,20 +266,21 @@ fn write_pack(
         info_list: &HashMap<String, FileInfo>,
         in_s_path_buf: &Path,
         pack_s_path_buf: &Path,
-        run_buf: &mut [u8],
+        run_buf: &mut [u8]
     ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String, String)>> {
         for (name, info) in info_list {
             let this_in_path = in_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
             match info.file_kind() {
-                FileKind::File => copy_file_into_pack(
-                    pack,
-                    &mut pb_c,
-                    run_buf,
-                    info,
-                    &this_in_path,
-                    &this_pack_path,
-                ),
+                FileKind::File =>
+                    copy_file_into_pack(
+                        pack,
+                        &mut pb_c,
+                        run_buf,
+                        info,
+                        &this_in_path,
+                        &this_pack_path
+                    ),
                 FileKind::Dir(dir) => {
                     //目录仅递归处理
                     pb_c = write_pack_recursive(
@@ -296,7 +289,7 @@ fn write_pack(
                         dir.files_list(),
                         &this_in_path,
                         &this_pack_path,
-                        run_buf,
+                        run_buf
                     )?;
                 }
             }
@@ -314,11 +307,13 @@ fn write_pack(
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (files_list.data_length() as f64)) * 100.0;
-            pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
+            pb.set_message(
+                format!(
+                    "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
                 \nFile path: {f_path}\
                 \nPack path: {p_path}"
-            ));
+                )
+            );
         }
     };
     write_pack_recursive(
@@ -330,7 +325,7 @@ fn write_pack(
         files_list.files_list(),
         in_dir_path,
         &PathBuf::new(),
-        &mut buf,
+        &mut buf
     )?;
     Ok(())
 }
@@ -341,7 +336,7 @@ fn copy_file_into_pack(
     run_buf: &mut [u8],
     info: &FileInfo,
     this_in_path: &PathBuf,
-    this_pack_path: &PathBuf,
+    this_pack_path: &PathBuf
 ) {
     let mut lase_up_pb_c_write_len = 0;
     //尝试打开文件
@@ -353,34 +348,24 @@ fn copy_file_into_pack(
                     //权限不足
                     error!("无法打开文件{this_in_path:?}，权限不足，将跳过，err:{err}");
                 }
-                _ => panic!(
-                    r#"[未处理错误]无法打开文件"{}"，err:{err}"#,
-                    this_in_path.display()
-                ),
+                _ => panic!(r#"[未处理错误]无法打开文件"{}"，err:{err}"#, this_in_path.display()),
             }
             return;
         }
     };
     //尝试创建虚拟文件
-    let mut out_file =
-        match pack_man.create_file(this_pack_path, info.modified_time(), info.length()) {
-            Ok(v) => v,
-            Err(err) => {
-                error!(
-                    "无法创建虚拟文件{},将跳过, err:{err}",
-                    this_pack_path.display()
-                );
-                return;
-            }
-        };
+    let mut out_file = match
+        pack_man.create_file(this_pack_path, info.modified_time(), info.length())
+    {
+        Ok(v) => v,
+        Err(err) => {
+            error!("无法创建虚拟文件{},将跳过, err:{err}", this_pack_path.display());
+            return;
+        }
+    };
     //文件成功打开并创建后再更新进度计数
     if let Some(pb_c) = pb_c {
-        pb_c(
-            0,
-            1,
-            this_in_path.display().to_string(),
-            this_pack_path.display().to_string(),
-        );
+        pb_c(0, 1, this_in_path.display().to_string(), this_pack_path.display().to_string());
     }
     //写入操作
     let mut write_len = 0;
@@ -410,7 +395,7 @@ fn copy_file_into_pack(
                             this_in_path,
                             this_pack_path,
                             &mut lase_up_pb_c_write_len,
-                            &mut write_len,
+                            &mut write_len
                         );
                     }
                     Err(err) => {
@@ -431,7 +416,7 @@ fn copy_file_into_pack(
             info.length() - write_len,
             0,
             this_in_path.display().to_string(),
-            this_pack_path.display().to_string(),
+            this_pack_path.display().to_string()
         );
     }
 }
@@ -451,10 +436,7 @@ fn copy_file_into_pack(
 /// virtual file to the output directory. Large files (>512MiB) are noted in logs.
 pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
     //参数格式：[源文件目录,目标文件路径,分离数据文件,写时复制]
-    assert!(
-        args.len() >= 2,
-        "参数数量不够，至少需要 <包文件路径> <目标目录>"
-    );
+    assert!(args.len() >= 2, "参数数量不够，至少需要 <包文件路径> <目标目录>");
     //包文件路径
     let pack_path = &args[0];
     //输出文件路径
@@ -475,7 +457,7 @@ pub fn wbfp_s(args: &[String], mp: Option<&MultiProgress>) {
 fn read_pack(
     pack_man: &mut Allocator,
     pb: Option<&ProgressBar>,
-    out_dir_path: &Path,
+    out_dir_path: &Path
 ) -> io::Result<()> {
     /// 递归从包读取文件 / Recursively read files from pack
     fn read_pack_recursive<'a>(
@@ -484,13 +466,13 @@ fn read_pack(
         pack_struct_items: &HashMap<String, PackStructItem>,
         out_s_path_buf: &Path,
         pack_s_path_buf: &Path,
-        run_buf: &mut [u8],
+        run_buf: &mut [u8]
     ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String, String)>> {
         for (name, item) in pack_struct_items {
             let this_out_path = out_s_path_buf.join(name);
             let this_pack_path = pack_s_path_buf.join(name);
             match item.item_type() {
-                PackStructItemType::File => {
+                PackStructItemType::File { .. } => {
                     if let PackFileMetadataRun::Loaded(metadata) = item.metadata() {
                         copy_pack_file_to_disk(
                             pack_man,
@@ -498,7 +480,7 @@ fn read_pack(
                             run_buf,
                             metadata,
                             &this_out_path,
-                            &this_pack_path,
+                            &this_pack_path
                         );
                     } else {
                         error!("虚拟路径{this_pack_path:?}文件的元数据没有被加载");
@@ -516,7 +498,7 @@ fn read_pack(
                             pack_struct.items(),
                             &this_out_path,
                             &this_pack_path,
-                            run_buf,
+                            run_buf
                         )?;
                     } else {
                         error!("虚拟路径{this_pack_path:?}目录的结构没有被加载");
@@ -548,11 +530,13 @@ fn read_pack(
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
-            pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]\
+            pb.set_message(
+                format!(
+                    "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]\
                 \nPack path: {p_path}\
                 \nFile path: {f_path}"
-            ));
+                )
+            );
         }
     };
     read_pack_recursive(
@@ -564,7 +548,7 @@ fn read_pack(
         &root_struct_list,
         out_dir_path,
         &PathBuf::new(),
-        &mut buf,
+        &mut buf
     )?;
     Ok(())
 }
@@ -575,7 +559,7 @@ fn copy_pack_file_to_disk(
     run_buf: &mut [u8],
     metadata: &PackFileMetadata,
     this_out_path: &PathBuf,
-    this_pack_path: &PathBuf,
+    this_pack_path: &PathBuf
 ) {
     //更新进度
     let mut lase_up_pb_c_write_len = 0;
@@ -589,12 +573,7 @@ fn copy_pack_file_to_disk(
         );
     }
     if let Some(pb_c) = pb_c {
-        pb_c(
-            0,
-            1,
-            this_pack_path.display().to_string(),
-            this_out_path.display().to_string(),
-        );
+        pb_c(0, 1, this_pack_path.display().to_string(), this_out_path.display().to_string());
     }
     //尝试打开虚拟文件
     let mut in_file = match pack_man.get_file_wr(this_pack_path, false) {
@@ -640,7 +619,7 @@ fn copy_pack_file_to_disk(
                             this_pack_path,
                             this_out_path,
                             &mut lase_up_pb_c_write_len,
-                            &mut write_len,
+                            &mut write_len
                         );
                     }
                     Err(err) => {
@@ -661,7 +640,7 @@ fn copy_pack_file_to_disk(
             metadata.len() - write_len,
             0,
             this_pack_path.display().to_string(),
-            this_out_path.display().to_string(),
+            this_out_path.display().to_string()
         );
     }
 }
@@ -700,23 +679,21 @@ fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()>
         if let Some(pb) = pb {
             pb.set_position(this_all_write_len);
             let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
-            pb.set_message(format!(
-                "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
+            pb.set_message(
+                format!(
+                    "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
                 \nPack path: {p_path}"
-            ));
+                )
+            );
         }
     };
 
     for root_name in root_name_list {
-        verify_hash_inner(
-            pack,
-            root_name.as_ref(),
-            if pb.is_some() {
-                Some(&mut binding)
-            } else {
-                None
-            },
-        );
+        let _ = verify_hash_inner(pack, root_name.as_ref(), if pb.is_some() {
+            Some(&mut binding)
+        } else {
+            None
+        });
     }
     Ok(())
 }
@@ -724,13 +701,13 @@ fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()>
 fn verify_hash_inner<'a>(
     pack: &mut Allocator,
     path: &Path,
-    mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String) + 'a)>,
-) -> Option<&'a mut dyn FnMut(u64, u64, String)> {
+    mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String) + 'a)>
+) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String)>> {
     let item = match pack.get_pack_struct_item(path) {
         Ok(v) => v,
         Err(err) => {
             error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
-            return pb_c;
+            return Ok(pb_c);
         }
     };
     match item.item_type() {
@@ -738,41 +715,35 @@ fn verify_hash_inner<'a>(
             let items_name = match pack.get_struct_item_name_list(path) {
                 Ok(v) => v,
                 Err(err) => {
-                    error!(
-                        r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#,
-                        path.display()
-                    );
-                    return pb_c;
+                    error!(r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#, path.display());
+                    return Ok(pb_c);
                 }
             };
             let mut pb_c = pb_c;
             for name in items_name {
-                pb_c = verify_hash_inner(pack, &path.join(name), pb_c);
+                pb_c = verify_hash_inner(pack, &path.join(name), pb_c)?;
             }
-            pb_c
+            Ok(pb_c)
         }
-        PackStructItemType::File => {
-            let mut rw = match pack.get_file_wr_readonly(path) {
+        PackStructItemType::File { .. } => {
+            let mut rw = match pack.get_file_wr(path, false) {
                 Ok(v) => v,
                 Err(err) => {
                     error!("无法获取包文件读写器，err: {err}");
-                    return pb_c;
+                    return Ok(pb_c);
                 }
             };
             match rw.verify_hash() {
                 Ok(false) => {
                     warn!(r#"虚拟文件"{}"哈希验证失败"#, path.display());
                 }
-                Err(err) => warn!(
-                    r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#,
-                    path.display()
-                ),
+                Err(err) => warn!(r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#, path.display()),
                 _ => (),
             }
             if let Some(pb) = &mut pb_c {
-                pb(rw.get_len(), 1, path.display().to_string());
+                pb(rw.get_len()?, 1, path.display().to_string());
             }
-            pb_c
+            Ok(pb_c)
         }
     }
 }

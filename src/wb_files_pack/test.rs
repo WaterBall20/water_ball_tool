@@ -1,7 +1,15 @@
-use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
+use super::data::{ MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN };
 use crate::wb_files_pack::{
-    Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata,
-    PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
+    Attribute,
+    DataPosList,
+    ManifestDataBlock,
+    ManifestDataBlockTrait,
+    PackFileMetadata,
+    PackFileMetadataRun,
+    PackFileMetadataType,
+    PackStruct,
+    PackStructItem,
+    PackStructItemType,
     DATA_BLOCK_LEN,
 };
 use pretty_assertions::assert_eq;
@@ -18,8 +26,8 @@ fn pack_struct_to_bytes_vec_and_load() {
                 pack_struct: None,
             },
             5867,
-            PackFileMetadataRun::NoLoad,
-        ),
+            PackFileMetadataRun::NoLoad
+        )
     );
     ps.add_item(
         "test2".to_string(),
@@ -30,17 +38,17 @@ fn pack_struct_to_bytes_vec_and_load() {
                 pack_struct: None,
             },
             2941,
-            PackFileMetadataRun::NoLoad,
-        ),
+            PackFileMetadataRun::NoLoad
+        )
     );
     ps.add_item(
         "test3".to_string(),
         PackStructItem::new(
             "test3".to_string(),
-            PackStructItemType::File,
+            PackStructItemType::File { handle: None },
             12445,
-            PackFileMetadataRun::NoLoad,
-        ),
+            PackFileMetadataRun::NoLoad
+        )
     );
     for index in 0..1000 {
         let name = format!("file{index}");
@@ -54,11 +62,11 @@ fn pack_struct_to_bytes_vec_and_load() {
                         pack_struct: None,
                     }
                 } else {
-                    PackStructItemType::File
+                    PackStructItemType::File { handle: None }
                 },
                 rand::random_range(0..100_000_000),
-                PackFileMetadataRun::NoLoad,
-            ),
+                PackFileMetadataRun::NoLoad
+            )
         );
         ps.to_bytes_vec();
     }
@@ -75,7 +83,7 @@ fn pack_struct_item_dir_to_bytes_vec_and_load() {
             pack_struct: None,
         },
         7_766_735_636,
-        PackFileMetadataRun::NoLoad,
+        PackFileMetadataRun::NoLoad
     );
     let data = psi.to_bytes_vec();
     let psi_load = PackStructItem::load(&data).unwrap();
@@ -85,9 +93,9 @@ fn pack_struct_item_dir_to_bytes_vec_and_load() {
 fn pack_struct_item_file_to_bytes_vec_and_load() {
     let psi = PackStructItem::new(
         String::new(),
-        PackStructItemType::File,
+        PackStructItemType::File { handle: None },
         689_669,
-        PackFileMetadataRun::NoLoad,
+        PackFileMetadataRun::NoLoad
     );
     let data = psi.to_bytes_vec();
     let psi_load = PackStructItem::load(&data).unwrap();
@@ -97,39 +105,60 @@ fn pack_struct_item_file_to_bytes_vec_and_load() {
 }
 #[test]
 fn pack_file_metadata_file_to_bytes_vec_and_load() {
-    let mut pfm = PackFileMetadata::new(
-        false,
-        53124,
-        5715,
-        PackFileMetadataType::File {
-            hash_type: 0,
-            hash_value: Vec::new(),
-            data_pos_list: DataPosList::new(vec![(0, 100), (10, 1), (223, 5890)]),
-        },
-    );
+    let mut pfm = PackFileMetadata::new(false, 53124, 5715, PackFileMetadataType::File {
+        hash_type: 0,
+        hash_value: Vec::new(),
+        data_pos_list: DataPosList::new(vec![(0, 100), (10, 1), (223, 5890)]),
+    });
     let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
     let pfm_load = PackFileMetadata::load(block_data).unwrap();
     assert_eq!(pfm, pfm_load);
     //2
     let hash_value = vec![
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-        26, 27, 28, 29, 30, 31, 32,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32
     ];
     let mut pfm2 = pfm.clone();
-    if let PackFileMetadataType::File {
-        hash_type,
-        hash_value: hv,
-        ..
-    } = pfm2.file_type_mut()
-    {
+    if let PackFileMetadataType::File { hash_type, hash_value: hv, .. } = pfm2.file_type_mut() {
         *hash_type = 1;
         *hv = hash_value.clone();
     }
-    if let PackFileMetadataType::File {
-        hash_type,
-        hash_value: this_hash_value,
-        ..
-    } = pfm.file_type_mut()
+    if
+        let PackFileMetadataType::File {
+            hash_type,
+            hash_value: this_hash_value,
+            ..
+        } = pfm.file_type_mut()
     {
         *hash_type = 1;
         *this_hash_value = hash_value;
@@ -141,15 +170,10 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
 }
 #[test]
 fn pack_file_metadata_dir_to_bytes_vec_and_load() {
-    let mut pfm = PackFileMetadata::new(
-        true,
-        52035,
-        294,
-        PackFileMetadataType::Dir {
-            file_count: 0,
-            dir_count: 0,
-        },
-    );
+    let mut pfm = PackFileMetadata::new(true, 52035, 294, PackFileMetadataType::Dir {
+        file_count: 0,
+        dir_count: 0,
+    });
     let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
     let pfm_load = PackFileMetadata::load(block_data).unwrap();
     assert_eq!(pfm, pfm_load);
@@ -174,14 +198,16 @@ fn pack_file_metadata_data_block_save_and_load() {
     b.set_manifest_file_len(123);
     let b_block_data = b.get_block_data().0;
     //Load
-    let b_load =
-        Attribute::load(ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()).unwrap();
+    let b_load = Attribute::load(
+        ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()
+    ).unwrap();
     assert_eq!(b, b_load);
     //Save3
     let b_block_data = b.get_block_data().0;
     //Load
-    let b_load =
-        Attribute::load(ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()).unwrap();
+    let b_load = Attribute::load(
+        ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()
+    ).unwrap();
     assert_eq!(b, b_load);
 }
 
@@ -201,24 +227,24 @@ fn prepare_ab_block(data_v1: &[u8], data_v2: &[u8]) -> ManifestDataBlock {
 /// 损坏 B 块的尾部版本号 / Corrupt B half's tail version
 fn corrupt_b_tail_ver(md: &mut ManifestDataBlock) {
     let block_len = md.block_data().len();
-    md.block_data_mut()[block_len - MANIFEST_DATA_BLOCK_DATA_VER_LEN] ^= 0xFF;
+    md.block_data_mut()[block_len - MANIFEST_DATA_BLOCK_DATA_VER_LEN] ^= 0xff;
 }
 
 /// 损坏 A 块的尾部版本号 / Corrupt A half's tail version
 fn corrupt_a_tail_ver(md: &mut ManifestDataBlock) {
     let half = md.block_data().len() / 2;
-    md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN] ^= 0xFF;
+    md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN] ^= 0xff;
 }
 
 /// 损坏 B 块的头部版本号 / Corrupt B half's head version
 fn corrupt_b_head_ver(md: &mut ManifestDataBlock) {
     let half = md.block_data().len() / 2;
-    md.block_data_mut()[half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX] ^= 0xFF;
+    md.block_data_mut()[half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX] ^= 0xff;
 }
 
 /// 损坏 A 块的头部版本号 / Corrupt A half's head version
 fn corrupt_a_head_ver(md: &mut ManifestDataBlock) {
-    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX] ^= 0xFF;
+    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX] ^= 0xff;
 }
 
 #[test]
@@ -404,9 +430,10 @@ fn get_ver_accepts_nonzero() {
     let ver: u32 = 42;
     let ver_bytes = ver.to_le_bytes();
     // 设置头部版本
-    data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_bytes);
+    data[
+        MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_bytes);
     // 设置尾部版本
     let tail_start = block_size - MANIFEST_DATA_BLOCK_DATA_VER_LEN;
     data[tail_start..tail_start + MANIFEST_DATA_BLOCK_DATA_VER_LEN].copy_from_slice(&ver_bytes);
@@ -433,19 +460,23 @@ fn update_wraps_version_near_max() {
 
     // 设置 A (前半) 版本为 u32::MAX
     let ver_max = u32::MAX.to_le_bytes();
-    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_max);
+    md.block_data_mut()[
+        MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // 设置 B (后半) 版本为 u32::MAX - 1
     let ver_max_minus_1 = (u32::MAX - 1).to_le_bytes();
     let block_len = md.block_data().len();
-    md.block_data_mut()[half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_max_minus_1);
-    md.block_data_mut()[block_len - MANIFEST_DATA_BLOCK_DATA_VER_LEN..]
-        .copy_from_slice(&ver_max_minus_1);
+    md.block_data_mut()[
+        half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX..half +
+            MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_max_minus_1);
+    md.block_data_mut()[block_len - MANIFEST_DATA_BLOCK_DATA_VER_LEN..].copy_from_slice(
+        &ver_max_minus_1
+    );
 
     // B(MAX-1) 比 A(MAX) 更旧 → 更新 B 为 next_ver(MAX) = 1
     md.update(data2);
@@ -472,9 +503,10 @@ fn update_wraps_at_boundary_then_continues() {
 
     // 设置 A 版本为 u32::MAX
     let ver_max = u32::MAX.to_le_bytes();
-    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_max);
+    md.block_data_mut()[
+        MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // B 处于 ver=2 (第二次 update 的结果)
@@ -484,9 +516,10 @@ fn update_wraps_at_boundary_then_continues() {
     md.update(b"step1"); // 这次 update 实际上是在 step0 之后: A=1, 然后 update step1 → B=2
 
     // 重新设置 A 版本为 u32::MAX
-    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_max);
+    md.block_data_mut()[
+        MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // B 是 ver=2 (较新), A 是 ver=MAX (较旧) → 更新 A: next_ver(MAX) = 1
@@ -520,9 +553,10 @@ fn ab_fallback_works_after_wrap_around() {
     let half = md.block_data().len() / 2;
     // 设置 A 版本为 MAX-1
     let ver_max_m1 = (u32::MAX - 1).to_le_bytes();
-    md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
-        ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
-        .copy_from_slice(&ver_max_m1);
+    md.block_data_mut()[
+        MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
+            MANIFEST_DATA_BLOCK_DATA_VER_LEN
+    ].copy_from_slice(&ver_max_m1);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max_m1);
 
     // B 初始为空 (ver=0, 会被拒绝)

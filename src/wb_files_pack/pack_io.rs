@@ -8,8 +8,8 @@ use std::io::{Error, Read, Seek, SeekFrom, Write};
 
 /// 虚拟文件读写器模块 / Virtual file reader-writer module
 pub mod file;
-mod file_handle;
-mod file_hash;
+pub mod file_handle;
+pub mod file_hash;
 
 //文件头===
 //文件头-文件名:WPFilesPack
@@ -347,10 +347,8 @@ impl PackIO /*读*/ {
     /// Set the file read pointer position.
     //设置文件地址
     pub(crate) fn set_pos_read(&self, pos: u64) -> io::Result<()> {
-        if self.run_data.pos != pos {
-            let mut file = &self.file;
-            file.seek(SeekFrom::Start(pos))?;
-        }
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(pos))?;
         Ok(())
     }
 }

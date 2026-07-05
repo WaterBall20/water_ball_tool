@@ -14,6 +14,7 @@ pub const DEFAULT_SEPARATE_MANIFEST: bool = true;
 /// 默认哈希类型（1 = Blake3）/ Default hash type (1 = Blake3)
 pub const DEFAULT_HASH_TYPE: u8 = 1;
 
+#[derive(Debug)]
 pub(crate) struct WBFPManager {
     pub(crate) manifest: WBFilesPackManifest,
     pub(crate) pack_file: Arc<Mutex<PackIO>>,
@@ -22,6 +23,7 @@ pub(crate) struct WBFPManager {
     pub(crate) run_data: WBFPManagerRun,
 }
 
+#[derive(Debug)]
 pub(crate) struct WBFPManagerRun {
     pub(crate) write_lock: bool,
     pub(crate) write_lock_path: PathBuf,

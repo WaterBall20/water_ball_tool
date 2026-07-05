@@ -5,12 +5,16 @@ use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::file_hash::PackFileHash;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{
-    PackFileMetadata, PackFileMetadataType, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
+    PackFileMetadata,
+    PackFileMetadataType,
+    DATA_BLOCK_LEN,
+    DATA_DATA_BLOCK_LEN,
 };
 use std::io;
-use std::io::{Error, Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::io::{ Error, Read, Seek, SeekFrom, Write };
+use std::sync::{ Arc, Mutex };
 
+#[derive(Debug)]
 pub(crate) struct PackFileHandle {
     /// 管理器实例 / Manager instance
     manager: Arc<Mutex<WBFPManager>>,
@@ -44,12 +48,16 @@ impl PackFileHandle {
         pack_io: &Arc<Mutex<PackIO>>,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
-        end_pos: bool,
+        end_pos: bool
     ) -> io::Result<Self> {
         Ok(Self {
             manager,
             pack_io: pack_io.clone(),
-            pos: if end_pos { metadata.len() } else { 0 },
+            pos: if end_pos {
+                metadata.len()
+            } else {
+                0
+            },
             temp_pos_index: 0,
             temp_pos_this_len: 0,
             path_list: Some(path_list),
@@ -81,7 +89,7 @@ impl PackFileHandle {
             self.temp_pos_this_len,
             self.pos,
             add_pos,
-            is_read,
+            is_read
         )
     }
     fn get_add_pos_list(
@@ -90,14 +98,15 @@ impl PackFileHandle {
         start_pos_list_item_len: u64,
         start_pos: u64,
         add_pos: u64,
-        is_read: bool,
+        is_read: bool
     ) -> io::Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_list_item_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
-        while let Some(metadata) = &self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type()
-            && pos_index < data_pos_list.list().len()
+        while
+            let Some(metadata) = &self.metadata &&
+            let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type() &&
+            pos_index < data_pos_list.list().len()
         {
             let (mut pos, mut len) = *data_pos_list.list().get(pos_index).unwrap();
             //当前校准
@@ -129,16 +138,15 @@ impl PackFileHandle {
 
     //增加分配大小
     fn add_running_len(&mut self, add_len: u64) -> io::Result<()> {
-        if let Some(metadata) = &mut self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
+        if
+            let Some(metadata) = &mut self.metadata &&
+            let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
-            data_pos_list
-                .list_mut()
-                .push(pack_file.get_file_pos(add_len))
+            data_pos_list.list_mut().push(pack_file.get_file_pos(add_len));
         }
         Ok(())
     }
@@ -157,8 +165,9 @@ impl PackFileHandle {
         //提前读取len避免借用冲突
         let metadata_len = self.metadata.as_ref().map(|m| m.len());
         //大小判断
-        if let Some(metadata) = &mut self.metadata
-            && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
+        if
+            let Some(metadata) = &mut self.metadata &&
+            let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
@@ -289,12 +298,7 @@ impl PackFileHandle {
             panic!("逻辑错误，实例未释放时元数据实例不存在")
         };
         //
-        if let PackFileMetadataType::File {
-            hash_type,
-            hash_value,
-            ..
-        } = metadata.file_type()
-        {
+        if let PackFileMetadataType::File { hash_type, hash_value, .. } = metadata.file_type() {
             let in_hash = PackFileHash::from_new(*hash_type, hash_value.as_slice());
             //循环读取
             let mut read_hash = self.read_hash_v()?;
@@ -307,8 +311,9 @@ impl PackFileHandle {
 
     fn read_hash_v(&mut self) -> io::Result<PackFileHash> {
         //计算哈希
-        if let Some(metadata) = &self.metadata
-            && let PackFileMetadataType::File { hash_type, .. } = metadata.file_type()
+        if
+            let Some(metadata) = &self.metadata &&
+            let PackFileMetadataType::File { hash_type, .. } = metadata.file_type()
         {
             let len = metadata.len();
             let hash_type = *hash_type;
@@ -318,7 +323,7 @@ impl PackFileHandle {
             let mut read_hash = PackFileHash::new(hash_type);
             let mut hash_read_len = 0;
             while hash_read_len < len {
-                let this_read_len = self.read(&mut buf)?;
+                let this_read_len = self.read(self.pos, &mut buf)?;
                 read_hash.update(&buf[..this_read_len]);
                 hash_read_len += this_read_len as u64;
             }
@@ -344,9 +349,10 @@ impl PackFileHandle {
         //计算哈希
         if self.is_write {
             let read_hash = self.read_hash_v();
-            if let Ok(read_hash) = read_hash
-                && let Some(metadata) = &mut self.metadata
-                && let PackFileMetadataType::File { hash_value, .. } = metadata.file_type_mut()
+            if
+                let Ok(read_hash) = read_hash &&
+                let Some(metadata) = &mut self.metadata &&
+                let PackFileMetadataType::File { hash_value, .. } = metadata.file_type_mut()
             {
                 *hash_value = read_hash.get_hash_value();
             }
@@ -357,9 +363,7 @@ impl PackFileHandle {
             self.set_len(metadata_len)?; //通过设置大小触发释放
         }
         //返还元数据
-        if let Some(path_list) = self.path_list.take()
-            && let Some(metadata) = self.metadata.take()
-        {
+        if let Some(path_list) = self.path_list.take() && let Some(metadata) = self.metadata.take() {
             let manager = self.manager.clone();
             let mut manager = manager
                 .lock()
@@ -383,43 +387,49 @@ impl Seek for PackFileHandle {
                 self.set_pos(pos)?;
                 Ok(pos)
             }
-            SeekFrom::Current(pos) => match pos {
-                0 => Ok(self.pos),
-                //大于0
-                1.. => {
-                    self.add_pos(pos.cast_unsigned())?;
-                    Ok(self.pos)
+            SeekFrom::Current(pos) =>
+                match pos {
+                    0 => Ok(self.pos),
+                    //大于0
+                    1.. => {
+                        self.add_pos(pos.cast_unsigned())?;
+                        Ok(self.pos)
+                    }
+                    //小于0
+                    ..0 => {
+                        self.sub_pos((-pos).cast_unsigned())?;
+                        Ok(self.pos)
+                    }
                 }
-                //小于0
-                ..0 => {
-                    self.sub_pos((-pos).cast_unsigned())?;
-                    Ok(self.pos)
-                }
-            },
             SeekFrom::End(pos) => {
                 let end = self.get_len();
-                if pos > 0 {
-                    let add = pos as u64;
-                    let new_end = end + add;
-                    self.set_len(new_end)?;
-                    self.set_pos(new_end)?;
-                    Ok(new_end)
-                } else if pos < 0 {
-                    let sub = (-pos) as u64;
-                    let new_pos = end.saturating_sub(sub);
-                    self.set_pos(new_pos)?;
-                    Ok(new_pos)
-                } else {
-                    self.set_pos(end)?;
-                    Ok(end)
+                match pos {
+                    0 => {
+                        self.set_pos(end)?;
+                        Ok(end)
+                    }
+                    1.. => {
+                        let add = pos.cast_unsigned();
+                        let new_end = end + add;
+                        self.set_len(new_end)?;
+                        self.set_pos(new_end)?;
+                        Ok(new_end)
+                    }
+                    ..0 => {
+                        let sub = (-pos).cast_unsigned();
+                        let new_pos = end.saturating_sub(sub);
+                        self.set_pos(new_pos)?;
+                        Ok(new_pos)
+                    }
                 }
             }
         }
     }
 }
 
-impl Read for PackFileHandle {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+impl PackFileHandle {
+   pub fn read(&mut self, pos: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.set_pos(pos)?;
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
@@ -443,9 +453,10 @@ impl Read for PackFileHandle {
     }
 }
 
-impl Write for PackFileHandle {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+impl PackFileHandle {
+    pub fn write(&mut self, pos: u64, buf: &[u8]) -> io::Result<usize> {
         self.is_write = true;
+        self.set_pos(pos)?;
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
@@ -455,7 +466,7 @@ impl Write for PackFileHandle {
         //如果没有空间就尝试分配
         if pos_s.is_empty() {
             let data_len = buf.len() as u64;
-            let add_running_len = ((data_len / DATA_DATA_BLOCK_LEN) + 1) * DATA_DATA_BLOCK_LEN;
+            let add_running_len = (data_len / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN;
             self.add_running_len(add_running_len)?;
             pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
             assert!(!pos_s.is_empty());
@@ -478,23 +489,16 @@ impl Write for PackFileHandle {
         }
         self.add_pos(write_len as u64)?;
         //大小判断，更新大小
-        if let Some(metadata) = &mut self.metadata
-            && self.pos > metadata.len()
-        {
-            metadata.set_len(self.pos)
+        if let Some(metadata) = &mut self.metadata && self.pos > metadata.len() {
+            metadata.set_len(self.pos);
         }
         Ok(write_len)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&mut self) -> io::Result<()> {
         self.pack_io
             .lock()
             .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?
             .flush()
-    }
-
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.write(buf)?;
-        Ok(())
     }
 }

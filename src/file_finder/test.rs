@@ -9,6 +9,7 @@ const TEST_DIR: &str = "./temp/test/ff/symlink";
 /// 创建前将目标路径规格化以避免平台路径分隔符问题
 #[cfg(unix)]
 fn create_symlink(original: &Path, link: &Path) -> io::Result<()> {
+    let original = original.canonicalize().unwrap_or_else(|_| original.to_path_buf());
     std::os::unix::fs::symlink(original, link)
 }
 
