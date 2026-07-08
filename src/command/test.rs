@@ -1,7 +1,6 @@
 /*
 创建时间：2026/02/24 08:45
 */
-use crate::command::{ff, wbfp};
 use indicatif::MultiProgress;
 use std::fs;
 
@@ -23,8 +22,10 @@ fn ff_out_file_skip_symlink() {
     out_file_path.push_str("/test_ff_skip_symlink.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("."), out_file_path.clone(), String::from("-s")];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new(String::from("."), Some(out_file_path.clone()), true),
+        Some(&mp),
+    );
     _ = fs::remove_file(&out_file_path);
 }
 //文件查找器输出文件
@@ -38,8 +39,10 @@ fn ff_out_file() {
     out_file_path.push_str("/test_ff.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("."), out_file_path.clone()];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new(String::from("."), Some(out_file_path.clone()), false),
+        Some(&mp),
+    );
     _ = fs::remove_file(&out_file_path);
 }
 //文件查找器输出文件,长时间
@@ -55,10 +58,13 @@ fn ff_out_file_longtime() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     #[cfg(not(target_os = "windows"))]
-    let args: Vec<String> = vec![String::from("/home"), out_file_path.clone()];
+    let path = String::from("/home");
     #[cfg(target_os = "windows")]
-    let args: Vec<String> = vec![String::from("C:/"), out_file_path.clone()];
-    ff(args.as_slice(), Some(&mp));
+    let pString::from("C:/");
+    ff(
+        FileFinderArgs::new(path, Some(out_file_path.clone()), false),
+        Some(&mp),
+    );
 }
 //文件查找器不输出文件
 #[test]
@@ -66,8 +72,7 @@ fn ff_no_out_file() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     //命令行参数处理
-    let args: Vec<String> = vec![String::from(".")];
-    ff(args.as_slice(), Some(&mp));
+    ff(FileFinderArgs::new(".".to_string(), None, false), Some(&mp));
 }
 
 //水球包文件打包===
@@ -82,12 +87,16 @@ fn wbfp_create_new_pack_m() {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("-m"),
-        String::from("./src"),
-        out_file_path.clone(),
-    ];
-    wbfp(args.as_slice(), Some(&mp));
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+            WaterBallFilePackCommandsPack::new(
+                "./src".to_string(),
+                Some(out_file_path.clone()),
+                false,
+            ),
+        )),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&out_file_path);
 }
 // 长时间
@@ -103,15 +112,16 @@ fn wbfp_create_new_pack_m_longtime() {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("-m"),
-        #[cfg(target_os = "windows")]
-        String::from("C:\\Program Files"),
-        #[cfg(not(target_os = "windows"))]
-        String::from("/usr/lib/"),
-        out_file_path.clone(),
-    ];
-    wbfp(args.as_slice(), Some(&mp));
+    #[cfg(target_os = "windows")]
+    let path = String::from("C:\\Program Files");
+    #[cfg(not(target_os = "windows"))]
+    let path = String::from("/usr/lib/");
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+            WaterBallFilePackCommandsPack::new(path, Some(out_file_path.clone()), false),
+        )),
+        Some(&mp),
+    );
 }
 
 // 不分离数据
@@ -126,13 +136,16 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("-m"),
-        String::from("./src"),
-        out_file_path.clone(),
-        String::from("-f"),
-    ];
-    wbfp(args.as_slice(), Some(&mp));
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+            WaterBallFilePackCommandsPack::new(
+                "./src".to_string(),
+                Some(out_file_path.clone()),
+                true,
+            ),
+        )),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&out_file_path);
 }
 
@@ -149,14 +162,21 @@ fn wbfp_pack_s_longtime() {
     _ = fs::create_dir_all(&in_dir_path);
     let mut in_file_path = in_dir_path.clone();
     in_file_path.push_str("/pack");
-    //命令行参数处理
-    let args: Vec<String> = vec![String::from("-s"), in_file_path.clone(), {
-        let mut out_dir_path = in_dir_path.clone();
-        out_dir_path.push_str("/s_pack");
-        _ = fs::create_dir_all(&out_dir_path);
-        out_dir_path
-    }];
-    wbfp(args.as_slice(), Some(&mp));
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+            WaterBallFilePackCommandsUnpack::new(
+                in_file_path.clone(),
+                {
+                    let mut out_dir_path = in_dir_path.clone();
+                    out_dir_path.push_str("/s_pack");
+                    _ = fs::create_dir_all(&out_dir_path);
+                    out_dir_path
+                },
+                false,
+            ),
+        )),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&in_file_path);
 }
 // 不分离数据打包和解包和哈希校验
@@ -173,32 +193,36 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
     //前提：打包
     {
         //命令行参数处理
-        let args: Vec<String> = vec![
-            String::from("-m"),
-            String::from("./src"),
-            out_file_path.clone(),
-            String::from("-f"),
-        ];
-        wbfp(args.as_slice(), Some(&mp));
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+                WaterBallFilePackCommandsPack::new(
+                    "./src".to_string(),
+                    Some(out_file_path.clone()),
+                    true,
+                ),
+            )),
+            Some(&mp),
+        );
     }
     //哈希校验（仅需包路径）
     {
-        let args: Vec<String> = vec![
-            String::from("-h"),
-            out_file_path.clone(),
-        ];
-        wbfp(args.as_slice(), Some(&mp));
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+                WaterBallFilePackCommandsHashVerify::new(out_file_path.clone()),
+            )),
+            Some(&mp),
+        );
     }
     //解包
     {
         let mut s_out_path = out_dir_path.clone();
         s_out_path.push_str("/s");
-        let args: Vec<String> = vec![
-            String::from("-s"),
-            out_file_path.clone(),
-            s_out_path,
-        ];
-        wbfp(args.as_slice(), Some(&mp));
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+                WaterBallFilePackCommandsUnpack::new(out_file_path.clone(), s_out_path, false),
+            )),
+            Some(&mp),
+        );
     }
     _ = fs::remove_dir_all(&out_file_path);
 }
@@ -217,8 +241,12 @@ fn wbfp_verify_all_file_hash_longtime() {
     let mut in_file_path = in_dir_path.clone();
     in_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![String::from("-h"), in_file_path.clone()];
-    wbfp(args.as_slice(), Some(&mp));
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+            WaterBallFilePackCommandsHashVerify::new(in_file_path.clone()),
+        )),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&in_file_path);
 }
 
@@ -235,12 +263,10 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     out_file_path.push_str("/out_file_skip_symlink_err_not_found_dir.json");
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("/～"),
-        out_file_path.clone(),
-        String::from("-s"),
-    ];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new("/~".to_string(), Some(out_file_path.clone()), true),
+        Some(&mp),
+    );
     _ = fs::remove_file(&out_file_path);
 }
 //水球包文件打包，但输入路径不存在
@@ -256,22 +282,31 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     //命令行参数处理
-    let args: Vec<String> = vec![
-        String::from("-m"),
-        String::from("/~"),
-        out_file_path.clone(),
-    ];
-    wbfp(args.as_slice(), Some(&mp));
+    wbfp(
+        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+            WaterBallFilePackCommandsPack::new(
+                "/~".to_string(),
+                Some(out_file_path.clone()),
+                false,
+            ),
+        )),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&out_file_path);
 }
 
 // === 符号链接循环检测 / Symlink cycle detection ===
 
+use crate::command::ff::{ff, FileFinderArgs};
+use crate::command::wbfp::{
+    wbfp, WaterBallFilePackArgs, WaterBallFilePackCommands,
+    WaterBallFilePackCommandsHashVerify, WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack,
+};
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const SYMLINK_TEST_DIR: &str = "./temp/test/ff/symlink_cmd";
+const SYMLINK_TEST_DIR: &str = "./temp/test/ff/ok/symlink_cmd";
 
 #[cfg(unix)]
 fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
@@ -280,7 +315,9 @@ fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
 
 #[cfg(windows)]
 fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
-    let original = original.canonicalize().unwrap_or_else(|_| original.to_path_buf());
+    let original = original
+        .canonicalize()
+        .unwrap_or_else(|_| original.to_path_buf());
     if original.is_dir() {
         std::os::windows::fs::symlink_dir(&original, link)
     } else {
@@ -325,11 +362,14 @@ fn ff_with_symlinks_in_output() {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    let args: Vec<String> = vec![
-        root.to_str().unwrap().to_string(),
-        json_path.to_str().unwrap().to_string(),
-    ];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new(
+            root.to_str().unwrap().to_string(),
+            Some(json_path.to_str().unwrap().to_string()),
+            false,
+        ),
+        Some(&mp),
+    );
 
     let json_str = fs::read_to_string(&json_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -355,12 +395,14 @@ fn ff_skip_symlinks_excludes_them() {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    let args: Vec<String> = vec![
-        root.to_str().unwrap().to_string(),
-        json_path.to_str().unwrap().to_string(),
-        String::from("-s"),
-    ];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new(
+            root.to_str().unwrap().to_string(),
+            Some(json_path.to_str().unwrap().to_string()),
+            true,
+        ),
+        Some(&mp),
+    );
 
     let json_str = fs::read_to_string(&json_path).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -386,8 +428,10 @@ fn ff_ancestor_symlink_does_not_crash() {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
 
-    let args: Vec<String> = vec![root.to_str().unwrap().to_string()];
-    ff(args.as_slice(), Some(&mp));
+    ff(
+        FileFinderArgs::new(root.to_str().unwrap().to_string(), None, false),
+        Some(&mp),
+    );
 
     _ = fs::remove_dir_all(&root);
 }
