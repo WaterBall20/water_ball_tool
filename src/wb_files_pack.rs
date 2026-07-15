@@ -11,6 +11,9 @@ mod test;
 /// 线程安全分配器模块 / Thread-safe allocator module
 pub mod allocator;
 mod net_server;
+pub mod error;
+
+pub use error::{PackFileError, Result};
 
 // 重导出公共数据类型 / Re-export public data types
 pub use data::{

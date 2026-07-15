@@ -10,9 +10,9 @@ use crate::wb_files_pack::{
     DATA_BLOCK_LEN,
     DATA_DATA_BLOCK_LEN,
 };
-use std::io;
-use std::io::{ Error, Read, Seek, SeekFrom, Write };
-use std::sync::{ Arc, Mutex };
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use crate::wb_files_pack::error::{Result, PackFileError};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub(crate) struct PackFileHandle {
@@ -48,8 +48,8 @@ impl PackFileHandle {
         pack_io: &Arc<Mutex<PackIO>>,
         path_list: Vec<String>,
         metadata: PackFileMetadata,
-        end_pos: bool
-    ) -> io::Result<Self> {
+        end_pos: bool,
+    ) -> Result<Self> {
         Ok(Self {
             manager,
             pack_io: pack_io.clone(),
@@ -78,18 +78,18 @@ impl PackFileHandle {
     }
 
     //获取位置列表
-    fn get_pos_list(&self, pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
+    fn get_pos_list(&self, pos: u64, is_read: bool) -> Result<Vec<(u64, u64)>> {
         self.get_add_pos_list(0, 0, 0, pos, is_read)
     }
 
     //获取追加位置列表
-    fn get_add_pos_list2(&self, add_pos: u64, is_read: bool) -> io::Result<Vec<(u64, u64)>> {
+    fn get_add_pos_list2(&self, add_pos: u64, is_read: bool) -> Result<Vec<(u64, u64)>> {
         self.get_add_pos_list(
             self.temp_pos_index,
             self.temp_pos_this_len,
             self.pos,
             add_pos,
-            is_read
+            is_read,
         )
     }
     fn get_add_pos_list(
@@ -98,13 +98,13 @@ impl PackFileHandle {
         start_pos_list_item_len: u64,
         start_pos: u64,
         add_pos: u64,
-        is_read: bool
-    ) -> io::Result<Vec<(u64, u64)>> {
+        is_read: bool,
+    ) -> Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_list_item_index;
         let mut r_pos: Vec<(u64, u64)> = Vec::new();
         let mut m_add_len: u64 = 0;
         while
-            let Some(metadata) = &self.metadata &&
+        let Some(metadata) = &self.metadata &&
             let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type() &&
             pos_index < data_pos_list.list().len()
         {
@@ -137,15 +137,15 @@ impl PackFileHandle {
     }
 
     //增加分配大小
-    fn add_running_len(&mut self, add_len: u64) -> io::Result<()> {
+    fn add_running_len(&mut self, add_len: u64) -> Result<()> {
         if
-            let Some(metadata) = &mut self.metadata &&
+        let Some(metadata) = &mut self.metadata &&
             let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+                .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
             data_pos_list.list_mut().push(pack_file.get_file_pos(add_len));
         }
         Ok(())
@@ -160,19 +160,19 @@ impl PackFileHandle {
     /// When increasing, new data blocks are automatically allocated.
     /// When decreasing, excess space is released and submitted for garbage collection.
     //设置文件大小
-    pub fn set_len(&mut self, len: u64) -> io::Result<()> {
+    pub fn set_len(&mut self, len: u64) -> Result<()> {
         const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
         //提前读取len避免借用冲突
         let metadata_len = self.metadata.as_ref().map(|m| m.len());
         //大小判断
         if
-            let Some(metadata) = &mut self.metadata &&
+        let Some(metadata) = &mut self.metadata &&
             let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
         {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+                .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
             let old_metadata_len = metadata_len.unwrap_or(0);
             if len > old_metadata_len {
                 //增加大小
@@ -192,7 +192,7 @@ impl PackFileHandle {
                     let (pos, item_len) = *value;
                     back_len_cnt += item_len;
                     let back_len_c = back_len_cnt / DATA_BLOCK_LEN_U64;
-                    let this_back_len_c = (len + DATA_BLOCK_LEN_U64 - 1) / DATA_BLOCK_LEN_U64;
+                    let this_back_len_c = len.div_ceil(DATA_BLOCK_LEN_U64);
                     //大于实际大小
                     if back_len_c > this_back_len_c {
                         let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
@@ -223,7 +223,7 @@ impl PackFileHandle {
     }
 
     //设置文件位置
-    fn set_pos(&mut self, pos: u64) -> io::Result<()> {
+    fn set_pos(&mut self, pos: u64) -> Result<()> {
         //缓存处理===
         if self.pos != pos {
             //获取需要添加的块列表
@@ -240,7 +240,7 @@ impl PackFileHandle {
     }
 
     //追加文件位置
-    fn add_pos(&mut self, length: u64) -> io::Result<()> {
+    fn add_pos(&mut self, length: u64) -> Result<()> {
         //获取需要添加的块列表
         self.add_pos2(length, &self.get_add_pos_list2(length, false)?);
         Ok(())
@@ -264,7 +264,7 @@ impl PackFileHandle {
     }
 
     //减少文件位置 / Move file position backward
-    fn sub_pos(&mut self, mut length: u64) -> io::Result<()> {
+    fn sub_pos(&mut self, mut length: u64) -> Result<()> {
         if length == 0 {
             return Ok(());
         }
@@ -291,7 +291,7 @@ impl PackFileHandle {
     /// Verify the integrity hash of the file data.
     ///
     /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
-    pub fn verify_hash(&mut self) -> io::Result<bool> {
+    pub fn verify_hash(&mut self) -> Result<bool> {
         //缓冲区
         let old_pos = self.pos;
         let Some(metadata) = &self.metadata else {
@@ -309,10 +309,10 @@ impl PackFileHandle {
         }
     }
 
-    fn read_hash_v(&mut self) -> io::Result<PackFileHash> {
+    fn read_hash_v(&mut self) -> Result<PackFileHash> {
         //计算哈希
         if
-            let Some(metadata) = &self.metadata &&
+        let Some(metadata) = &self.metadata &&
             let PackFileMetadataType::File { hash_type, .. } = metadata.file_type()
         {
             let len = metadata.len();
@@ -333,24 +333,12 @@ impl PackFileHandle {
         }
     }
 
-    /// 提交文件写入：计算最终哈希、释放预分配空间、保存元数据。
-    ///
-    /// 通常在 `drop` 时自动调用。
-    ///
-    /// Submit the file write: compute the final hash, release pre-allocated space, save metadata.
-    ///
-    /// Typically called automatically in `drop`.
-    pub fn submit(self) -> io::Result<()> {
-        let mut m = self;
-        m.commit_data()
-    }
-
-    fn commit_data(&mut self) -> io::Result<()> {
+    fn commit_data(&mut self) -> Result<()> {
         //计算哈希
         if self.is_write {
             let read_hash = self.read_hash_v();
             if
-                let Ok(read_hash) = read_hash &&
+            let Ok(read_hash) = read_hash &&
                 let Some(metadata) = &mut self.metadata &&
                 let PackFileMetadataType::File { hash_value, .. } = metadata.file_type_mut()
             {
@@ -367,7 +355,7 @@ impl PackFileHandle {
             let manager = self.manager.clone();
             let mut manager = manager
                 .lock()
-                .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+                .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
             manager.file_metadata_update(path_list, metadata)?;
         }
         Ok(())
@@ -384,7 +372,7 @@ impl Seek for PackFileHandle {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match pos {
             SeekFrom::Start(pos) => {
-                self.set_pos(pos)?;
+                self.set_pos(pos).map_err(io::Error::other)?;
                 Ok(pos)
             }
             SeekFrom::Current(pos) =>
@@ -392,12 +380,12 @@ impl Seek for PackFileHandle {
                     0 => Ok(self.pos),
                     //大于0
                     1.. => {
-                        self.add_pos(pos.cast_unsigned())?;
+                        self.add_pos(pos.cast_unsigned()).map_err(io::Error::other)?;
                         Ok(self.pos)
                     }
                     //小于0
                     ..0 => {
-                        self.sub_pos((-pos).cast_unsigned())?;
+                        self.sub_pos((-pos).cast_unsigned()).map_err(io::Error::other)?;
                         Ok(self.pos)
                     }
                 }
@@ -405,20 +393,20 @@ impl Seek for PackFileHandle {
                 let end = self.get_len();
                 match pos {
                     0 => {
-                        self.set_pos(end)?;
+                        self.set_pos(end).map_err(io::Error::other)?;
                         Ok(end)
                     }
                     1.. => {
                         let add = pos.cast_unsigned();
                         let new_end = end + add;
-                        self.set_len(new_end)?;
-                        self.set_pos(new_end)?;
+                        self.set_len(new_end).map_err(io::Error::other)?;
+                        self.set_pos(new_end).map_err(io::Error::other)?;
                         Ok(new_end)
                     }
                     ..0 => {
                         let sub = (-pos).cast_unsigned();
                         let new_pos = end.saturating_sub(sub);
-                        self.set_pos(new_pos)?;
+                        self.set_pos(new_pos).map_err(io::Error::other)?;
                         Ok(new_pos)
                     }
                 }
@@ -428,12 +416,12 @@ impl Seek for PackFileHandle {
 }
 
 impl PackFileHandle {
-   pub fn read(&mut self, pos: u64, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn read(&mut self, pos: u64, buf: &mut [u8]) -> Result<usize> {
         self.set_pos(pos)?;
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
         //当前大小所需的位置列表
         let pos_s = self.get_add_pos_list2(buf.len() as u64, true)?;
         //当前已读取大小
@@ -454,13 +442,13 @@ impl PackFileHandle {
 }
 
 impl PackFileHandle {
-    pub fn write(&mut self, pos: u64, buf: &[u8]) -> io::Result<usize> {
+    pub fn write(&mut self, pos: u64, buf: &[u8]) -> Result<usize> {
         self.is_write = true;
         self.set_pos(pos)?;
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
         //当前大小所需的位置列表
         let mut pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
         //如果没有空间就尝试分配
@@ -495,10 +483,11 @@ impl PackFileHandle {
         Ok(write_len)
     }
 
-    pub fn flush(&mut self) -> io::Result<()> {
+    pub fn flush(&mut self) -> Result<()> {
         self.pack_io
             .lock()
-            .map_err(|e| Error::other(format!("无法获得包文件锁, err:{e}")))?
-            .flush()
+            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?
+            .flush()?;
+        Ok(())
     }
 }

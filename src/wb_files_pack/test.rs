@@ -1,4 +1,4 @@
-use super::data::{ MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN };
+use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
 use crate::wb_files_pack::{
     Attribute,
     DataPosList,
@@ -26,8 +26,8 @@ fn pack_struct_to_bytes_vec_and_load() {
                 pack_struct: None,
             },
             5867,
-            PackFileMetadataRun::NoLoad
-        )
+            PackFileMetadataRun::NoLoad,
+        ),
     );
     ps.add_item(
         "test2".to_string(),
@@ -38,8 +38,8 @@ fn pack_struct_to_bytes_vec_and_load() {
                 pack_struct: None,
             },
             2941,
-            PackFileMetadataRun::NoLoad
-        )
+            PackFileMetadataRun::NoLoad,
+        ),
     );
     ps.add_item(
         "test3".to_string(),
@@ -47,8 +47,8 @@ fn pack_struct_to_bytes_vec_and_load() {
             "test3".to_string(),
             PackStructItemType::File { handle: None },
             12445,
-            PackFileMetadataRun::NoLoad
-        )
+            PackFileMetadataRun::NoLoad,
+        ),
     );
     for index in 0..1000 {
         let name = format!("file{index}");
@@ -65,8 +65,8 @@ fn pack_struct_to_bytes_vec_and_load() {
                     PackStructItemType::File { handle: None }
                 },
                 rand::random_range(0..100_000_000),
-                PackFileMetadataRun::NoLoad
-            )
+                PackFileMetadataRun::NoLoad,
+            ),
         );
         ps.to_bytes_vec();
     }
@@ -83,7 +83,7 @@ fn pack_struct_item_dir_to_bytes_vec_and_load() {
             pack_struct: None,
         },
         7_766_735_636,
-        PackFileMetadataRun::NoLoad
+        PackFileMetadataRun::NoLoad,
     );
     let data = psi.to_bytes_vec();
     let psi_load = PackStructItem::load(&data).unwrap();
@@ -95,7 +95,7 @@ fn pack_struct_item_file_to_bytes_vec_and_load() {
         String::new(),
         PackStructItemType::File { handle: None },
         689_669,
-        PackFileMetadataRun::NoLoad
+        PackFileMetadataRun::NoLoad,
     );
     let data = psi.to_bytes_vec();
     let psi_load = PackStructItem::load(&data).unwrap();
@@ -154,11 +154,11 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
         *hv = hash_value.clone();
     }
     if
-        let PackFileMetadataType::File {
-            hash_type,
-            hash_value: this_hash_value,
-            ..
-        } = pfm.file_type_mut()
+    let PackFileMetadataType::File {
+        hash_type,
+        hash_value: this_hash_value,
+        ..
+    } = pfm.file_type_mut()
     {
         *hash_type = 1;
         *this_hash_value = hash_value;
@@ -433,7 +433,7 @@ fn get_ver_accepts_nonzero() {
     data[
         MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_bytes);
+        ].copy_from_slice(&ver_bytes);
     // 设置尾部版本
     let tail_start = block_size - MANIFEST_DATA_BLOCK_DATA_VER_LEN;
     data[tail_start..tail_start + MANIFEST_DATA_BLOCK_DATA_VER_LEN].copy_from_slice(&ver_bytes);
@@ -463,7 +463,7 @@ fn update_wraps_version_near_max() {
     md.block_data_mut()[
         MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_max);
+        ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // 设置 B (后半) 版本为 u32::MAX - 1
@@ -473,7 +473,7 @@ fn update_wraps_version_near_max() {
         half + MANIFEST_DATA_BLOCK_DATA_VER_INDEX..half +
             MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_max_minus_1);
+        ].copy_from_slice(&ver_max_minus_1);
     md.block_data_mut()[block_len - MANIFEST_DATA_BLOCK_DATA_VER_LEN..].copy_from_slice(
         &ver_max_minus_1
     );
@@ -506,7 +506,7 @@ fn update_wraps_at_boundary_then_continues() {
     md.block_data_mut()[
         MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_max);
+        ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // B 处于 ver=2 (第二次 update 的结果)
@@ -519,7 +519,7 @@ fn update_wraps_at_boundary_then_continues() {
     md.block_data_mut()[
         MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_max);
+        ].copy_from_slice(&ver_max);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max);
 
     // B 是 ver=2 (较新), A 是 ver=MAX (较旧) → 更新 A: next_ver(MAX) = 1
@@ -556,7 +556,7 @@ fn ab_fallback_works_after_wrap_around() {
     md.block_data_mut()[
         MANIFEST_DATA_BLOCK_DATA_VER_INDEX..MANIFEST_DATA_BLOCK_DATA_VER_INDEX +
             MANIFEST_DATA_BLOCK_DATA_VER_LEN
-    ].copy_from_slice(&ver_max_m1);
+        ].copy_from_slice(&ver_max_m1);
     md.block_data_mut()[half - MANIFEST_DATA_BLOCK_DATA_VER_LEN..half].copy_from_slice(&ver_max_m1);
 
     // B 初始为空 (ver=0, 会被拒绝)
