@@ -1,5 +1,6 @@
 use crate::tools::PathTool;
 use crate::tools::TestTool;
+use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::{
     WBFPManager,
     DEFAULT_COW,
@@ -10,11 +11,10 @@ use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use pretty_assertions::assert_eq;
-use std::fs::File;
-use std::io::{ Error, ErrorKind, Read, Write };
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{ Arc, Mutex };
-use std::{ fs, io };
+use std::sync::{Arc, Mutex};
 
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
@@ -24,8 +24,8 @@ static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 fn create_manager(
     pack_path: &Path,
     cow: bool,
-    separate_manifest: bool
-) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
+    separate_manifest: bool,
+) -> Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     let pack_file = File::options()
         .read(true)
         .write(true)
@@ -35,8 +35,8 @@ fn create_manager(
         .open(pack_path)
         .map_err(|e| {
             match e.kind() {
-                ErrorKind::AlreadyExists => {
-                    Error::new(ErrorKind::AlreadyExists, format!("文件已存在, err: {e}"))
+                std::io::ErrorKind::AlreadyExists => {
+                    PackFileError::Other(format!("文件已存在, err: {e}"))
                 }
                 _ => panic!("创建文件错误. err:{e}"),
             }
@@ -48,13 +48,13 @@ fn create_manager(
         pack_io.clone(),
         cow,
         separate_manifest,
-        true
+        true,
     ).expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
     Ok((manager, pack_io))
 }
 
-fn create_manager_default(pack_path: &Path) -> io::Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
+fn create_manager_default(pack_path: &Path) -> Result<(WBFPManager, Arc<Mutex<PackIO>>)> {
     create_manager(pack_path, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST)
 }
 
@@ -69,20 +69,14 @@ fn open_file_rw<P: AsRef<Path>>(
     pack_path: &P,
     manager: &Arc<Mutex<WBFPManager>>,
     pack_io: &Arc<Mutex<PackIO>>,
-    end_pos: bool
-) -> io::Result<PackFileWR> {
+    end_pos: bool,
+) -> Result<PackFileWR> {
     let path_list = PathTool::path_to_string_vec(pack_path);
-    let metadata = manager
+    let handle = manager
         .lock()
         .expect("无法获得包文件锁")
-        .file_metadata_lock(&path_list)
-        .expect("无法获得元数据");
-    //TODO:若句柄已打开则直接获取
-    let handle = Arc::new(
-        Mutex::new(
-            PackFileHandle::create(false, manager.clone(), pack_io, path_list, metadata, end_pos)?
-        )
-    );
+        .get_or_create_file_handle(&path_list, end_pos, &manager.clone(), pack_io)
+        .expect("无法获得虚拟文件句柄");
     Ok(PackFileWR::create(0, handle))
 }
 
@@ -134,7 +128,7 @@ fn create_stress_and_reopen() {
                         &pack_io,
                         path_list,
                         metadata,
-                        false
+                        false,
                     ).unwrap()
                 )
             );
@@ -158,7 +152,7 @@ fn create_stress_and_reopen() {
                     &pack_io,
                     path_list,
                     metadata,
-                    false
+                    false,
                 ).unwrap()
             )
         );

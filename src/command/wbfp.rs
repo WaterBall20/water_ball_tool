@@ -156,7 +156,7 @@ pub fn wbfp_m(args: &WaterBallFilePackCommandsPack, mp: Option<&MultiProgress>) 
             &files_list,
             in_dir_path.as_ref(),
         )
-        .expect("写入包文件错误");
+            .expect("写入包文件错误");
         info!("操作已完成,文件保存到{pack_path}");
     }
 }

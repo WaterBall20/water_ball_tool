@@ -273,9 +273,9 @@ fn multi_instance_concurrent_write() {
 
         // 从主线程创建所有实例（open_file 需要 &mut alloc 且持有写锁）
         // Create all instances from main thread (open_file requires &mut alloc and holds write lock)
-        let mut wr1 = alloc.open_file(path, false).unwrap();
-        let mut wr2 = alloc.open_file(path, false).unwrap();
-        let mut wr3 = alloc.open_file(path, false).unwrap();
+        let wr1 = alloc.open_file(path, false).unwrap();
+        let wr2 = alloc.open_file(path, false).unwrap();
+        let wr3 = alloc.open_file(path, false).unwrap();
 
         let mut handles = Vec::new();
 
@@ -439,7 +439,7 @@ fn multi_instance_stress_three_instances() {
             wr.write_all(&initial).unwrap();
         }
 
-        let mut instances: Vec<PackFileWR> = (0..N)
+        let instances: Vec<PackFileWR> = (0..N)
             .map(|_| alloc.open_file(path, false).unwrap())
             .collect();
 

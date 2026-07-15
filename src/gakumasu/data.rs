@@ -84,7 +84,7 @@ enum EffectConditions {
 //触发类型
 enum TriggerTiming {
     TurnStart, //回合开始
-    TurnEnd, //回合结束
+    TurnEnd,   //回合结束
 }
 
 //运行时效果

@@ -60,7 +60,7 @@ fn ff_out_file_longtime() {
     #[cfg(not(target_os = "windows"))]
     let path = String::from("/home");
     #[cfg(target_os = "windows")]
-    let pString::from("C:/");
+    let path = String::from("C:/");
     ff(
         FileFinderArgs::new(path, Some(out_file_path.clone()), false),
         Some(&mp),

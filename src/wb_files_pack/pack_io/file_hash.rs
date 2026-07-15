@@ -1,6 +1,5 @@
 use blake3::{Hash, Hasher};
-use std::io;
-use std::io::Error;
+use crate::wb_files_pack::error::{Result, PackFileError};
 
 /// 包文件哈希状态 / Pack file hash state
 #[derive(Debug, Clone)]
@@ -64,17 +63,17 @@ impl PackFileHash {
         }
     }
 
-    pub(crate) fn eq(&mut self, other: &PackFileHash) -> io::Result<bool> {
+    pub(crate) fn eq(&mut self, other: &PackFileHash) -> Result<bool> {
         match self {
-            Self::None => Err(Error::other("无法对没有哈希计算的进行比较")),
+            Self::None => Err(PackFileError::State("无法对没有哈希计算的进行比较".into())),
             Self::Blake3 { hasher, .. } => {
                 if let Self::Blake3 { hash_value, .. } = other {
                     let hash = hasher.finalize();
                     let other_hash = Hash::from_slice(hash_value)
-                        .map_err(|e| Error::other(format!("比较发生错误，err: {e:?}")))?;
+                        .map_err(|e| PackFileError::Format(format!("比较发生错误，err: {e:?}")))?;
                     Ok(hash == other_hash)
                 } else {
-                    Err(Error::other("不能对不同类型进行比较"))
+                    Err(PackFileError::State("不能对不同类型进行比较".into()))
                 }
             }
         }

@@ -1,15 +1,14 @@
 use crate::tools::PathTool;
-use crate::wb_files_pack::manager::{ WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST };
+use crate::wb_files_pack::manager::{WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST};
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
-use crate::wb_files_pack::{ Attribute, PackStruct, PackStructItem, PackStructItemType };
+use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io;
-use std::io::Error;
+use crate::wb_files_pack::error::{Result, PackFileError};
 use std::path::Path;
-use std::sync::{ Arc, Mutex };
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
 
@@ -35,7 +34,7 @@ impl Allocator {
     /// Open an existing WaterBall pack file.
     ///
     /// Reads the file header, attributes, and root structure, and acquires a write lock.
-    pub fn open_pack_file<P: AsRef<Path>>(path: &P) -> io::Result<Allocator> {
+    pub fn open_pack_file<P: AsRef<Path>>(path: &P) -> Result<Allocator> {
         let pack_file = File::options().read(true).write(true).open(path)?;
         let pack_io = PackIO::new(pack_file);
         let pack_io = Arc::new(Mutex::new(pack_io));
@@ -51,7 +50,7 @@ impl Allocator {
     /// Create a new pack file with default settings (default COW and separate manifest).
     ///
     /// Returns an error if the file already exists.
-    pub fn create_new_pack_file2<P: AsRef<Path>>(path: &P) -> io::Result<Allocator> {
+    pub fn create_new_pack_file2<P: AsRef<Path>>(path: &P) -> Result<Allocator> {
         Self::create_new_pack_file(path, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST)
     }
 
@@ -65,10 +64,10 @@ impl Allocator {
     pub fn create_new_pack_file<P: AsRef<Path>>(
         path: &P,
         cow: bool,
-        separate_manifest: bool
-    ) -> io::Result<Allocator> {
+        separate_manifest: bool,
+    ) -> Result<Allocator> {
         match path.as_ref().try_exists() {
-            Ok(true) => Err(Error::other("文件可能已存在，无法创建！")),
+            Ok(true) => Err(PackFileError::Other("文件可能已存在，无法创建！".into())),
             Ok(false) | Err(_) => Self::create_pack_file(path, cow, separate_manifest, true),
         }
     }
@@ -84,8 +83,8 @@ impl Allocator {
         path: &P,
         cow: bool,
         separate_manifest: bool,
-        create_new: bool
-    ) -> io::Result<Allocator> {
+        create_new: bool,
+    ) -> Result<Allocator> {
         let pack_file = File::options()
             .read(true)
             .write(true)
@@ -100,7 +99,7 @@ impl Allocator {
             pack_io.clone(),
             cow,
             separate_manifest,
-            create_new
+            create_new,
         )?;
         manager.init_new_pack()?;
         let manager = Arc::new(Mutex::new(manager));
@@ -111,41 +110,41 @@ impl Allocator {
 impl Allocator /*读*/ {
     /// 检查指定虚拟路径是否存在。
     /// Check whether the given virtual path exists.
-    pub fn path_exists<P: AsRef<Path>>(&mut self, path: P) -> io::Result<bool> {
+    pub fn path_exists<P: AsRef<Path>>(&mut self, path: P) -> Result<bool> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.path_exists(path))
     }
 
     /// 获取包文件的全局属性。
     /// Get the pack file's global attributes.
-    pub fn get_manifest_attribute(&self) -> io::Result<Attribute> {
+    pub fn get_manifest_attribute(&self) -> Result<Attribute> {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_manifest_attribute().clone())
     }
 
     /// 获取根目录的所有结构项。
     /// Get all struct items in the root directory.
-    pub fn get_root_struct_items(&self) -> io::Result<HashMap<String, PackStructItem>> {
+    pub fn get_root_struct_items(&self) -> Result<HashMap<String, PackStructItem>> {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_root_struct_items().clone())
     }
 
     /// 获取根目录的子项名称列表。
     /// Get the list of child item names in the root directory.
-    pub fn get_root_struct_item_name_list(&mut self) -> io::Result<Vec<String>> {
+    pub fn get_root_struct_item_name_list(&mut self) -> Result<Vec<String>> {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_root_struct_item_name_list())
     }
 
@@ -153,12 +152,12 @@ impl Allocator /*读*/ {
     /// Get the list of child item names for the given directory.
     pub fn get_struct_item_name_list<P: AsRef<Path>>(
         &mut self,
-        path: P
-    ) -> io::Result<Vec<String>> {
+        path: P,
+    ) -> Result<Vec<String>> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.get_struct_item_name_list(path)
     }
 
@@ -166,12 +165,12 @@ impl Allocator /*读*/ {
     /// Get all struct items for the given directory.
     pub fn get_dir_pack_struct_items<P: AsRef<Path>>(
         &mut self,
-        path: P
-    ) -> io::Result<HashMap<String, PackStructItem>> {
+        path: P,
+    ) -> Result<HashMap<String, PackStructItem>> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_dir_pack_struct_items(path)?.clone())
     }
 
@@ -179,22 +178,22 @@ impl Allocator /*读*/ {
     /// Get the struct item for the given path, asserting it is a directory.
     pub fn get_pack_struct_item_dir<P: AsRef<Path>>(
         &mut self,
-        path: P
-    ) -> io::Result<PackStructItem> {
+        path: P,
+    ) -> Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_pack_struct_item_dir(path)?.clone())
     }
 
     /// 获取指定路径的结构项（可接受文件或目录）。
     /// Get the struct item for the given path (accepts file or directory).
-    pub fn get_pack_struct_item<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackStructItem> {
+    pub fn get_pack_struct_item<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_pack_struct_item(path)?.clone())
     }
 
@@ -206,31 +205,31 @@ impl Allocator /*读*/ {
     ///
     /// When `no_err` is `true`, continues loading remaining data on error;
     /// when `false`, stops at the first error.
-    pub fn load_all_data(&mut self, no_err: bool) -> io::Result<()> {
+    pub fn load_all_data(&mut self, no_err: bool) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.load_all_data(no_err)
     }
 
     /// 按需加载指定路径的结构和元数据。
     /// Lazily load the structure and metadata for the given path.
-    pub fn load_pack_struct_metadata_path<P: AsRef<Path>>(&mut self, path: P) -> io::Result<()> {
+    pub fn load_pack_struct_metadata_path<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.load_pack_struct_metadata_path(path)
     }
 
     /// 获取指定路径的目录结构。
     /// Get the pack structure for the given directory path.
-    pub fn get_dir<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackStruct> {
+    pub fn get_dir<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStruct> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.get_dir(path)?.clone())
     }
 }
@@ -238,11 +237,11 @@ impl Allocator /*读*/ {
 impl Allocator /*写*/ {
     /// 在包内创建目录（包括所有不存在的父目录）。
     /// Create a directory in the pack, including any missing parent directories.
-    pub fn create_dir_all<P: AsRef<Path>>(&mut self, path: &P) -> io::Result<()> {
+    pub fn create_dir_all<P: AsRef<Path>>(&mut self, path: &P) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.create_dir_all(path)
     }
 
@@ -252,12 +251,12 @@ impl Allocator /*写*/ {
         &mut self,
         path: P,
         modified: u128,
-        len: u64
-    ) -> io::Result<PackFileWR> {
+        len: u64,
+    ) -> Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file(path, modified, len)?;
         let handle = Arc::new(
@@ -268,7 +267,7 @@ impl Allocator /*写*/ {
                     &self.pack_io.clone(),
                     path_list,
                     metadata,
-                    false
+                    false,
                 )?
             )
         );
@@ -277,11 +276,11 @@ impl Allocator /*写*/ {
 
     /// 创建虚拟文件（自动分配初始大小，无需预先指定长度）
     /// Create a virtual file (auto-allocate initial size, no need to pre-specify length)
-    pub fn create_file_auto_sized<P: AsRef<Path>>(&mut self, path: P) -> io::Result<PackFileWR> {
+    pub fn create_file_auto_sized<P: AsRef<Path>>(&mut self, path: P) -> Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_auto_sized(path)?;
         let handle = Arc::new(
@@ -292,7 +291,7 @@ impl Allocator /*写*/ {
                     &self.pack_io.clone(),
                     path_list,
                     metadata,
-                    false
+                    false,
                 )?
             )
         );
@@ -306,12 +305,12 @@ impl Allocator /*写*/ {
         modified: u128,
         len: u64,
         cow: bool,
-        hash_type: u8
-    ) -> io::Result<PackFileWR> {
+        hash_type: u8,
+    ) -> Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let (path_list, metadata) = manager.create_file_raw(path, modified, len, cow, hash_type)?;
         let handle = Arc::new(
@@ -322,7 +321,7 @@ impl Allocator /*写*/ {
                     &self.pack_io.clone(),
                     path_list,
                     metadata,
-                    false
+                    false,
                 )?
             )
         );
@@ -337,7 +336,7 @@ impl Allocator /*写*/ {
     ///
     /// When `end_pos` is `true`, the file pointer is positioned at the end;
     /// when `false`, it is positioned at the beginning.
-    pub fn open_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> io::Result<PackFileWR> {
+    pub fn open_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackFileWR> {
         self.get_file_wr(path, end_pos)
     }
 
@@ -351,12 +350,12 @@ impl Allocator /*写*/ {
     pub fn get_file_wr<P: AsRef<Path>>(
         &mut self,
         path: P,
-        end_pos: bool
-    ) -> io::Result<PackFileWR> {
+        end_pos: bool,
+    ) -> Result<PackFileWR> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| Error::other(format!("无法获得管理器锁, err:{e}")))?;
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.this_write_lock()?;
         let path_list = PathTool::path_to_string_vec(path);
         let handle = manager.get_or_create_file_handle(
@@ -377,7 +376,7 @@ impl Allocator /*工具方法*/ {
     /// Recursively verify the hash of every file in the pack.
     ///
     /// Returns `VerifyHashR` containing lists of paths that passed and failed verification.
-    pub fn verify_all_file_hash(&mut self) -> io::Result<VerifyHashR> {
+    pub fn verify_all_file_hash(&mut self) -> Result<VerifyHashR> {
         let mut vhr = VerifyHashR::new();
         let root_struct = self.get_root_struct_item_name_list()?;
         for name in root_struct {
@@ -388,8 +387,8 @@ impl Allocator /*工具方法*/ {
     fn verify_all_file_hash_inner(
         &mut self,
         path: &Path,
-        verify_hash_r: &mut VerifyHashR
-    ) -> io::Result<()> {
+        verify_hash_r: &mut VerifyHashR,
+    ) -> Result<()> {
         let item = self.get_pack_struct_item(path)?;
         match item.item_type() {
             PackStructItemType::Dir { .. } => {
@@ -427,7 +426,7 @@ pub struct VerifyHashR {
     ok_path: Vec<String>,
     /// 哈希验证失败的路径列表，附带可选的错误信息。
     /// Paths that failed hash verification, with optional error details.
-    err_path: Vec<(String, Option<Error>)>,
+    err_path: Vec<(String, Option<PackFileError>)>,
 }
 impl VerifyHashR {
     fn new() -> Self {

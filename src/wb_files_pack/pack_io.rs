@@ -3,8 +3,8 @@ use crate::wb_files_pack::{
     DataPosList, ManifestDataBlock, DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN,
 };
 use std::fs::File;
-use std::io;
-use std::io::{Error, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use crate::wb_files_pack::error::{Result, PackFileError};
 
 /// 虚拟文件读写器模块 / Virtual file reader-writer module
 pub mod file;
@@ -280,7 +280,7 @@ impl PackIO /*核心*/ {
     /// 设置底层文件的大小（截断或扩展）并同步内部长度记录。
     /// Set the underlying file size (truncate or extend) and sync the internal length record.
     //设置包文件大小
-    pub(crate) fn set_len(&mut self, len: u64) -> io::Result<()> {
+    pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
         self.file.set_len(len)?;
         self.len = len;
         self.sync_file_length();
@@ -289,24 +289,16 @@ impl PackIO /*核心*/ {
 
     /// 同步底层文件数据到磁盘。
     /// Sync the underlying file data to disk.
-    pub(crate) fn _sync_data(&mut self) -> io::Result<()> {
-        self.file.sync_data()
-    }
-
-    /// 尝试克隆底层文件句柄（Unix only，Windows 不支持）。
-    /// Try to clone the underlying file handle (Unix only, not supported on Windows).
-    #[cfg(not(target_os = "windows"))]
-    pub(crate) fn try_clone_pack_file(&self) -> io::Result<File> {
-        self.file
-            .try_clone()
-            .map_err(|e| Error::other(format!("尝试复制包文件实例失败，err: {e}")))
+    pub(crate) fn _sync_data(&mut self) -> Result<()> {
+        self.file.sync_data()?;
+        Ok(())
     }
 }
 
 impl PackIO /*读*/ {
     /// 从指定文件位置读取清单数据块。
     /// Read a manifest data block from the given file position.
-    pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> io::Result<ManifestDataBlock> {
+    pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> Result<ManifestDataBlock> {
         let mut file = &self.file;
         let block_data_buf = vec![0; DATA_BLOCK_LEN];
         let mut block_data_buf = block_data_buf;
@@ -316,9 +308,9 @@ impl PackIO /*读*/ {
         file.read_exact(&mut block_data_buf)?;
         //分析是否需要再加载
         let block_len = ManifestDataBlock::get_block_len(&block_data_buf)
-            .map_err(|err| Error::other(format!("包文件IO属性数据块读取错误，err:{err:?}")))?;
+            .map_err(|err| PackFileError::Format(format!("包文件IO属性数据块读取错误，err:{err:?}")))?;
         if block_len > u64::from(u32::MAX) {
-            Err(Error::other(format!(
+            Err(PackFileError::Format(format!(
                 "解析的数据大小过大，可能是错误的:{}[{}]",
                 tools::bytes_len_to_string(block_len),
                 block_len
@@ -346,7 +338,7 @@ impl PackIO /*读*/ {
     /// 设置文件读取指针位置。
     /// Set the file read pointer position.
     //设置文件地址
-    pub(crate) fn set_pos_read(&self, pos: u64) -> io::Result<()> {
+    pub(crate) fn set_pos_read(&self, pos: u64) -> Result<()> {
         let mut file = &self.file;
         file.seek(SeekFrom::Start(pos))?;
         Ok(())
@@ -357,20 +349,22 @@ impl PackIO /*读*/ {
 impl PackIO /*写*/ {
     /// 释放底层文件的排他锁。
     /// Release the exclusive lock on the underlying file.
-    pub(crate) fn unlock(&mut self) -> io::Result<()> {
-        self.file.unlock()
+    pub(crate) fn unlock(&mut self) -> Result<()> {
+        self.file.unlock()?;
+        Ok(())
     }
 
     /// 获取底层文件的排他锁。
     /// Acquire the exclusive lock on the underlying file.
-    pub(crate) fn lock(&mut self) -> io::Result<()> {
-        self.file.lock()
+    pub(crate) fn lock(&mut self) -> Result<()> {
+        self.file.lock()?;
+        Ok(())
     }
 
     /// 设置文件写入指针位置并更新内部位置跟踪。
     /// Set the file write pointer position and update internal position tracking.
     //设置文件地址
-    pub(crate) fn set_pos_write(&mut self, pos: u64) -> io::Result<()> {
+    pub(crate) fn set_pos_write(&mut self, pos: u64) -> Result<()> {
         self.set_pos_read(pos)?;
         self.run_data.pos = pos;
         Ok(())
@@ -391,7 +385,7 @@ impl PackIO /*写*/ {
         new_block: bool,
         old_pos: u64,
         old_block_len: u64,
-    ) -> io::Result<u64> {
+    ) -> Result<u64> {
         Ok(if new_block {
             let (new_pos, _) = self.get_file_pos(block_data.len() as u64);
             self.set_pos_write(new_pos)?;

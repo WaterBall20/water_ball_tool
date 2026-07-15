@@ -8,16 +8,16 @@ use crate::wb_files_pack::{
     Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackStruct,
     WBFilesPackManifest,
 };
+use crate::wb_files_pack::error::{PackFileError, Result};
 use std::fs::File;
-use std::io;
-use std::io::{Error, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::WBFPManager;
 
 impl WBFPManager {
-    pub(crate) fn init_new_pack(&mut self) -> io::Result<()> {
+    pub(crate) fn init_new_pack(&mut self) -> Result<()> {
         let mut file_header_buf = vec![0; FILE_HEADER_BLOCK_LEN];
         for (index, value) in FILE_HEADER_TYPE_NAME.iter().enumerate() {
             file_header_buf[index] = *value;
@@ -51,52 +51,48 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
+                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
             pack_file
                 .write_all(&file_header_buf)
                 .expect("无法写入文件头");
             pack_file
-                .set_len(FILE_HEADER_BLOCK_LEN as u64)
-                .map_err(|err| Error::other(format!("无法设置文件大小, err: {err}")))?;
+                .set_len(FILE_HEADER_BLOCK_LEN as u64)?;
         }
-        self.save_empty_data_list()
-            .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err:{err}")))?;
+        self.save_empty_data_list()?;
         if self.separate_manifest {
-            self.save_manifest_empty_data_list()
-                .map_err(|err| Error::other(format!("初始化和保存空数据列表失败, err: {err}")))?;
+            self.save_manifest_empty_data_list()?;
         }
         self.manifest.root_struct_mut().mark_dirty();
-        self.save_root_pack_struct()
-            .map_err(|err| Error::other(format!("初始化和保存根结构失败, err: {err}")))?;
+        self.save_root_pack_struct()?;
         Ok(())
     }
 
     pub(crate) fn open_pack_file<P: AsRef<Path>>(
         pack_path: &P,
         pack_file: Arc<Mutex<PackIO>>,
-    ) -> io::Result<WBFPManager> {
+    ) -> Result<WBFPManager> {
         const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
         let m_pack_file_arc = pack_file.clone();
         let mut m_pack_file = m_pack_file_arc
             .lock()
-            .map_err(|err| Error::other(format!("获得包文件IO锁错误, err: {err}")))?;
+            .map_err(|err| PackFileError::Lock(format!("获得包文件IO锁错误, err: {err}")))?;
         let pack_path = pack_path
             .as_ref()
             .to_str()
-            .ok_or(Error::other("无法将路径转换成文本"))?
+            .ok_or(PackFileError::Format("无法将路径转换成文本".into()))?
             .to_string();
         let mut header_block_data = vec![0; FILE_HEADER_BLOCK_LEN];
         let header_block_r_len = m_pack_file.read(&mut header_block_data)?;
         if header_block_r_len < FILE_HEADER_DATA_LENGTH {
-            return Err(Error::other("无法读取完整的文件头"));
+            return Err(PackFileError::Format("无法读取完整的文件头".into()));
         }
         let header = &header_block_data[..FILE_HEADER_DATA_LENGTH];
         if header[..HEADER_TYPE_LEN] != FILE_HEADER_TYPE_NAME {
-            return Err(Error::other("文件类型不是水球包文件"));
+            return Err(PackFileError::Format("文件类型不是水球包文件".into()));
         }
         if header[HEADER_TYPE_LEN..HEADER_TYPE_LEN + 2] != FILE_HEADER_VERSION {
-            return Err(Error::other(
-                "文件格式版本不一致，对于文件格式，版本必须一致",
+            return Err(PackFileError::Version(
+                "文件格式版本不一致，对于文件格式，版本必须一致".into(),
             ));
         }
         let bool_data = header[FILE_HEADER_BOOL_DATA_INDEX];
@@ -160,7 +156,7 @@ impl WBFPManager {
         separate_manifest: bool,
         attribute: Attribute,
         write_lock_file: File,
-    ) -> io::Result<WBFPManager> {
+    ) -> Result<WBFPManager> {
         let mut manifest_path = pack_path.clone();
         manifest_path.push_str(".wbm");
         let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
@@ -202,7 +198,7 @@ impl WBFPManager {
         cow: bool,
         separate_manifest: bool,
         create_new: bool,
-    ) -> io::Result<WBFPManager> {
+    ) -> Result<WBFPManager> {
         let mut write_lock_path = path
             .as_ref()
             .to_str()

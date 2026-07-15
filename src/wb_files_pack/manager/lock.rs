@@ -1,7 +1,8 @@
+use crate::wb_files_pack::error::{PackFileError, Result};
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::{fs, io};
+use std::fs;
 use tracing::info;
 
 use super::{PackLockInfo, PackLockType, WBFPManager};
@@ -13,12 +14,12 @@ impl WBFPManager {
         Self::write_lock_info(run_lock, path)
     }
 
-    pub(crate) fn this_write_lock(&mut self) -> io::Result<()> {
+    pub(crate) fn this_write_lock(&mut self) -> Result<()> {
         if !self.run_data.write_lock {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
+                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
             let lock_file = Self::write_lock(true, &self.run_data.write_lock_path)?;
             if let Some(lock_file) = lock_file {
                 self.run_data.write_lock_file = Some(lock_file);
@@ -29,11 +30,11 @@ impl WBFPManager {
         Ok(())
     }
 
-    pub(super) fn write_unlock(&mut self) -> io::Result<()> {
+    pub(super) fn write_unlock(&mut self) -> Result<()> {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| Error::other(format!("无法获得包文件锁, err: {err}")))?;
+            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
         let path = &self.run_data.write_lock_path;
         let lock_info = self.this_write_lock_info();
         match lock_info.file_lock_type {
@@ -47,12 +48,11 @@ impl WBFPManager {
                 pack_file.unlock()?;
                 Ok(())
             }
-            PackLockType::Dir => Err(Error::new(
-                ErrorKind::IsADirectory,
-                "无法解锁，锁文件类型很可能已被其他程序修改成目录",
+            PackLockType::Dir => Err(PackFileError::Format(
+                "无法解锁，锁文件类型很可能已被其他程序修改成目录".into(),
             ))?,
-            PackLockType::Symlink => Err(Error::other(
-                "无法解锁，锁文件类型很可能已被其他程序修改成符号链接",
+            PackLockType::Symlink => Err(PackFileError::Format(
+                "无法解锁，锁文件类型很可能已被其他程序修改成符号链接".into(),
             ))?,
             PackLockType::_None => Ok(()),
         }
@@ -101,7 +101,7 @@ impl WBFPManager {
     pub(super) fn write_lock(
         run_lock: bool,
         write_lock_path: &PathBuf,
-    ) -> io::Result<Option<File>> {
+    ) -> Result<Option<File>> {
         let lock_info = Self::write_lock_info(run_lock, write_lock_path);
         if lock_info.run_lock {
             if let PackLockType::_None = lock_info.file_lock_type {
@@ -122,7 +122,7 @@ impl WBFPManager {
         }
     }
 
-    pub(super) fn write_lock_file(write_lock_path: &PathBuf) -> Result<File, Error> {
+    pub(super) fn write_lock_file(write_lock_path: &PathBuf) -> Result<File> {
         let pid = std::process::id();
         let mut write_lock = File::create(write_lock_path)?;
         write_lock.write_all(pid.to_le_bytes().as_slice())?;
