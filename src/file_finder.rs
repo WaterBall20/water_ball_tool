@@ -18,7 +18,7 @@ use std::fs::Metadata;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
@@ -381,6 +381,7 @@ impl FileFinder {
         pb: &Sender<(u64, u64)>,
         thread_file_count: &mut u64,
         thread_dir_count: &mut u64,
+        condver: &Arc<Condvar>,
     ) {
         if skip_symlink {
             info!("已跳过符号链接:{path_buf:?}");
@@ -429,6 +430,8 @@ impl FileFinder {
                     path: path_buf.to_path_buf(),
                     symlink_chain: new_chain,
                 });
+                //唤起一个线程
+                condver.notify_one();
             }
         } else if path_buf.is_file() {
             // 符号链接指向文件 / Symlink points to a file
@@ -504,11 +507,25 @@ impl FileFinder {
         results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
         pb: Sender<(u64, u64)>,
         skip_symlink: bool,
+        running_count: Arc<Mutex<i32>>,
+        condver: Arc<Condvar>,
     ) {
+        fn running_count_add(running_count: Arc<Mutex<i32>>) -> i32 {
+            let mut running_count = running_count.lock().unwrap();
+            *running_count += 1;
+            *running_count
+        }
+        fn running_count_sub(running_count: Arc<Mutex<i32>>) -> i32 {
+            let mut running_count = running_count.lock().unwrap();
+            *running_count -= 1;
+            *running_count
+        }
         let mut thread_file_count = 0u64;
         let mut thread_dir_count = 0u64;
 
-        loop {
+        'worker: loop {
+            //线程计数
+            running_count_add(running_count.clone());
             let entry = {
                 let mut queue = dir_queue.lock().unwrap();
                 queue.pop_front()
@@ -516,7 +533,33 @@ impl FileFinder {
 
             let entry = match entry {
                 Some(d) => d,
-                None => break,
+                None => {
+                    //如果是空的
+                    let mut dir_queue = dir_queue.lock().unwrap();
+                    //当前线程计数
+                    let this_running_count = running_count_sub(running_count.clone());
+                    if this_running_count == 0 {
+                        //如果没有其他在运行中的线程，则说明搜索结束，唤醒所有线程并退出
+                        condver.notify_all();
+                        break;
+                    }
+                    loop {
+                        dir_queue = condver.wait(dir_queue).unwrap();
+                        match dir_queue.pop_front() {
+                            Some(d) => {
+                                //添加线程计数
+                                running_count_add(running_count.clone());
+                                break d;
+                            }
+                            None => {
+                                //如果队列是空的，且运行中的线程数为0
+                                if *running_count.lock().unwrap() == 0 {
+                                    break 'worker;
+                                }
+                            }
+                        }
+                    }
+                }
             };
 
             let rd = match entry.path.read_dir() {
@@ -562,6 +605,7 @@ impl FileFinder {
                         &pb,
                         &mut thread_file_count,
                         &mut thread_dir_count,
+                        &condver,
                     );
                 } else if ft.is_dir() {
                     // 普通目录：不检测循环，链不变
@@ -586,10 +630,13 @@ impl FileFinder {
                             }),
                         },
                     );
+                    //添加队列
                     dir_queue.lock().unwrap().push_back(DirEntry {
                         path: path_buf,
                         symlink_chain: entry.symlink_chain.clone(),
                     });
+                    //唤起一个线程
+                    condver.notify_one();
                 } else if ft.is_file() {
                     // 普通文件：不检测循环
                     // Regular file: no cycle detection
@@ -598,6 +645,7 @@ impl FileFinder {
                     error!("{path_buf:?} 无法访问");
                 }
             }
+            running_count_sub(running_count.clone());
         }
 
         let remaining_files = thread_file_count % 50;
@@ -678,17 +726,25 @@ impl FileFinder {
             symlink_chain: Vec::new(), // 根目录无符号链接链 / root has no symlink chain
         });
 
-        let results = Arc::new(Mutex::new(HashMap::<PathBuf, FileInfo>::new()));
-
+        //搜索结果
+        let results = Arc::new(Mutex::new(HashMap::<PathBuf, FileInfo>::new())); //线程句柄
+        //线程工作计数
+        let running_count = Arc::new(Mutex::new(0));
+        //控制线程的条件变量
+        let condver = Arc::new(Condvar::new());
+        //线程池
         let mut handles = Vec::with_capacity(num_threads);
-
+        //线程接收器
         for _ in 0..num_threads {
             let dir_queue = Arc::clone(&dir_queue);
             let results = Arc::clone(&results);
+            let condver = condver.clone();
+            let running_count = running_count.clone();
+
             let pb = pb.clone();
 
             let handle = thread::spawn(move || {
-                Self::run_worker(dir_queue, results, pb, skip_symlink);
+                Self::run_worker(dir_queue, results, pb, skip_symlink, running_count, condver);
             });
 
             handles.push(handle);

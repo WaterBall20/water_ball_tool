@@ -15,6 +15,7 @@ enum CardType {
 }
 
 //指针类型
+
 enum Cuideline {
     Confident(f32),      //强气
     FullPower,           //全力
@@ -28,8 +29,7 @@ enum Attribute {
     Vocal, //歌唱
     Visual,
     Dance, //舞蹈
-    //参数
-    Parameter { value: f32, count: usize },
+    Parameter { value: f32, count: usize },//参数
     Stamina(f32),                                      //体力
     StaminaConsumptionCut { value: f32 },              //消费体力削减
     StaminaConsumptionReduction { turn_count: usize }, //消费体力减少
