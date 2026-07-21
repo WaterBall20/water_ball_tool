@@ -13,15 +13,25 @@ pub mod allocator;
 mod net_server;
 pub mod error;
 
-pub use error::{PackFileError, Result};
+pub use error::{ PackFileError, Result };
 
 // 重导出公共数据类型 / Re-export public data types
 pub use data::{
-    Attribute, DataPosList, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType,
-    PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest,
+    Attribute,
+    DataPosList,
+    PackFileMetadata,
+    PackFileMetadataRun,
+    PackFileMetadataType,
+    PackStruct,
+    PackStructItem,
+    PackStructItemType,
+    WBFilesPackManifest,
 };
 pub(crate) use data::{
-    ManifestDataBlock, ManifestDataBlockTrait, DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN,
+    ManifestDataBlock,
+    ManifestDataBlockTrait,
+    DATA_BLOCK_LEN,
+    DATA_DATA_BLOCK_LEN,
     MANIFEST_ATTRIBUTE_BLOCK_LEN,
 };
-pub use data::{MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE};
+pub use data::{ MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE };

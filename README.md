@@ -49,26 +49,26 @@ water_ball_tool ff ./src result.json
 water_ball_tool ff /path/to/dir output.json -s
 ```
 
-### 打包 `wbfp -m`
+### 打包 `wbfp p`
 
 ```bash
 # 将目录打包为水球包文件（清单分离为 .wbm）
-water_ball_tool wbfp -m ./src my.pack
+water_ball_tool wbfp p ./src my.pack
 
 # 不分离清单（所有数据在单个 .pack 文件中）
-water_ball_tool wbfp -m ./src my.pack -f
+water_ball_tool wbfp p ./src my.pack -s
 ```
 
-### 解包 `wbfp -s`
+### 解包 `wbfp u`
 
 ```bash
-water_ball_tool wbfp -s my.pack ./output_dir
+water_ball_tool wbfp u my.pack ./output_dir
 ```
 
-### 哈希校验 `wbfp -h`
+### 哈希校验 `wbfp h`
 
 ```bash
-water_ball_tool wbfp -h my.pack
+water_ball_tool wbfp h my.pack
 ```
 
 ---
@@ -77,15 +77,15 @@ water_ball_tool wbfp -h my.pack
 
 自行设计的二进制归档格式，主要特点：
 
-| 特性            | 说明                             |
-|---------------|--------------------------------|
-| **A/B 原子写入**  | 清单数据块采用双块交替写入，崩溃后至少保留一个完整版本    |
-| **BLAKE3 哈希** | 文件数据完整性校验                      |
-| **增量保存**      | 跟踪 dirty 标记，仅写入变更部分            |
-| **垃圾回收**      | 自动合并相邻空闲块，复用释放空间               |
-| **渐进式保存**     | 每写入 128KB 数据或 10000 个文件后自动保存一次 |
-| **进程写锁**      | `.lock` 文件 + PID 实现进程级互斥       |
-| **清单分离**      | 可选将索引数据分离为 `.wbm` 文件           |
+| 特性            | 说明                          |
+|---------------|-----------------------------|
+| **A/B 原子写入**  | 清单数据块采用双块交替写入，崩溃后至少保留一个完整版本 |
+| **BLAKE3 哈希** | 文件数据完整性校验                   |
+| **增量保存**      | 跟踪 dirty 标记，仅写入变更部分         |
+| **垃圾回收**      | 自动合并相邻空闲块，复用释放空间            |
+| **渐进式保存**     | 每写入一些数据或一些文件后再自动保存一次        |
+| **进程写锁**      | `.lock` 文件 + PID 实现进程级互斥    |
+| **清单分离**      | 可选将索引数据分离为 `.wbm` 文件        |
 
 详见 [`docs/wb_files_pack/manifest-data.md`](docs/wb_files_pack/manifest-data.md)
 
@@ -111,7 +111,7 @@ src/
 │   ├── pack_io.rs      # 底层文件 I/O + 空间分配 + GC
 │   ├── pack_io/file.rs # 虚拟文件读写器（PackFileWR）
 │   └── net_server.rs   # 网络服务（开发中）
-└── gakumasu/           # 学园偶像大师游戏模拟器（开发中）
+└── gakumasu/           # 学园偶像大师游戏器（开发中）
     ├── data.rs
     └── simulator.rs
 ```
