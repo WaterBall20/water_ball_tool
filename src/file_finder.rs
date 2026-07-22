@@ -5,13 +5,13 @@
 //! collecting file metadata and building a hierarchical structure.
 //!
 //! # 架构 / Architecture
-//! 分三个阶段 / Three phases:
-//! 1. 工作线程从共享队列取目录、扫描条目、收集文件信息
-//!    Workers pull directories from a shared queue, scan entries, collect file info
-//! 2. 所有线程结束后，从扁平 HashMap 重建目录树
-//!    After all threads finish, rebuild the directory tree from a flat HashMap
-//! 3. 进度更新通过 mpsc channel 发送，每 50 个文件/10 个目录限频
-//!    Progress updates sent via mpsc channel, rate-limited to every 50 files / 10 dirs
+//! 1. 工作线程从共享队列取目录、扫描条目、收集文件信息，
+//!    同时通过 mpsc channel 发送进度更新（每 50 个文件/10 个目录限频）
+//!    Workers pull directories from a shared queue, scan entries, collect file info,
+//!    and send progress updates via mpsc channel (rate-limited every 50 files / 10 dirs)
+//! 2. 所有工作线程退出后 drop pb 关闭进度通道，从扁平 HashMap 重建目录树
+//!    After all workers exit, pb is dropped to close the progress channel,
+//!    then rebuild the directory tree from the flat HashMap
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::Metadata;
@@ -23,7 +23,7 @@ use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 // === 平台相关的 inode 标识 / Platform-specific inode key ===
 
@@ -523,23 +523,19 @@ impl FileFinder {
         let fn_running_count_add = || -> i32 {
             let mut running_count = running_count.lock().unwrap();
             *running_count += 1;
-            debug!("运行计数加1， 当前计数{}", *running_count);
             *running_count
         };
 
         let fn_running_count_sub = || -> i32 {
             let mut running_count = running_count.lock().unwrap();
             *running_count -= 1;
-            debug!("运行计数减1，当前计数：{}", *running_count);
             *running_count
         };
 
         let mut thread_file_count = 0u64;
         let mut thread_dir_count = 0u64;
 
-        //线程计数
-        let thread_index = fn_running_count_add();
-        debug!("线程[{thread_index}]:线程已启动");
+        fn_running_count_add();
         'worker: loop {
             let entry = {
                 let mut queue = dir_queue.lock().unwrap();
@@ -556,13 +552,10 @@ impl FileFinder {
                     if this_running_count == 0 {
                         //如果没有其他在运行中的线程，则说明搜索结束，唤醒所有线程并退出
                         condver.notify_all();
-                        debug!("线程[{thread_index}]：任务结束，唤醒所有线程并退出");
                         break;
                     }
                     loop {
-                        debug!("线程[{thread_index}]已挂起");
                         dir_queue = condver.wait(dir_queue).unwrap();
-                        debug!("线程[{thread_index}]已唤醒");
                         match dir_queue.pop_front() {
                             Some(d) => {
                                 //添加线程计数
@@ -572,7 +565,6 @@ impl FileFinder {
                             None => {
                                 //如果队列是空的，且运行中的线程数为0
                                 if *running_count.lock().unwrap() == 0 {
-                                    debug!("线程[{thread_index}]检测到任务结束，退出线程");
                                     break 'worker;
                                 }
                             }
@@ -661,15 +653,6 @@ impl FileFinder {
                     error!("{path_buf:?} 无法访问");
                 }
             }
-            /*
-            let remaining_files = thread_file_count % 50;
-            if remaining_files > 0 {
-                pb.send((remaining_files, 0)).ok();
-            }
-            let remaining_dirs = thread_dir_count % 10;
-            if remaining_dirs > 0 {
-                pb.send((0, remaining_dirs)).ok();
-            }*/
         }
     }
 
@@ -684,7 +667,10 @@ impl FileFinder {
     /// # 参数 / Parameters
     /// * `path` - 要搜索的目录路径 / Directory path to search
     /// * `skip_symlink` - 是否跳过符号链接 / Whether to skip symlinks
-    /// * `pb` - 进度更新发送器，发送 (文件增量, 目录增量) / Progress sender, sends (file_delta, dir_delta)
+    /// * `pb` - 进度更新发送器，发送 (文件增量, 目录增量)。
+///   所有工作线程退出后立即 drop，关闭通道以通知接收方。 /
+///   Progress sender, sends (file_delta, dir_delta).
+///   Dropped immediately after all workers exit, closing the channel to signal the receiver.
     /// * `max_thread_count` - 最大工作线程数 / Maximum number of worker threads
     ///
     /// # 返回值 / Returns
@@ -767,8 +753,15 @@ impl FileFinder {
 
         for handle in handles {
             handle.join().unwrap();
-            debug!("某个线程已结束")
         }
+
+        // 所有 worker 线程已退出，不再需要发送进度更新。
+        // 尽早 drop pb 以关闭进度通道，避免 post-processing 阶段阻塞主线程的 rx。
+        //
+        // All worker threads have exited; no more progress updates needed.
+        // Drop pb early to close the progress channel, preventing the main
+        // thread's rx from blocking during post-processing.
+        drop(pb);
 
         let results = Arc::try_unwrap(results)
             .expect("results Arc still has references")
