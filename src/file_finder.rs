@@ -377,8 +377,9 @@ impl FileFinder {
         skip_symlink: bool,
         chain: &[InodeKey],
         dir_queue: &Arc<Mutex<VecDeque<DirEntry>>>,
-        results: &Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
+        results: &Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: &Sender<(u64, u64)>,
+        stream_tx: &Option<Sender<(PathBuf, FileInfo)>>,
         thread_file_count: &mut u64,
         thread_dir_count: &mut u64,
         condver: &Arc<Condvar>,
@@ -408,19 +409,25 @@ impl FileFinder {
 
                 let modified_time = Self::get_file_modified(&metadata);
                 let name = Self::get_file_name(path_buf).unwrap_or("").to_string();
-                results.lock().unwrap().insert(
-                    path_buf.to_path_buf(),
-                    FileInfo {
-                        name,
-                        length: 0,
-                        modified_time,
-                        file_kind: FileKind::Dir(Dir {
-                            files_list: HashMap::new(),
-                            file_count: 0,
-                            dir_count: 0,
-                        }),
-                    },
-                );
+
+                let info = FileInfo {
+                    name,
+                    length: 0,
+                    modified_time,
+                    file_kind: FileKind::Dir(Dir {
+                        files_list: HashMap::new(),
+                        file_count: 0,
+                        dir_count: 0,
+                    }),
+                };
+
+                if let Some(tx) = stream_tx {
+                    tx.send((path_buf.to_path_buf(), info.clone())).ok();
+                }
+
+                if let Some(results) = results {
+                    results.lock().unwrap().insert(path_buf.to_path_buf(), info);
+                }
 
                 // 将新的 inode 附加到链上，子目录携带扩展后的链
                 // Append new inode to chain; subdirectories carry the extended chain
@@ -436,7 +443,7 @@ impl FileFinder {
         } else if path_buf.is_file() {
             // 符号链接指向文件 / Symlink points to a file
             // 文件不会导致循环（文件不能包含目录），不需要 inode 检测
-            Self::process_file(path_buf, results, pb, thread_file_count);
+            Self::process_file(path_buf, results, pb, stream_tx, thread_file_count);
         } else {
             // 断开的符号链接 / Broken symlink
             warn!("符号链接 {path_buf:?} 已断。");
@@ -454,8 +461,9 @@ impl FileFinder {
     /// Note: regular files do NOT go through any symlink cycle detection.
     fn process_file(
         path_buf: &Path,
-        results: &Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
+        results: &Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: &Sender<(u64, u64)>,
+        stream_tx: &Option<Sender<(PathBuf, FileInfo)>>,
         thread_file_count: &mut u64,
     ) {
         let file_metadata = match path_buf.metadata() {
@@ -470,15 +478,22 @@ impl FileFinder {
             let len = file_metadata.len();
             let modified_time = Self::get_file_modified(&file_metadata);
 
-            results.lock().unwrap().insert(
-                path_buf.to_path_buf(),
-                FileInfo {
-                    name: name.to_string(),
-                    length: len,
-                    modified_time,
-                    file_kind: FileKind::File,
-                },
-            );
+            let info = FileInfo {
+                name: name.to_string(),
+                length: len,
+                modified_time,
+                file_kind: FileKind::File,
+            };
+
+            // 流式发送：先发送再插入结果集，避免在持锁期间发送
+            // Stream first: send before inserting into results to avoid holding the lock during send
+            if let Some(tx) = stream_tx {
+                tx.send((path_buf.to_path_buf(), info.clone())).ok();
+            }
+
+            if let Some(results) = results {
+                results.lock().unwrap().insert(path_buf.to_path_buf(), info);
+            }
 
             *thread_file_count += 1;
             if (*thread_file_count).is_multiple_of(50) {
@@ -504,8 +519,9 @@ impl FileFinder {
     /// Thread exits when queue is empty. Multiple threads pull from queue for parallel scanning.
     fn run_worker(
         dir_queue: Arc<Mutex<VecDeque<DirEntry>>>,
-        results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
+        results: Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: Sender<(u64, u64)>,
+        stream_tx: Option<Sender<(PathBuf, FileInfo)>>,
         skip_symlink: bool,
         running_count: Arc<Mutex<i32>>,
         condver: Arc<Condvar>,
@@ -532,8 +548,8 @@ impl FileFinder {
             *running_count
         };
 
-        let mut thread_file_count = 0u64;
-        let mut thread_dir_count = 0u64;
+        let mut thread_file_count = 0;
+        let mut thread_dir_count = 0;
 
         fn_running_count_add();
         'worker: loop {
@@ -577,12 +593,15 @@ impl FileFinder {
                 Ok(rd) => rd,
                 Err(err) => match err.kind() {
                     ErrorKind::PermissionDenied => {
-                        error!(r#"获取目录"{}"拒绝访问,err:{err:?}"#, entry.path.display());
+                        error!(
+                            r#"获取目录 "{}" 拒绝访问, err:{err:?}"#,
+                            entry.path.display()
+                        );
                         continue;
                     }
                     _ => {
                         error!(
-                            r#"获取目录"{}"迭代器错误,err:{err:?}"#,
+                            r#"获取目录 "{}" 迭代器错误, err:{err:?}"#,
                             entry.path.display()
                         );
                         continue;
@@ -596,7 +615,7 @@ impl FileFinder {
                 let metadata = match path_buf.symlink_metadata() {
                     Ok(m) => m,
                     Err(_) => {
-                        error!("无法获取文件:{path_buf:?}的元数据");
+                        error!(r#"无法获取文件: "{path_buf:?}" 的元数据"#);
                         continue;
                     }
                 };
@@ -611,6 +630,7 @@ impl FileFinder {
                         &dir_queue,
                         &results,
                         &pb,
+                        &stream_tx,
                         &mut thread_file_count,
                         &mut thread_dir_count,
                         &condver,
@@ -625,19 +645,25 @@ impl FileFinder {
 
                     let modified_time = Self::get_file_modified(&metadata);
                     let name = Self::get_file_name(&path_buf).unwrap_or("").to_string();
-                    results.lock().unwrap().insert(
-                        path_buf.clone(),
-                        FileInfo {
-                            name,
-                            length: 0,
-                            modified_time,
-                            file_kind: FileKind::Dir(Dir {
-                                files_list: HashMap::new(),
-                                file_count: 0,
-                                dir_count: 0,
-                            }),
-                        },
-                    );
+
+                    let info = FileInfo {
+                        name,
+                        length: 0,
+                        modified_time,
+                        file_kind: FileKind::Dir(Dir {
+                            files_list: HashMap::new(),
+                            file_count: 0,
+                            dir_count: 0,
+                        }),
+                    };
+
+                    if let Some(tx) = stream_tx.as_ref() {
+                        tx.send((path_buf.clone(), info.clone())).ok();
+                    }
+
+                    if let Some(results) = results.as_ref() {
+                        results.lock().unwrap().insert(path_buf.clone(), info);
+                    }
                     //添加队列
                     dir_queue.lock().unwrap().push_back(DirEntry {
                         path: path_buf,
@@ -648,7 +674,13 @@ impl FileFinder {
                 } else if ft.is_file() {
                     // 普通文件：不检测循环
                     // Regular file: no cycle detection
-                    Self::process_file(&path_buf, &results, &pb, &mut thread_file_count);
+                    Self::process_file(
+                        &path_buf,
+                        &results,
+                        &pb,
+                        &stream_tx,
+                        &mut thread_file_count,
+                    );
                 } else {
                     error!("{path_buf:?} 无法访问");
                 }
@@ -668,9 +700,9 @@ impl FileFinder {
     /// * `path` - 要搜索的目录路径 / Directory path to search
     /// * `skip_symlink` - 是否跳过符号链接 / Whether to skip symlinks
     /// * `pb` - 进度更新发送器，发送 (文件增量, 目录增量)。
-///   所有工作线程退出后立即 drop，关闭通道以通知接收方。 /
-///   Progress sender, sends (file_delta, dir_delta).
-///   Dropped immediately after all workers exit, closing the channel to signal the receiver.
+    ///   所有工作线程退出后立即 drop，关闭通道以通知接收方。 /
+    ///   Progress sender, sends (file_delta, dir_delta).
+    ///   Dropped immediately after all workers exit, closing the channel to signal the receiver.
     /// * `max_thread_count` - 最大工作线程数 / Maximum number of worker threads
     ///
     /// # 返回值 / Returns
@@ -745,7 +777,15 @@ impl FileFinder {
             let pb = pb.clone();
 
             let handle = thread::spawn(move || {
-                Self::run_worker(dir_queue, results, pb, skip_symlink, running_count, condver);
+                Self::run_worker(
+                    dir_queue,
+                    Some(results),
+                    pb,
+                    None,
+                    skip_symlink,
+                    running_count,
+                    condver,
+                );
             });
 
             handles.push(handle);
@@ -769,6 +809,118 @@ impl FileFinder {
             .unwrap();
 
         Ok(Self::build_tree(&results, path))
+    }
+
+    /// 流式搜索目录 / Stream search a directory
+    ///
+    /// 通过后台线程异步执行搜索，立即返回接收器用于实时消费发现的文件/目录条目。
+    /// Worker 线程传 `None` 给 `results` 以跳过 HashMap 收集开销。
+    /// 不发构建树形结构，调用方通过 Receiver 按条目消费。
+    ///
+    /// Executes the search asynchronously in a background thread, returning a receiver
+    /// immediately for real-time consumption of discovered file/directory entries.
+    /// Workers pass `None` for `results` to skip HashMap collection overhead.
+    /// No tree structure is built — the caller consumes entries one by one via the Receiver.
+    ///
+    /// # 参数 / Parameters (same as `search`)
+    ///
+    /// # 返回值 / Returns
+    /// * `Ok((JoinHandle<io::Result<()>>, Receiver<(PathBuf, FileInfo)>))`
+    ///   - 线程句柄：用于等待搜索完成并获取结果 / Thread handle: await completion and check result
+    ///   - 接收器：实时消费搜索条目 / Receiver: consume entries in real-time
+    /// * `Err` - 路径无效 / Invalid path
+    ///
+    /// # 使用示例 / Usage
+    /// ```ignore
+    /// let (tx, rx) = mpsc::channel();
+    /// let (handle, stream_rx) = finder.search_stream(path, false, tx, 8)?;
+    /// for (path, info) in stream_rx {
+    ///     println!("发现: {} ({})", path.display(), info.name());
+    /// }
+    /// handle.join().unwrap()?; // 等待搜索完成 / wait for completion
+    /// ```
+    pub fn search_stream(
+        &self,
+        path: &Path,
+        skip_symlink: bool,
+        pb: Sender<(u64, u64)>,
+        max_thread_count: usize,
+    ) -> io::Result<(
+        thread::JoinHandle<io::Result<()>>,
+        std::sync::mpsc::Receiver<(PathBuf, FileInfo)>,
+    )> {
+        use std::sync::mpsc;
+
+        // 同步验证路径 / Synchronous path validation
+        if !path.is_dir() {
+            if path.is_file() {
+                return Err(Error::new(
+                    ErrorKind::NotADirectory,
+                    "提供的路径是文件不是目录",
+                ));
+            } else if path.is_symlink() {
+                return Err(Error::new(
+                    ErrorKind::NotADirectory,
+                    "提供的路径是符号链接，但链接已断",
+                ));
+            }
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "未找到目录，提供的路径不存在或拒绝访问",
+            ));
+        }
+
+        let num_threads = max_thread_count.max(1);
+        let path = path.to_path_buf();
+
+        // 创建流式通道 / Create streaming channel
+        let (stream_tx, stream_rx) = mpsc::channel();
+
+        // 后台线程执行搜索 / Background thread executes the search
+        let handle = thread::spawn(move || -> io::Result<()> {
+            let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
+            dir_queue.lock().unwrap().push_back(DirEntry {
+                path: path.clone(),
+                symlink_chain: Vec::new(),
+            });
+
+            let running_count = Arc::new(Mutex::new(0));
+            let condver = Arc::new(Condvar::new());
+
+            let mut handles = Vec::with_capacity(num_threads);
+            for _ in 0..num_threads {
+                let dir_queue = Arc::clone(&dir_queue);
+                let condver = condver.clone();
+                let running_count = running_count.clone();
+                let pb = pb.clone();
+                let stream_tx = stream_tx.clone();
+
+                let handle = thread::spawn(move || {
+                    Self::run_worker(
+                        dir_queue,
+                        None, // 不收集 HashMap 结果 / Don't collect HashMap results
+                        pb,
+                        Some(stream_tx),
+                        skip_symlink,
+                        running_count,
+                        condver,
+                    );
+                });
+
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            drop(pb);
+            drop(stream_tx);
+
+            Ok(())
+        });
+
+        Ok((handle, stream_rx))
     }
 }
 

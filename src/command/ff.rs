@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc;
 use std::{io, thread};
-use tracing::info;
+use tracing::{error, info};
 use water_ball_tool::file_finder::{FileFinder, FilesList};
 
 #[derive(Args, Debug)]
@@ -50,7 +50,7 @@ pub fn ff(args: FileFinderArgs, mp: Option<&MultiProgress>) {
                 info!(r#"搜索结果已输出到文件: "{out_path}""#);
             }
             Err(err) => {
-                panic!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#)
+                error!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#)
             }
         }
     } else {
@@ -58,7 +58,7 @@ pub fn ff(args: FileFinderArgs, mp: Option<&MultiProgress>) {
     } /**/
 }
 
-const SEARCH_MAX_THREAD_COUNT: usize = 64;
+const SEARCH_MAX_THREAD_COUNT: usize = 16;
 
 /// 搜索文件并显示进度 / Search files with progress display
 pub(crate) fn search_files(

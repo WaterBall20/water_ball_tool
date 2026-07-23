@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 //内部路径工具
-pub(crate) struct PathTool;
+pub struct PathTool;
 
 impl PathTool {
     /// 将文件路径分割为字符串数组，排除根目录分隔符。
@@ -13,7 +13,7 @@ impl PathTool {
     /// Split a file path into a vector of string segments, excluding root separators.
     ///
     /// For example, `"a/b/c"` returns `["a", "b", "c"]`.
-    pub(crate) fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
+    pub fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         let path = path.as_ref();
         /*TODO:路径前部处理
         let path = path

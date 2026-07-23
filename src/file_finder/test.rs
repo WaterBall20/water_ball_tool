@@ -258,3 +258,62 @@ fn chain_propagates_correctly() {
     assert!(result.file_count() >= 1, "应发现 deep.txt");
     _ = fs::remove_dir_all(&root);
 }
+
+/// 使用 search_stream 进行流式搜索，验证接收器收到的条目数正确
+/// Use search_stream for streaming search, verify receiver gets correct entry count
+#[test]
+fn search_stream_receives_all_entries() {
+    let root = setup_test_dir("streaming");
+    create_test_file(&root, "a.txt");
+    create_test_file(&root, "b.txt");
+    let sub = root.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    create_test_file(&sub, "c.txt");
+
+    // search_stream 内部包线程，立即返回线程句柄和接收器
+    // search_stream wraps a thread internally, returns handle and receiver immediately
+    let (tx, rx) = mpsc::channel();
+    let (handle, stream_rx) =
+        FileFinder.search_stream(&root, false, tx, 4).unwrap();
+    let entries: Vec<_> = stream_rx.into_iter().collect();
+    // 消费进度 / consume progress
+    for _ in rx {}
+    // 等待搜索完成 / wait for search completion
+    handle.join().unwrap().unwrap();
+
+    // 验证：sub 目录 + 3 个文件 = 至少 4 条流式条目（根目录不会被流式输出）
+    // Verify: sub dir + 3 files = at least 4 streamed entries (root dir not streamed)
+    assert!(entries.len() >= 4, "应至少收到 4 条流式条目，实际: {}", entries.len());
+
+    let file_entry_count = entries
+        .iter()
+        .filter(|(_, i)| matches!(i.file_kind(), FileKind::File))
+        .count();
+    assert_eq!(file_entry_count, 3, "应收到 3 个文件条目");
+
+    let dir_entry_count = entries
+        .iter()
+        .filter(|(_, i)| matches!(i.file_kind(), FileKind::Dir(_)))
+        .count();
+    assert!(dir_entry_count >= 1, "应至少收到 1 个目录条目（sub 目录）");
+
+    _ = fs::remove_dir_all(&root);
+}
+
+/// search_stream 在空目录下应正常工作（无条目但无崩溃）
+/// search_stream should work on empty directory (no entries, no crash)
+#[test]
+fn search_stream_empty_dir() {
+    let root = setup_test_dir("streaming_empty");
+
+    let (tx, rx) = mpsc::channel();
+    let (handle, stream_rx) =
+        FileFinder.search_stream(&root, false, tx, 4).unwrap();
+    let entries: Vec<_> = stream_rx.into_iter().collect();
+    for _ in rx {}
+    handle.join().unwrap().unwrap();
+
+    assert_eq!(entries.len(), 0, "空目录应无流式条目");
+
+    _ = fs::remove_dir_all(&root);
+}

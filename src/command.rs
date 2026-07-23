@@ -32,6 +32,8 @@ static BUF_LEN: usize = 1024 * 1024;
 const PROGRESS_STYLE_TEMPLATE: &str =
     "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
 
+const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix}{spinner:.green} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta})] {percent:>6.2}% {bytes:>11}/{total_bytes:>11} \n {msg}";
+
 //创建进度实例
 fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
     if let Some(mp) = mp {
