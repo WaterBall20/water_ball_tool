@@ -9,13 +9,14 @@ use std::{error, io, thread};
 use tracing::{error, info};
 use water_ball_tool::file_finder::{FileFinder, FilesList};
 
+/// `ff` 子命令的参数 / Arguments for the `ff` subcommand
 #[derive(Args, Debug)]
 pub(crate) struct FileFinderArgs {
-    ///搜索路径
+    /// 搜索的目录路径 / Directory path to search
     path: String,
-    ///输出文件路径
+    /// 输出的 JSON 文件路径（可选，不提供则打印到日志）/ Output JSON file path (optional; prints to log if omitted)
     out_path: Option<String>,
-    ///跳过符号链接
+    /// 跳过符号链接 / Skip symlinks
     #[arg(short, long)]
     skip_symlinks: bool,
 }

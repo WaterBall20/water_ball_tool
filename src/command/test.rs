@@ -1,17 +1,26 @@
-/*
-创建时间：2026/02/24 08:45
-*/
+//! 命令行集成测试 / Command-level integration tests
+//!
+//! 测试 `ff` 和 `wbfp` 从参数到执行的完整流程。
+//! 包含跨平台符号链接循环检测测试。
+//!
+//! Tests the full flow of `ff` and `wbfp` from arguments to execution.
+//! Includes cross-platform symlink cycle detection tests.
+
 use indicatif::MultiProgress;
 use std::fs;
 
-//TEST===
+// === 测试目录常量 / Test directory constants ===
+// 正常测试 / OK tests
 static FF_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/ff/ok";
-static FF_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/ff/err";
 static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/command/ok";
+// 错误测试 / Error tests
+static FF_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/ff/err";
 static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/command/err";
 
-//OK===
-//文件查找器输出文件跳过符号链接
+// =========================================================================
+// ff 命令测试 / ff command tests
+// =========================================================================
+/// ff：输出文件 + 跳过符号链接 / ff: output file with skip symlinks
 #[test]
 fn ff_out_file_skip_symlink() {
     let mp = MultiProgress::new();
@@ -28,7 +37,7 @@ fn ff_out_file_skip_symlink() {
     );
     _ = fs::remove_file(&out_file_path);
 }
-//文件查找器输出文件
+/// ff：输出文件 / ff: output file
 #[test]
 fn ff_out_file() {
     let mp = MultiProgress::new();
@@ -45,7 +54,7 @@ fn ff_out_file() {
     );
     _ = fs::remove_file(&out_file_path);
 }
-//文件查找器输出文件,长时间
+/// ff：长时间测试，输出文件 / ff: long-time test with output file
 #[test]
 #[ignore = "longtime"]
 fn ff_out_file_longtime() {
@@ -66,7 +75,7 @@ fn ff_out_file_longtime() {
         Some(&mp),
     );
 }
-//文件查找器不输出文件
+/// ff：不输出文件（仅打印日志）/ ff: no output file (log only)
 #[test]
 fn ff_no_out_file() {
     let mp = MultiProgress::new();
@@ -75,7 +84,11 @@ fn ff_no_out_file() {
     ff(FileFinderArgs::new(".".to_string(), None, false), Some(&mp));
 }
 
-//水球包文件打包===
+// =========================================================================
+// wbfp 打包测试 / wbfp pack tests
+// =========================================================================
+
+/// 打包目录（分离清单）/ Pack directory (separate manifest)
 #[test]
 fn wbfp_create_new_pack_m() {
     let mp = MultiProgress::new();
@@ -99,7 +112,7 @@ fn wbfp_create_new_pack_m() {
     );
     _ = fs::remove_dir_all(&out_file_path);
 }
-// 长时间
+/// 打包目录 — 长时间测试 / Pack directory — long-time test
 #[test]
 #[ignore = "longtime"]
 fn wbfp_create_new_pack_m_longtime() {
@@ -124,7 +137,7 @@ fn wbfp_create_new_pack_m_longtime() {
     );
 }
 
-// 不分离数据
+/// 打包目录 — 不分离数据文件 / Pack directory — no separate data file
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file() {
     let mp = MultiProgress::new();
@@ -149,9 +162,11 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
     _ = fs::remove_dir_all(&out_file_path);
 }
 
-// 水球包文件解包===
-//分离
-// 长时间
+// =========================================================================
+// wbfp 解包测试 / wbfp unpack tests
+// =========================================================================
+
+/// 解包 — 分离清单 — 长时间测试 / Unpack — separate manifest — long-time test
 #[test]
 #[ignore = "longtime"]
 fn wbfp_pack_s_longtime() {
@@ -179,7 +194,7 @@ fn wbfp_pack_s_longtime() {
     );
     _ = fs::remove_dir_all(&in_file_path);
 }
-// 不分离数据打包和解包和哈希校验
+/// 打包 + 哈希校验 + 解包 完整流程 / Pack + hash verify + unpack full flow
 #[test]
 fn wbfp_create_new_pack_m_no_s_data_file_s() {
     let mp = MultiProgress::new();
@@ -227,9 +242,11 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
     _ = fs::remove_dir_all(&out_file_path);
 }
 
-//哈希校验===
-//分离
-// 长时间
+// =========================================================================
+// wbfp 哈希校验测试 / wbfp hash verify tests
+// =========================================================================
+
+/// 哈希校验 — 分离清单 — 长时间测试 / Hash verify — separate manifest — long-time test
 #[test]
 #[ignore = "longtime"]
 fn wbfp_verify_all_file_hash_longtime() {
@@ -250,8 +267,11 @@ fn wbfp_verify_all_file_hash_longtime() {
     _ = fs::remove_dir_all(&in_file_path);
 }
 
-//ERR===
-//文件查找器输出文件跳过符号链接，但文件不存在
+// =========================================================================
+// 错误路径测试 / Error path tests
+// =========================================================================
+
+/// ff：搜索不存在的目录应 panic / ff: search nonexistent dir should panic
 #[test]
 #[should_panic(expected = "NotFound")]
 fn ff_out_file_skip_symlink_err_not_found_dir() {
@@ -269,7 +289,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     );
     _ = fs::remove_file(&out_file_path);
 }
-//水球包文件打包，但输入路径不存在
+/// wbfp：打包不存在的目录应 panic / wbfp: pack nonexistent dir should panic
 #[test]
 #[should_panic(expected = "NotFound")]
 fn wbfp_create_new_pack_m_err_not_found_in_dir() {

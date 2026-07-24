@@ -10,7 +10,7 @@
 
 一个多合一命令行工具箱，使用 **Rust** 编写。目前包含两个核心功能：
 
-- **文件搜索器** (`ff`) — 多线程并行扫描目录树，输出 JSON 格式文件清单
+- **文件搜索器** (`ff`) — 多线程并行扫描目录树，输出 JSON 格式文件清单。支持符号链接循环检测。
 - **水球包文件** (`wbfp`) — 自定义二进制归档格式，支持打包/解包/BLAKE3 哈希校验
 
 ---
@@ -52,7 +52,7 @@ water_ball_tool ff /path/to/dir output.json -s
 ### 打包 `wbfp p`
 
 ```bash
-# 将目录打包为水球包文件（清单分离为 .wbm）
+# 将目录打包为水球包文件（默认分离清单为 .wbm）
 water_ball_tool wbfp p ./src my.pack
 
 # 不分离清单（所有数据在单个 .pack 文件中）
@@ -95,13 +95,18 @@ water_ball_tool wbfp h my.pack
 
 ```
 src/
-├── main.rs             # 入口点、帮助界面、日志初始化
-├── lib.rs              # 模块导出
-├── command.rs          # CLI 命令实现（ff / wbfp）
-├── command/test.rs     # 集成测试
-├── tools.rs            # 工具函数（路径转换、字节格式化）
-├── file_finder.rs      # 多线程文件搜索器
-├── wb_files_pack.rs    # 水球包文件模块入口
+├── main.rs             # 入口点、帮助界面、日志初始化 / Entry point, help, log init
+├── lib.rs              # 模块导出 / Module exports
+├── command.rs          # CLI 命令路由 + 进度条辅助函数 / CLI command routing + progress bar helpers
+├── command/
+│   ├── ff.rs           # ff 子命令实现 / ff subcommand implementation
+│   ├── wbfp.rs         # wbfp 子命令实现（打包/解包/哈希校验）/ wbfp subcommand (pack/unpack/hash-verify)
+│   └── test.rs         # 命令级集成测试（含符号链接循环检测）/ Command-level integration tests (incl. symlink cycle detection)
+├── tools.rs            # 工具函数（路径转换、字节格式化）/ Utility functions (path conversion, byte formatting)
+├── file_finder.rs      # 多线程文件搜索器 + inode 链循环检测 / Multi-threaded file finder + inode chain cycle detection
+├── file_finder/
+│   └── test.rs         # 文件搜索器单元测试（符号链接场景）/ File finder unit tests (symlink scenarios)
+├── wb_files_pack.rs    # 水球包文件模块入口 / Water Ball Files Pack module entry
 ├── wb_files_pack/
 │   ├── data.rs         # 核心数据结构（Attribute/PackStruct/ManifestDataBlock 等）
 │   ├── manager.rs      # 包文件管理器（创建/打开/保存/GC/锁）

@@ -1,3 +1,13 @@
+//! 水球工具 CLI 入口点 / Water Ball Tool CLI entry point
+//!
+//! 解析命令行参数并通过 `command::cli()` 路由到对应的子命令。
+//! 初始化全局日志系统（tracing），通过 `MultiProgressWriter` 适配器
+//! 将日志输出与 indicatif 进度条共存。
+//!
+//! Parses CLI arguments and routes them to subcommands via `command::cli()`.
+//! Initializes the global logging system (tracing), routing log output
+//! through a `MultiProgressWriter` adapter to coexist with the indicatif progress bar.
+
 use crate::command::Cli;
 use clap::Parser;
 use indicatif::MultiProgress;

@@ -1,3 +1,13 @@
+//! wbfp 子命令模块 / wbfp subcommand module
+//!
+//! 实现水球包文件（WBFP）的打包、解包和哈希校验逻辑。
+//! 支持多线程写入（生产者-消费者模式，通过 `FileFinder::search_stream` 流式发现文件）、
+//! 每个工作线程独立的进度条显示，以及大文件（>512MiB）日志提示。
+//!
+//! Implements pack, unpack, and hash-verify logic for the WaterBall File Pack (WBFP).
+//! Supports multi-threaded writing (producer-consumer pattern via `FileFinder::search_stream`
+//! for streaming file discovery), per-worker-thread progress bars, and large file (>512MiB) log notices.
+
 use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, create_pb, set_pb_style2, update_pb};
 use clap::error::Result;
 use clap::{Args, Subcommand};
@@ -17,6 +27,7 @@ use water_ball_tool::wb_files_pack::{
     PackFileMetadata, PackFileMetadataRun, PackStructItem, PackStructItemType,
 };
 
+/// wbfp 命令参数 / wbfp command arguments
 #[derive(Args, Debug)]
 pub(crate) struct WaterBallFilePackArgs {
     #[command(subcommand)]
@@ -30,26 +41,27 @@ impl WaterBallFilePackArgs {
     }
 }
 
+/// wbfp 子命令枚举 / wbfp subcommand enum
 #[derive(Subcommand, Debug)]
 pub(crate) enum WaterBallFilePackCommands {
-    //解包
+    /// 解包 / Unpack
     #[command(visible_alias = "u")]
     Unpack(WaterBallFilePackCommandsUnpack),
-    //打包
+    /// 打包 / Pack
     #[command(visible_alias = "p")]
     Pack(WaterBallFilePackCommandsPack),
-    //对整个包文件哈希校验
+    /// 对整个包文件哈希校验 / Hash verify the entire pack file
     #[command(visible_alias = "h")]
     HashVerify(WaterBallFilePackCommandsHashVerify),
 }
-//解包参数
+/// 解包子命令参数 / Unpack subcommand arguments
 #[derive(Args, Debug)]
 pub(crate) struct WaterBallFilePackCommandsUnpack {
-    ///水球包包文件路径
+    /// 水球包包文件路径 / WaterBall pack file path
     pack_path: String,
-    ///输出目录路径
+    /// 输出目录路径 / Output directory path
     out_dir: String,
-    ///解包前哈希校验
+    /// 解包前进行哈希校验 / Hash verify before unpacking
     #[arg(short, long)]
     hash_verify: bool,
 }
@@ -64,14 +76,14 @@ impl WaterBallFilePackCommandsUnpack {
     }
 }
 
-//打包参数
+/// 打包子命令参数 / Pack subcommand arguments
 #[derive(Args, Debug)]
 pub(crate) struct WaterBallFilePackCommandsPack {
-    //打包的文件或目录路径
+    /// 打包的文件或目录路径 / Input file or directory path
     in_path: String,
-    ///输出的包文件路径，忽略将在工作目录生成同名包文件
+    /// 输出的包文件路径（省略则在当前目录生成同名文件）/ Output pack file path (generates same-name file in CWD if omitted)
     out_pack_path: Option<String>,
-    ///不分离清单
+    /// 不分离清单到 .wbm 文件 / Do not separate manifest to .wbm file
     #[arg(short, long)]
     no_separation: bool,
 }
@@ -85,10 +97,10 @@ impl WaterBallFilePackCommandsPack {
         }
     }
 }
-//哈希校验参数
+/// 哈希校验子命令参数 / Hash verify subcommand arguments
 #[derive(Args, Debug)]
 pub(crate) struct WaterBallFilePackCommandsHashVerify {
-    ///包文件路径
+    /// 包文件路径 / Pack file path
     pack_path: String,
 }
 impl WaterBallFilePackCommandsHashVerify {
@@ -114,6 +126,10 @@ pub fn wbfp(
     }
 }
 
+/// wbfp 命令的执行器，包含所有打包/解包/校验的运行时逻辑。
+///
+/// Execution engine for wbfp commands, containing all runtime logic
+/// for pack, unpack, and hash verify operations.
 struct WaterBallFilePackArgsRuning;
 
 impl WaterBallFilePackArgsRuning {

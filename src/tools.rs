@@ -35,7 +35,15 @@ impl PathTool {
         path_list
     }
 
-    /// 去除路径的前部部分，变成相对路径
+    /// 从完整路径中移除头部部分，得到相对路径。
+    ///
+    /// 例如，`"a/b/c/d"` 去掉头部 `"a/b"` 得到 `"c/d"`。
+    /// 如果路径不以头部开始则返回 `None`。
+    ///
+    /// Strip head prefix from a full path to obtain a relative path.
+    ///
+    /// For example, stripping `"a/b"` from `"a/b/c/d"` yields `"c/d"`.
+    /// Returns `None` if the path does not start with the head prefix.
     pub fn path_remove_head<P: AsRef<Path>>(path: P, head: P) -> Option<PathBuf> {
         let head_vec = PathTool::path_to_string_vec(head);
         let path_vec = PathTool::path_to_string_vec(path);
@@ -73,6 +81,7 @@ pub fn bytes_len_to_string(len: u64) -> String {
     }
 }
 
+/// 预留的水球包文件工具结构体（未实现）/ Reserved WBFP tool struct (not yet implemented)
 struct _WBFPTool {}
 
 #[cfg(test)]
