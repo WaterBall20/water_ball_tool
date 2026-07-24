@@ -106,6 +106,7 @@ fn wbfp_create_new_pack_m() {
                 "./src".to_string(),
                 Some(out_file_path.clone()),
                 false,
+                None,
             ),
         )),
         Some(&mp),
@@ -131,7 +132,7 @@ fn wbfp_create_new_pack_m_longtime() {
     let path = String::from("/usr/lib/");
     wbfp(
         WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
-            WaterBallFilePackCommandsPack::new(path, Some(out_file_path.clone()), false),
+            WaterBallFilePackCommandsPack::new(path, Some(out_file_path.clone()), false, None),
         )),
         Some(&mp),
     );
@@ -155,6 +156,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
                 "./src".to_string(),
                 Some(out_file_path.clone()),
                 true,
+                None,
             ),
         )),
         Some(&mp),
@@ -181,13 +183,14 @@ fn wbfp_pack_s_longtime() {
         WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
             WaterBallFilePackCommandsUnpack::new(
                 in_file_path.clone(),
-                {
+                Some({
                     let mut out_dir_path = in_dir_path.clone();
                     out_dir_path.push_str("/s_pack");
                     _ = fs::create_dir_all(&out_dir_path);
                     out_dir_path
-                },
+                }),
                 false,
+                None,
             ),
         )),
         Some(&mp),
@@ -214,11 +217,13 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
                     "./src".to_string(),
                     Some(out_file_path.clone()),
                     true,
+                    None,
                 ),
             )),
             Some(&mp),
         );
     }
+    out_file_path.push_str(".wbfp");
     //哈希校验（仅需包路径）
     {
         wbfp(
@@ -234,7 +239,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
         s_out_path.push_str("/s");
         wbfp(
             WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
-                WaterBallFilePackCommandsUnpack::new(out_file_path.clone(), s_out_path, false),
+                WaterBallFilePackCommandsUnpack::new(out_file_path.clone(), Some(s_out_path), false, None),
             )),
             Some(&mp),
         );
@@ -308,6 +313,7 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
                 "/~".to_string(),
                 Some(out_file_path.clone()),
                 false,
+                None,
             ),
         )),
         Some(&mp),
@@ -317,10 +323,10 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
 
 // === 符号链接循环检测 / Symlink cycle detection ===
 
-use crate::command::ff::{ff, FileFinderArgs};
+use crate::command::ff::{FileFinderArgs, ff};
 use crate::command::wbfp::{
-    wbfp, WaterBallFilePackArgs, WaterBallFilePackCommands,
-    WaterBallFilePackCommandsHashVerify, WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack,
+    WaterBallFilePackArgs, WaterBallFilePackCommands, WaterBallFilePackCommandsHashVerify,
+    WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack, wbfp,
 };
 use std::io;
 use std::io::Write;
@@ -328,6 +334,7 @@ use std::path::{Path, PathBuf};
 
 const SYMLINK_TEST_DIR: &str = "./temp/test/ff/ok/symlink_cmd";
 
+/// 平台适配的符号链接创建函数 / Platform-adapted symlink creation
 #[cfg(unix)]
 fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(original, link)
@@ -345,6 +352,8 @@ fn create_symlink_cmd(original: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// 尝试创建符号链接，失败时返回 None（如权限不足或无符号链接支持）
+/// Attempt to create a symlink, returning None on failure (e.g., permission denied)
 fn try_create_symlink_cmd(original: &Path, link: &Path) -> Option<()> {
     match create_symlink_cmd(original, link) {
         Ok(()) => Some(()),
@@ -352,6 +361,7 @@ fn try_create_symlink_cmd(original: &Path, link: &Path) -> Option<()> {
     }
 }
 
+/// 创建清理后的测试子目录 / Create a clean test subdirectory
 fn setup_symlink_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(SYMLINK_TEST_DIR).join(name);
     _ = fs::remove_dir_all(&dir);
@@ -359,6 +369,7 @@ fn setup_symlink_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// 在指定目录下创建一个内容为 "ok" 的测试文件 / Create a test file with "ok" content
 fn create_file_cmd(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     let mut f = fs::File::create(&path).unwrap();

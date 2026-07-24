@@ -291,7 +291,10 @@ impl PackFileHandle {
     /// Verify the integrity hash of the file data.
     ///
     /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
-    pub fn verify_hash(&mut self) -> Result<bool> {
+    pub fn verify_hash(
+        &mut self,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<bool> {
         //缓冲区
         let old_pos = self.pos;
         let Some(metadata) = &self.metadata else {
@@ -301,7 +304,7 @@ impl PackFileHandle {
         if let PackFileMetadataType::File { hash_type, hash_value, .. } = metadata.file_type() {
             let in_hash = PackFileHash::from_new(*hash_type, hash_value.as_slice());
             //循环读取
-            let mut read_hash = self.read_hash_v()?;
+            let mut read_hash = self.read_hash_v(progress)?;
             self.set_pos(old_pos)?;
             Ok(read_hash.eq(&in_hash)?)
         } else {
@@ -309,7 +312,10 @@ impl PackFileHandle {
         }
     }
 
-    fn read_hash_v(&mut self) -> Result<PackFileHash> {
+    fn read_hash_v(
+        &mut self,
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> Result<PackFileHash> {
         //计算哈希
         if
         let Some(metadata) = &self.metadata &&
@@ -326,6 +332,9 @@ impl PackFileHandle {
                 let this_read_len = self.read(self.pos, &mut buf)?;
                 read_hash.update(&buf[..this_read_len]);
                 hash_read_len += this_read_len as u64;
+                if let Some(p) = progress {
+                    p(hash_read_len, len);
+                }
             }
             Ok(read_hash)
         } else {
@@ -336,7 +345,7 @@ impl PackFileHandle {
     fn commit_data(&mut self) -> Result<()> {
         //计算哈希
         if self.is_write {
-            let read_hash = self.read_hash_v();
+            let read_hash = self.read_hash_v(None);
             if
             let Ok(read_hash) = read_hash &&
                 let Some(metadata) = &mut self.metadata &&

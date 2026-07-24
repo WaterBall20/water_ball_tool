@@ -400,7 +400,7 @@ impl Allocator /*工具方法*/ {
             }
             PackStructItemType::File { .. } => {
                 let mut file = self.get_file_wr(path, false)?;
-                match file.verify_hash() {
+                match file.verify_hash(None) {
                     Ok(true) => verify_hash_r.ok_path.push(path.to_str().unwrap().to_string()),
                     Ok(false) =>
                         verify_hash_r.err_path.push((path.to_str().unwrap().to_string(), None)),

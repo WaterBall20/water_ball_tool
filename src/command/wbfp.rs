@@ -8,13 +8,14 @@
 //! Supports multi-threaded writing (producer-consumer pattern via `FileFinder::search_stream`
 //! for streaming file discovery), per-worker-thread progress bars, and large file (>512MiB) log notices.
 
-use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, create_pb, set_pb_style2, update_pb};
+use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, create_pb};
 use clap::error::Result;
 use clap::{Args, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
@@ -23,9 +24,7 @@ use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind};
 use water_ball_tool::tools::PathTool;
 use water_ball_tool::wb_files_pack::allocator::Allocator;
-use water_ball_tool::wb_files_pack::{
-    PackFileMetadata, PackFileMetadataRun, PackStructItem, PackStructItemType,
-};
+use water_ball_tool::wb_files_pack::PackStructItemType;
 
 /// wbfp 命令参数 / wbfp command arguments
 #[derive(Args, Debug)]
@@ -59,19 +58,28 @@ pub(crate) enum WaterBallFilePackCommands {
 pub(crate) struct WaterBallFilePackCommandsUnpack {
     /// 水球包包文件路径 / WaterBall pack file path
     pack_path: String,
-    /// 输出目录路径 / Output directory path
-    out_dir: String,
+    /// 输出目录路径（缺省则去掉 .wbfp 后缀，生成在同级目录）/ Output directory path (defaults to stripping .wbfp suffix, placed next to pack file)
+    out_dir: Option<String>,
     /// 解包前进行哈希校验 / Hash verify before unpacking
     #[arg(short, long)]
     hash_verify: bool,
+    /// 解包时所用的线程数，缺省使用CPU线程数量 / Thread count for unpacking, defaults to CPU count
+    #[arg(short, long)]
+    thread_count: Option<usize>,
 }
 impl WaterBallFilePackCommandsUnpack {
     #[cfg(test)]
-    pub(crate) fn new(pack_path: String, out_dir: String, hash_verify: bool) -> Self {
+    pub(crate) fn new(
+        pack_path: String,
+        out_dir: Option<String>,
+        hash_verify: bool,
+        thread_count: Option<usize>,
+    ) -> Self {
         Self {
             pack_path,
             out_dir,
             hash_verify,
+            thread_count,
         }
     }
 }
@@ -86,14 +94,23 @@ pub(crate) struct WaterBallFilePackCommandsPack {
     /// 不分离清单到 .wbm 文件 / Do not separate manifest to .wbm file
     #[arg(short, long)]
     no_separation: bool,
+    #[arg(short, long)]
+    /// 复制时所用的线程数，缺省使用CPU线程数量
+    thread_count: Option<usize>,
 }
 impl WaterBallFilePackCommandsPack {
     #[cfg(test)]
-    pub(crate) fn new(in_path: String, out_pack_path: Option<String>, no_separation: bool) -> Self {
+    pub(crate) fn new(
+        in_path: String,
+        out_pack_path: Option<String>,
+        no_separation: bool,
+        thread_count: Option<usize>,
+    ) -> Self {
         Self {
             in_path,
             out_pack_path,
             no_separation,
+            thread_count,
         }
     }
 }
@@ -102,15 +119,25 @@ impl WaterBallFilePackCommandsPack {
 pub(crate) struct WaterBallFilePackCommandsHashVerify {
     /// 包文件路径 / Pack file path
     pack_path: String,
+    /// 校验时所用的线程数，缺省使用CPU线程数量 / Thread count for verification, defaults to CPU count
+    #[arg(short, long)]
+    thread_count: Option<usize>,
 }
 impl WaterBallFilePackCommandsHashVerify {
     #[cfg(test)]
     pub(crate) fn new(pack_path: String) -> Self {
-        Self { pack_path }
+        Self {
+            pack_path,
+            thread_count: None,
+        }
     }
 }
-/// 水球包文件路由入口
-/// WaterBall pack file router
+/// wbfp 命令路由入口，根据子命令分发到对应的执行函数。
+/// 每个执行函数独立处理进度条和多线程逻辑。
+///
+/// wbfp command router. Dispatches to the appropriate execution function
+/// based on the subcommand. Each function handles its own progress bars
+/// and multi-threading logic independently.
 pub fn wbfp(
     args: WaterBallFilePackArgs,
     mp: Option<&MultiProgress>,
@@ -118,10 +145,8 @@ pub fn wbfp(
     let args2 = &args.commands;
     match args2 {
         WaterBallFilePackCommands::Unpack(u) => WaterBallFilePackArgsRuning::wbfp_u(u, mp),
-        WaterBallFilePackCommands::Pack(p) => {
-            let wbfp = WaterBallFilePackArgsRuning;
-            wbfp.wbfp_p(p, mp)
-        }
+        WaterBallFilePackCommands::Pack(p) => WaterBallFilePackArgsRuning::wbfp_p(p, mp),
+
         WaterBallFilePackCommands::HashVerify(h) => WaterBallFilePackArgsRuning::wbfp_h(h, mp),
     }
 }
@@ -135,20 +160,20 @@ struct WaterBallFilePackArgsRuning;
 impl WaterBallFilePackArgsRuning {
     /// 打包目录为水球包文件。
     ///
-    /// 参数: `<输入目录> <包文件路径> [-f]`
+    /// 参数: `<输入目录> <包文件路径> [-n]`
     ///
     /// 使用 `FileFinder` 多线程扫描源目录，将每个文件写入包的虚拟文件系统。
-    /// `-f` 标志强制将清单数据嵌入 `.pack` 文件而非分离的 `.wbm` 文件。
+    /// `-n` / `--no-separation` 标志强制将清单数据嵌入 `.pack` 文件而非分离的 `.wbm` 文件。
     ///
     /// Pack a directory into a WaterBall pack file.
     ///
-    /// Args: `<input_dir> <pack_path> [-f]`
+    /// Args: `<input_dir> <pack_path> [-n]`
     ///
     /// Uses `FileFinder` to multi-threaded scan the source directory, then writes
-    /// each file into the pack's virtual filesystem. The `-f` flag forces manifest
-    /// data to be embedded in the `.pack` file instead of a separate `.wbm`.
+    /// each file into the pack's virtual filesystem. The `-n` / `--no-separation`
+    /// flag forces manifest data to be embedded in the `.pack` file instead of a
+    /// separate `.wbm` file.
     pub fn wbfp_p(
-        &self,
         args: &WaterBallFilePackCommandsPack,
         mp: Option<&MultiProgress>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -156,7 +181,7 @@ impl WaterBallFilePackArgsRuning {
         //源目录路径
         let in_path = PathBuf::from(&args.in_path);
         //输出的包文件路径
-        let pack_path = {
+        let mut pack_path = {
             match &args.out_pack_path {
                 Some(pack_path) => {
                     //存在路径参数
@@ -195,6 +220,7 @@ impl WaterBallFilePackArgsRuning {
             }
         };
         //确保输出文件名
+        pack_path.set_extension("wbfp");
         //分离数据文件
         let separate_manifest = !args.no_separation;
 
@@ -272,6 +298,18 @@ impl WaterBallFilePackArgsRuning {
             //搜索进度条
             let ff_pb = create_pb(mp);
 
+            //复制时所用的线程数
+            let thread_count = match args.thread_count {
+                Some(v) => v,
+                None => {
+                    let thread_count = thread::available_parallelism()
+                        .unwrap_or(NonZero::new(8).unwrap())
+                        .get();
+                    info!("未指定线程数量，将使用{thread_count}线程");
+                    thread_count
+                }
+            };
+
             //搜索文件===
             info!("开始搜索文件");
             warn!("目前搜索将跳过符号链接");
@@ -284,7 +322,6 @@ impl WaterBallFilePackArgsRuning {
             //文件计数
             let file_count = Arc::new(Mutex::new(0));
 
-            //移动到线程的变量
             //创建专门的线程搜索
             let ff_thread = {
                 let in_dir_path = in_path.clone();
@@ -316,7 +353,7 @@ impl WaterBallFilePackArgsRuning {
                                 let all_count = *file_count + *dir_count;
                                 ff_pb.set_position(all_count);
                                 //10的倍数才更新
-                                if all_count.is_multiple_of(10) {
+                                if all_count.is_multiple_of(100) {
                                     ff_pb.set_message(format!(
                                         "[搜索文件]已发现 {file_count} 文件和 {dir_count} 个目录"
                                     ));
@@ -345,7 +382,6 @@ impl WaterBallFilePackArgsRuning {
                 })
             };
 
-            let thread_count = 8;
             //复制线程
             let wp_thread = {
                 let pack = pack.clone();
@@ -434,6 +470,19 @@ impl WaterBallFilePackArgsRuning {
         info!("操作已完成,文件保存到{}", pack_path.display());
         Ok(())
     }
+    /// 工作线程的核心循环：从共享文件队列中取文件并写入包文件。
+    ///
+    /// 队列为空时通过条件变量挂起等待，搜索线程发现新文件时唤醒。
+    /// 搜索结束（`ff_end` 为 true 且队列为空）时退出循环。
+    /// 每写 5MiB 更新一次所属线程的独立进度条，同时通过 `main_pb_tx`
+    /// 向主线程发送已写字节数用于聚合总进度。
+    ///
+    /// Core worker loop: pop files from the shared queue and write them
+    /// into the pack. Suspends via condition variable when the queue is
+    /// empty and wakes when the search thread discovers new files. Exits
+    /// when search finishes (ff_end is true) and the queue is drained.
+    /// Updates the per-thread progress bar every 5MiB written, and sends
+    /// byte counts to the main thread via main_pb_tx for total aggregation.
     fn write_pack(
         mut pack_man: Allocator,
         pb: Option<ProgressBar>,
@@ -526,6 +575,20 @@ impl WaterBallFilePackArgsRuning {
         Ok(())
     }
 
+    /// 将单个文件从磁盘复制到包文件的虚拟文件系统中。
+    ///
+    /// 打开源文件 → 在包中创建虚拟文件 → 循环读写（缓冲区 `run_buf`）
+    /// 直至复制完成。权限不足或打开失败时记录错误并跳过该文件。
+    /// 通过 `update_pb` 回调通知外部更新进度，通过 `main_pb_tx`
+    /// 向主线程发送字节增量用于聚合总进度条。
+    ///
+    /// Copies a single file from disk into the pack's virtual filesystem.
+    ///
+    /// Opens source file → creates virtual file in pack → loops read/write
+    /// using `run_buf` buffer until complete. Logs and skips on permission
+    /// denied or open failure. Invokes `update_pb` callback for external
+    /// progress updates, and sends byte deltas to the main thread via
+    /// `main_pb_tx` for total progress bar aggregation.
     fn copy_file_into_pack(
         pack_man: &mut Allocator,
         run_buf: &mut [u8],
@@ -622,345 +685,719 @@ impl WaterBallFilePackArgsRuning {
         }
     }
 
-    /// 解包水球包文件到磁盘目录。
+    /// 解包水球包文件到磁盘目录（多线程边发现边解包）。
     ///
-    /// 参数: `<包文件路径> <输出目录>`
+    /// 参数: `<包文件路径> <输出目录> [-t <线程数>]`
     ///
-    /// 加载包内所有元数据和文件结构，将每个虚拟文件写入输出目录。
-    /// 大文件（>512MiB）在日志中单独提示。
+    /// 所有线程共用一个工作队列，初始填入根路径名。每个线程从队列取路径，
+    /// 按需加载结构/元数据判定类型：
+    /// - 目录 → 创建磁盘目录 + 子路径推回队列
+    /// - 文件 → 从包虚拟文件系统读取并写入磁盘
     ///
-    /// Unpack a WaterBall pack file to a disk directory.
+    /// 不使用 `load_all_data`——结构和元数据均在遍历过程中按需加载。
     ///
-    /// Args: `<pack_path> <output_dir>`
+    /// Multi-threaded unpack (discover-as-you-unpack) using a unified work queue.
     ///
-    /// Loads all metadata and file structure from the pack, then writes each
-    /// virtual file to the output directory. Large files (>512MiB) are noted in logs.
+    /// Args: `<pack_path> [output_dir] [-t <thread_count>]`
+    ///
+    /// All threads share one work queue seeded with root path names. Each thread
+    /// pops a path and determines type via on-demand struct/metadata loading:
+    /// - Directory → creates disk directory + pushes children back to queue
+    /// - File → reads from pack virtual FS and writes to disk
+    ///
+    /// No `load_all_data` — structures and metadata are loaded on demand during traversal.
     pub fn wbfp_u(
         args: &WaterBallFilePackCommandsUnpack,
         mp: Option<&MultiProgress>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::thread;
+
         let pack_path = &args.pack_path;
-        //输出文件路径
-        let out_dir_path = &args.out_dir;
-        //进度条
-        let pb = create_pb(mp);
+        // 智能推导输出路径：若未指定，取文件名去掉 .wbfp 后缀，放在工作目录下
+        // Smart output dir: if unspecified, strip .wbfp suffix from filename, place in CWD
+        let out_dir_path = match &args.out_dir {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let stem = Path::new(pack_path).file_stem().ok_or_else(|| {
+                    Box::<dyn std::error::Error>::from(format!(
+                        "无法从包文件路径提取前缀以推导输出目录: {pack_path}"
+                    ))
+                })?;
+                let out = Path::new(".").join(stem);
+                info!("未指定输出路径，将解包到: {}", out.display());
+                out
+            }
+        };
+        let thread_count = args.thread_count.unwrap_or_else(|| {
+            thread::available_parallelism()
+                .unwrap_or(NonZero::new(8).unwrap())
+                .get()
+        });
+
+        // 挂起时 spinner 模板 / Spinner template when suspended
+        const SPINNER_TEMPLATE: &str = "{prefix}{spinner:.green} {msg}";
+
         info!("开始准备解包");
         info!("打开包文件");
         let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
-        //逻辑实现=== ===
         info!("开始复制数据");
-        fs::create_dir_all(out_dir_path).expect("无法创建数据路径");
-        Self::read_pack(&mut pack, Option::from(&pb), out_dir_path.as_ref()).expect("写入文件错误");
-        info!("操作已完成,文件保存到目录{out_dir_path}");
-        Ok(())
-    }
+        fs::create_dir_all(&out_dir_path).expect("无法创建数据路径");
 
-    fn read_pack(
-        pack_man: &mut Allocator,
-        pb: Option<&ProgressBar>,
-        out_dir_path: &Path,
-    ) -> io::Result<()> {
-        /// 递归从包读取文件 / Recursively read files from pack
-        fn read_pack_recursive<'a>(
-            pack_man: &mut Allocator,
-            mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String, String) + 'a)>,
-            pack_struct_items: &HashMap<String, PackStructItem>,
-            out_s_path_buf: &Path,
-            pack_s_path_buf: &Path,
-            run_buf: &mut [u8],
-        ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String, String)>> {
-            for (name, item) in pack_struct_items {
-                let this_out_path = out_s_path_buf.join(name);
-                let this_pack_path = pack_s_path_buf.join(name);
-                match item.item_type() {
-                    PackStructItemType::File { .. } => {
-                        if let PackFileMetadataRun::Loaded(metadata) = item.metadata() {
-                            WaterBallFilePackArgsRuning::copy_pack_file_to_disk(
-                                pack_man,
-                                &mut pb_c,
-                                run_buf,
-                                metadata,
-                                &this_out_path,
-                                &this_pack_path,
-                            );
-                        } else {
-                            error!("虚拟路径{this_pack_path:?}文件的元数据没有被加载");
+        let root_name_list = pack.get_root_struct_item_name_list()?;
+        let attribute = pack.get_manifest_attribute()?;
+        let all_file_count = attribute.file_count();
+        let data_len = attribute.data_len();
+
+        // 总进度条 / Main progress bar
+        let main_pb = create_pb(mp);
+        if let Some(pb) = &main_pb {
+            pb.set_length(data_len);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            pb.set_prefix("解包");
+        }
+
+        // 统一工作队列 + 终止控制
+        // Unified work queue + termination control
+        let queue: Arc<(Mutex<VecDeque<PathBuf>>, Condvar)> =
+            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
+        let all_done = Arc::new(AtomicBool::new(false));
+        {
+            let mut q = queue.0.lock().unwrap();
+            for name in &root_name_list {
+                q.push_back(PathBuf::from(name));
+            }
+        }
+
+        // 创建子线程进度条 / Create per-worker progress bars
+        let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
+        for i in 0..thread_count {
+            let pb = create_pb(mp);
+            if let Some(pb) = &pb {
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                        .unwrap()
+                        .progress_chars("=>-"),
+                );
+                pb.set_prefix(format!("[线程{i}] "));
+            }
+            worker_pbs.push(pb);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let mut handles = Vec::with_capacity(thread_count);
+        let out_dir_path: Arc<PathBuf> = Arc::new(out_dir_path);
+
+        for _ in 0..thread_count {
+            let mut pack = pack.clone();
+            let queue = queue.clone();
+            let pending = pending.clone();
+            let all_done = all_done.clone();
+            let tx = tx.clone();
+            let w_pb = worker_pbs.pop().unwrap();
+            let out_dir_path = out_dir_path.clone();
+
+            handles.push(thread::spawn(move || -> io::Result<()> {
+                let mut run_buf = vec![0u8; BUF_LEN];
+
+                loop {
+                    let path = {
+                        let (lock, cvar) = &*queue;
+                        let mut q = lock.lock().unwrap();
+                        loop {
+                            if let Some(p) = q.pop_front() {
+                                break p;
+                            }
+                            if all_done.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            if let Some(pb) = &w_pb {
+                                pb.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template(SPINNER_TEMPLATE)
+                                        .unwrap(),
+                                );
+                                pb.set_message("已挂起");
+                            }
+                            q = cvar.wait(q).unwrap();
+                            if let Some(pb) = &w_pb {
+                                pb.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                                        .unwrap()
+                                        .progress_chars("=>-"),
+                                );
+                            }
                         }
-                    }
-                    PackStructItemType::Dir { pack_struct, .. } => {
-                        if let Some(pack_struct) = pack_struct {
-                            //尝试获取结构项
-                            //创建目录
-                            fs::create_dir_all(&this_out_path)?;
-                            //目录仅递归处理
-                            pb_c = read_pack_recursive(
-                                pack_man,
-                                pb_c,
-                                pack_struct.items(),
-                                &this_out_path,
-                                &this_pack_path,
-                                run_buf,
-                            )?;
-                        } else {
-                            error!("虚拟路径{this_pack_path:?}目录的结构没有被加载");
+                    };
+
+                    let item = match pack.get_pack_struct_item(&path) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            error!(
+                                r#"无法获取虚拟路径"{}"结构项, err:{err}"#,
+                                path.display()
+                            );
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
+                            continue;
+                        }
+                    };
+
+                    match item.item_type() {
+                        PackStructItemType::Dir { .. } => {
+                            // 创建磁盘目录 / Create disk directory
+                            let out_dir = out_dir_path.join(&path);
+                            if let Err(err) = fs::create_dir_all(&out_dir) {
+                                error!(
+                                    r#"无法创建目录"{}", err:{err}"#,
+                                    out_dir.display()
+                                );
+                            }
+
+                            let children =
+                                match pack.get_struct_item_name_list(&path) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        error!(
+                                            r#"无法获取虚拟路径"{}"的子项名称, err:{err}"#,
+                                            path.display()
+                                        );
+                                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                            all_done.store(true, Ordering::SeqCst);
+                                            queue.1.notify_all();
+                                        }
+                                        continue;
+                                    }
+                                };
+
+                            let n = children.len();
+                            if n > 0 {
+                                pending.fetch_add(n, Ordering::SeqCst);
+                                let mut q = queue.0.lock().unwrap();
+                                for child in children {
+                                    q.push_back(path.join(child));
+                                }
+                                queue.1.notify_all();
+                            }
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
+                        }
+                        PackStructItemType::File { .. } => {
+                            let out_path = out_dir_path.join(&path);
+                            let out_path_str = out_path.display().to_string();
+                            let bytes_written = Self::extract_pack_file_to_disk(
+                                &mut pack,
+                                &path,
+                                &out_path,
+                                &mut run_buf,
+                                Some(&|done, total| {
+                                    if let Some(pb) = &w_pb {
+                                        pb.set_length(total);
+                                        pb.set_position(done);
+                                        pb.set_message(format!(
+                                            "File path: {}",
+                                            out_path_str
+                                        ));
+                                    }
+                                }),
+                            );
+
+                            let _ = tx.send(bytes_written.unwrap_or(0));
+
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
                         }
                     }
                 }
+            }));
+        }
+        drop(tx);
+
+        // 主线程：汇总进度条 / Main thread: aggregate progress
+        let mut written_len = 0u64;
+        let mut file_count = 0u64;
+        let mut last_pb_update_len = 0u64;
+
+        for bytes_written in rx {
+            written_len += bytes_written;
+            file_count += 1;
+
+            if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
+                if let Some(pb) = &main_pb {
+                    pb.set_position(written_len);
+                    pb.set_message(format!("[{file_count}/{all_file_count}个文件]"));
+                }
+                last_pb_update_len = written_len;
             }
-            Ok(pb_c)
         }
 
-        //
-        info!("加载所有结构项和元数据");
-        pack_man.load_all_data(false)?;
-        info!("加载完成");
+        for h in handles {
+            h.join().unwrap()?;
+        }
 
-        //获取根列表
-        let root_struct_list = pack_man.get_root_struct_items()?;
-        let mut buf = vec![0; BUF_LEN];
-        let mut this_all_write_len = 0;
-        let mut this_all_write_file_count = 0;
-        let attribute = pack_man.get_manifest_attribute()?;
-        let all_file_count = attribute.file_count();
-        let data_len = attribute.data_len();
-        //设置进度条样式
-        set_pb_style2(pb, data_len);
-        let mut binding = |add_len, add_file_count, f_path, p_path| {
-            this_all_write_len += add_len;
-            this_all_write_file_count += add_file_count;
-            if let Some(pb) = pb {
-                pb.set_position(this_all_write_len);
-                let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
-                pb.set_message(format!(
-                    "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件]\
-                \nPack path: {p_path}\
-                \nFile path: {f_path}"
-                ));
-            }
-        };
-        read_pack_recursive(
-            pack_man,
-            match pb {
-                Some(_) => Some(&mut binding),
-                None => None,
-            },
-            &root_struct_list,
-            out_dir_path,
-            &PathBuf::new(),
-            &mut buf,
-        )?;
+        info!("操作已完成,文件保存到目录{}", out_dir_path.display());
         Ok(())
     }
 
-    fn copy_pack_file_to_disk(
-        pack_man: &mut Allocator,
-        pb_c: &mut Option<&mut dyn FnMut(u64, u64, String, String)>,
+    /// 将包中的单个虚拟文件提取到磁盘。
+    ///
+    /// 大文件（>512MiB）单独记录 info 日志提示。打开虚拟文件 → 创建磁盘文件
+    /// → 预分配空间 → 循环读写。通过 `progress` 闭包报告每块读写后的进度。
+    ///
+    /// Extracts a single virtual file from the pack to disk.
+    ///
+    /// Large files (>512MiB) are logged with an info message. Opens the
+    /// virtual file → creates the disk file → pre-allocates space → loops
+    /// read/write. Reports progress after each chunk via the `progress` closure.
+    fn extract_pack_file_to_disk(
+        pack: &mut Allocator,
+        pack_path: &Path,
+        out_path: &Path,
         run_buf: &mut [u8],
-        metadata: &PackFileMetadata,
-        this_out_path: &PathBuf,
-        this_pack_path: &PathBuf,
-    ) {
-        //更新进度
-        let mut lase_up_pb_c_write_len = 0;
-        if metadata.len() > 1024 * 1024 * 512 {
+        progress: Option<&dyn Fn(u64, u64)>,
+    ) -> io::Result<u64> {
+        let mut in_file = match pack.get_file_wr(pack_path, false) {
+            Ok(v) => v,
+            Err(err) => {
+                error!("无法打开虚拟文件{:?}，将跳过，err:{err}", pack_path);
+                return Err(Error::other(err));
+            }
+        };
+
+        let file_len = match in_file.get_len() {
+            Ok(len) => len,
+            Err(err) => {
+                error!(
+                    r#"无法获取虚拟文件"{}"大小, err:{err}"#,
+                    pack_path.display()
+                );
+                return Err(Error::other(err));
+            }
+        };
+
+        if file_len > 512 * 1024 * 1024 {
             info!(
                 r#"正在从包文件虚拟路径"{}"复制大文件到"{}"，大小:{}[{}]"#,
-                this_pack_path.display(),
-                this_out_path.display(),
-                water_ball_tool::tools::bytes_len_to_string(metadata.len()),
-                metadata.len()
+                pack_path.display(),
+                out_path.display(),
+                water_ball_tool::tools::bytes_len_to_string(file_len),
+                file_len
             );
         }
-        if let Some(pb_c) = pb_c {
-            pb_c(
-                0,
-                1,
-                this_pack_path.display().to_string(),
-                this_out_path.display().to_string(),
+
+        let mut out_file = match File::create(out_path) {
+            Ok(f) => f,
+            Err(err) => {
+                error!("无法创建文件{:?},将跳过，err：{err}", out_path);
+                return Err(err);
+            }
+        };
+
+        if let Err(err) = out_file.set_len(file_len) {
+            warn!(
+                "无法对输出文件{:?}进行预分配空间，将继续, err:{err}",
+                out_path
             );
         }
-        //尝试打开虚拟文件
-        let mut in_file = match pack_man.get_file_wr(this_pack_path, false) {
-            Ok(file) => file,
-            Err(err) => {
-                error!("无法打开虚拟文件{this_pack_path:?}，将跳过，err:{err}");
-                return;
-            }
-        };
-        //尝试创建文件
-        let mut out_file = match File::create(this_out_path) {
-            Ok(file_wr) => file_wr,
-            Err(err) => {
-                error!("无法创建文件{this_out_path:?},将跳过，err：{err}");
-                return;
-            }
-        };
-        //分配空间
-        if let Err(err) = out_file.set_len(metadata.len()) {
-            warn!("无法对输出文件{this_out_path:?}进行预分配空间，将继续, err:{err}");
-        }
-        //写入操作
-        let mut write_len = 0;
-        while write_len < metadata.len() {
-            //读
+
+        let mut write_len = 0u64;
+        while write_len < file_len {
             match in_file.read(run_buf) {
                 Ok(this_read_len) => {
+                    if this_read_len == 0 {
+                        warn!("虚拟文件{:?}读取的大小为0, 将跳过。", pack_path);
+                        break;
+                    }
                     match out_file.write(&run_buf[..this_read_len]) {
                         Ok(this_write_len) => {
-                            if this_read_len == 0 {
-                                warn!("虚拟文件{this_pack_path:?}读取的大小为0, 将跳过。");
-                                break;
-                            }
                             if this_write_len != this_read_len {
                                 warn!(
-                                    "虚拟文件{this_pack_path:?}写入文件{this_out_path:?}大小不一致，读：{this_read_len}，写：{this_write_len}"
+                                    "虚拟文件{:?}写入文件{:?}大小不一致，读：{this_read_len}，写：{this_write_len}",
+                                    pack_path, out_path
                                 );
                             }
                             write_len += this_write_len as u64;
-                            //更新进度
-                            update_pb(
-                                pb_c,
-                                this_pack_path,
-                                this_out_path,
-                                &mut lase_up_pb_c_write_len,
-                                &mut write_len,
-                            );
+                            if let Some(progress) = progress {
+                                progress(write_len, file_len);
+                            }
                         }
                         Err(err) => {
-                            error!("写入文件{this_pack_path:?}错误, 将跳过，err:{err}");
+                            error!(
+                                "写入文件{:?}错误, 将跳过，err:{err}",
+                                pack_path
+                            );
                             break;
                         }
                     }
                 }
                 Err(err) => {
-                    error!("读取虚拟文件{this_pack_path:?}失败，将跳过，err:{err}");
+                    error!(
+                        "读取虚拟文件{:?}失败，将跳过，err:{err}",
+                        pack_path
+                    );
                     break;
                 }
             }
         }
-        //不论是否写入成功都对齐进度条
-        if let Some(pb_c) = pb_c {
-            pb_c(
-                metadata.len() - write_len,
-                0,
-                this_pack_path.display().to_string(),
-                this_out_path.display().to_string(),
-            );
-        }
+
+        Ok(write_len)
     }
-    //包文件哈希校验
+    /// 对整个包文件进行 BLAKE3 哈希完整性校验（边发现边校验）。
+    ///
+    /// 参数: `<包文件路径> [-t <线程数>]`
+    ///
+    /// 打开包文件后，所有线程共用一个工作队列。初始填入根路径名，每个线程
+    /// 从队列取路径，按需加载结构/元数据判定类型：
+    /// - 目录 → 子路径推回队列
+    /// - 文件 → BLAKE3 校验
+    ///
+    /// 不使用 `load_all_data` 预加载——结构和元数据均在遍历过程中按需加载。
+    /// 校验失败以 `warn` 日志输出，无 warn/error 即表示全部通过。
+    ///
+    /// Performs BLAKE3 hash integrity verification on the entire pack file
+    /// (discover-as-you-verify) using a unified work queue.
+    ///
+    /// Args: `<pack_path> [-t <thread_count>]`
+    ///
+    /// After opening the pack, all threads share one work queue seeded with root
+    /// paths. Each thread pops a path, resolves its type via on-demand struct/metadata
+    /// loading: directories have their children pushed back to the queue; files are
+    /// hash-verified. No `load_all_data` pre-loading — structures and metadata are
+    /// loaded on demand during traversal. Failures are reported as `warn` logs;
+    /// absence of any warn/error output indicates all files passed.
     fn wbfp_h(
         args: &WaterBallFilePackCommandsHashVerify,
         mp: Option<&MultiProgress>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        //包文件路径
-        let pack_path = &args.pack_path;
+        use std::thread;
 
-        //进度条
-        let pb = create_pb(mp);
+        let pack_path = &args.pack_path;
+        let thread_count = args.thread_count.unwrap_or_else(|| {
+            thread::available_parallelism()
+                .unwrap_or(NonZero::new(8).unwrap())
+                .get()
+        });
+
         info!("开始准备哈希校验");
         info!("打开包文件");
         let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
-        //逻辑实现=== ===
         info!("开始哈希校验");
-        Self::verify_hash(&mut pack, pb.as_ref()).unwrap();
+        Self::verify_hash(&mut pack, mp, thread_count).unwrap();
         info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");
         Ok(())
     }
 
-    fn verify_hash(pack: &mut Allocator, pb: Option<&ProgressBar>) -> io::Result<()> {
-        info!("加载所有结构项和元数据");
-        pack.load_all_data(false)?;
-        info!("加载完成");
+    /// 使用统一工作队列进行多线程并发哈希校验（边发现边校验）。
+    ///
+    /// 所有线程共用一个工作队列，初始填入根路径名。每个线程从队列取路径，
+    /// 通过 `get_pack_struct_item` 判定文件/目录类型（元数据按需加载）：
+    /// - 目录 → 将子路径推回队列，唤醒其他线程参与遍历
+    /// - 文件 → 调用 `verify_hash()` 校验并通过 mpsc 报告结果
+    ///
+    /// 使用 `AtomicUsize` 待处理计数控制终止：初始为根路径数，每推进一个子项递增，
+    /// 每处理完一个项（目录展开或文件校验）递减。归零时所有线程退出。
+    ///
+    /// 不使用 `load_all_data`——所有结构和元数据均按需加载，实现真正的
+    /// 边发现边校验。
+    ///
+    /// Multi-threaded hash verification using a unified work queue
+    /// (discover-as-you-verify).
+    ///
+    /// All threads share one work queue seeded with root path names. Each thread
+    /// pops a path and determines file/directory type via `get_pack_struct_item`
+    /// (metadata loaded on demand):
+    /// - Directory → pushes children back to the queue, wakes other threads
+    /// - File → calls `verify_hash()` and reports result via mpsc
+    ///
+    /// An `AtomicUsize` pending counter controls termination: initialized to the
+    /// number of root entries, incremented when children are pushed, decremented
+    /// when each item (dir expansion or file verify) completes. All threads exit
+    /// when the counter reaches zero.
+    ///
+    /// No `load_all_data` — all structures and metadata are loaded on demand,
+    /// achieving true discover-as-you-verify concurrency.
+    fn verify_hash(
+        pack: &mut Allocator,
+        mp: Option<&MultiProgress>,
+        thread_count: usize,
+    ) -> io::Result<()> {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::thread;
+
         let root_name_list = pack.get_root_struct_item_name_list()?;
-        let mut this_all_write_len = 0;
-        let mut this_all_write_file_count = 0;
         let attribute = pack.get_manifest_attribute()?;
         let all_file_count = attribute.file_count();
         let data_len = attribute.data_len();
 
-        //设置进度条样式
-        set_pb_style2(pb, data_len);
-        let mut binding = |add_len, add_file_count, p_path| {
-            this_all_write_len += add_len;
-            this_all_write_file_count += add_file_count;
-            if let Some(pb) = pb {
-                pb.set_position(this_all_write_len);
-                let percent = ((this_all_write_len as f64) / (data_len as f64)) * 100.0;
-                pb.set_message(format!(
-                    "[{percent:>6.2}%][{this_all_write_file_count}/{all_file_count}个文件] \
-                \nPack path: {p_path}"
-                ));
-            }
-        };
+        // 挂起时 spinner 模板 / Spinner template when suspended
+        const SPINNER_TEMPLATE: &str = "{prefix}{spinner:.green} {msg}";
 
-        for root_name in root_name_list {
-            let _ = Self::verify_hash_inner(
-                pack,
-                root_name.as_ref(),
-                if pb.is_some() {
-                    Some(&mut binding)
-                } else {
-                    None
-                },
+        // 总进度条 / Main progress bar
+        let main_pb = create_pb(mp);
+        if let Some(pb) = &main_pb {
+            pb.set_length(data_len);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .unwrap()
+                    .progress_chars("=>-"),
             );
+            pb.set_prefix("哈希校验");
         }
-        Ok(())
-    }
 
-    fn verify_hash_inner<'a>(
-        pack: &mut Allocator,
-        path: &Path,
-        mut pb_c: Option<&'a mut (dyn FnMut(u64, u64, String) + 'a)>,
-    ) -> io::Result<Option<&'a mut dyn FnMut(u64, u64, String)>> {
-        let item = match pack.get_pack_struct_item(path) {
-            Ok(v) => v,
-            Err(err) => {
-                error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
-                return Ok(pb_c);
-            }
-        };
-        match item.item_type() {
-            PackStructItemType::Dir { .. } => {
-                let items_name = match pack.get_struct_item_name_list(path) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        error!(
-                            r#"无法获取虚拟路径"{}"的结构项名称, err:{err}"#,
-                            path.display()
-                        );
-                        return Ok(pb_c);
-                    }
-                };
-                let mut pb_c = pb_c;
-                for name in items_name {
-                    pb_c = Self::verify_hash_inner(pack, &path.join(name), pb_c)?;
-                }
-                Ok(pb_c)
-            }
-            PackStructItemType::File { .. } => {
-                let mut rw = match pack.get_file_wr(path, false) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        error!("无法获取包文件读写器，err: {err}");
-                        return Ok(pb_c);
-                    }
-                };
-                match rw.verify_hash() {
-                    Ok(false) => {
-                        warn!(r#"虚拟文件"{}"哈希验证失败"#, path.display());
-                    }
-                    Err(err) => warn!(
-                        r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#,
-                        path.display()
-                    ),
-                    _ => (),
-                }
-                if let Some(pb) = &mut pb_c {
-                    pb(rw.get_len()?, 1, path.display().to_string());
-                }
-                Ok(pb_c)
+        // 统一工作队列 + 终止控制
+        // Unified work queue + termination control
+        let queue: Arc<(Mutex<VecDeque<PathBuf>>, Condvar)> =
+            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
+        let all_done = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut q = queue.0.lock().unwrap();
+            for name in &root_name_list {
+                q.push_back(PathBuf::from(name));
             }
         }
+
+        // 创建子线程进度条 / Create per-worker progress bars
+        let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
+        for i in 0..thread_count {
+            let pb = create_pb(mp);
+            if let Some(pb) = &pb {
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                        .unwrap()
+                        .progress_chars("=>-"),
+                );
+                pb.set_prefix(format!("[线程{i}] "));
+            }
+            worker_pbs.push(pb);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let mut handles = Vec::with_capacity(thread_count);
+
+        for _ in 0..thread_count {
+            let mut pack = pack.clone();
+            let queue = queue.clone();
+            let pending = pending.clone();
+            let all_done = all_done.clone();
+            let tx = tx.clone();
+            let w_pb = worker_pbs.pop().unwrap();
+
+            handles.push(thread::spawn(move || -> io::Result<()> {
+
+                loop {
+                    // 1. 从队列取路径（空队列时 Condvar 挂起）
+                    //    Pop path from queue (Condvar suspend when empty)
+                    let path = {
+                        let (lock, cvar) = &*queue;
+                        let mut q = lock.lock().unwrap();
+                        loop {
+                            if let Some(p) = q.pop_front() {
+                                break p;
+                            }
+                            if all_done.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            if let Some(pb) = &w_pb {
+                                pb.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template(SPINNER_TEMPLATE)
+                                        .unwrap(),
+                                );
+                                pb.set_message("已挂起");
+                            }
+                            q = cvar.wait(q).unwrap();
+                            if let Some(pb) = &w_pb {
+                                pb.set_style(
+                                    ProgressStyle::default_bar()
+                                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                                        .unwrap()
+                                        .progress_chars("=>-"),
+                                );
+                            }
+                        }
+                    };
+
+                    // 2. 判定路径类型（按需加载目录结构或文件元数据）
+                    //    Determine path type (lazy-load dir struct or file metadata)
+                    let item = match pack.get_pack_struct_item(&path) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
+                            continue;
+                        }
+                    };
+
+                    match item.item_type() {
+                        PackStructItemType::Dir { .. } => {
+                            // 展开目录：获取子项并推入队列
+                            // Expand directory: get children and push to queue
+                            let children =
+                                match pack.get_struct_item_name_list(&path) {
+                                    Ok(v) => v,
+                                    Err(err) => {
+                                        error!(
+                                            r#"无法获取虚拟路径"{}"的子项名称, err:{err}"#,
+                                            path.display()
+                                        );
+                                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                            all_done.store(true, Ordering::SeqCst);
+                                            queue.1.notify_all();
+                                        }
+                                        continue;
+                                    }
+                                };
+
+                            let n = children.len();
+                            if n > 0 {
+                                pending.fetch_add(n, Ordering::SeqCst);
+                                let mut q = queue.0.lock().unwrap();
+                                for child in children {
+                                    q.push_back(path.join(child));
+                                }
+                                // 唤醒所有等待线程 / Wake all waiting threads
+                                queue.1.notify_all();
+                            }
+                            // 目录自身处理完毕 / Directory itself resolved
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
+                        }
+                        PackStructItemType::File { .. } => {
+                            let mut rw = match pack.get_file_wr(&path, false) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    error!("无法获取包文件读写器，err: {err}");
+                                    let _ = tx.send((
+                                        path.display().to_string(),
+                                        0u64,
+                                        None,
+                                    ));
+                                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                        all_done.store(true, Ordering::SeqCst);
+                                        queue.1.notify_all();
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            let file_len = match rw.get_len() {
+                                Ok(len) => len,
+                                Err(err) => {
+                                    error!(
+                                        r#"无法获取虚拟文件"{}"大小, err:{err}"#,
+                                        path.display()
+                                    );
+                                    let _ = tx.send((
+                                        path.display().to_string(),
+                                        0u64,
+                                        None,
+                                    ));
+                                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                        all_done.store(true, Ordering::SeqCst);
+                                        queue.1.notify_all();
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            let path_str = path.display().to_string();
+                            let result = match rw.verify_hash(Some(&|done, total| {
+                                if let Some(pb) = &w_pb {
+                                    pb.set_length(total);
+                                    pb.set_position(done);
+                                    pb.set_message(format!("File path: {}", path_str));
+                                }
+                            })) {
+                                Ok(true) => Some(true),
+                                Ok(false) => {
+                                    warn!(
+                                        r#"虚拟文件"{}"哈希验证失败"#,
+                                        path.display()
+                                    );
+                                    Some(false)
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#,
+                                        path.display()
+                                    );
+                                    None
+                                }
+                            };
+
+                            let _ = tx.send((
+                                path.display().to_string(),
+                                file_len,
+                                result,
+                            ));
+                            // 文件处理完毕 / File resolved
+                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                all_done.store(true, Ordering::SeqCst);
+                                queue.1.notify_all();
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        drop(tx);
+
+        // 主线程：汇总进度条和结果 / Main thread: aggregate progress + results
+        let mut verified_len = 0u64;
+        let mut verified_count = 0u64;
+        let mut last_pb_update_len = 0u64;
+
+        for (path_str, file_len, result) in rx {
+            verified_len += file_len;
+            verified_count += 1;
+
+            // 限频更新：每 10 MiB 更新一次
+            // Rate-limit main bar: update every 10 MiB
+            if verified_len - last_pb_update_len >= 10 * 1024 * 1024 {
+                if let Some(pb) = &main_pb {
+                    pb.set_position(verified_len);
+                    pb.set_message(format!(
+                        "[{verified_count}/{all_file_count}个文件] \
+                    \nPack path: {path_str}"
+                    ));
+                }
+                last_pb_update_len = verified_len;
+            }
+
+            if let Some(ok) = result
+                && !ok
+            {
+                warn!("文件 \"{path_str}\" 哈希校验未通过");
+            }
+        }
+
+        for h in handles {
+            h.join().unwrap()?;
+        }
+
+        Ok(())
     }
 }

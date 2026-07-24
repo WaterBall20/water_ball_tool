@@ -56,7 +56,7 @@ water_ball_tool ff /path/to/dir output.json -s
 water_ball_tool wbfp p ./src my.pack
 
 # 不分离清单（所有数据在单个 .pack 文件中）
-water_ball_tool wbfp p ./src my.pack -s
+water_ball_tool wbfp p ./src my.pack -n
 ```
 
 ### 解包 `wbfp u`

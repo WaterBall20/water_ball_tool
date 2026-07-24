@@ -756,7 +756,7 @@ wbfp_p (command/wbfp.rs)
   │        │    └─ write_pack(): per-thread independent progress bar / 每线程独立进度条
   │        └─ Main thread aggregates progress (total bytes + file count) / 主线程聚合进度
   │
-  └─ Exit: MBFPManager.drop() → save_all() auto-persists / 自动持久化
+  └─ Exit: WBFPManager.drop() → save_all() auto-persists / 自动持久化
 ```
 
 ### 7.13 Unpack Flow

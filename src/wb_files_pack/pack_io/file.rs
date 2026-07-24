@@ -76,10 +76,10 @@ impl PackFileWR {
     /// Verify the integrity hash of the file data.
     ///
     /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
-    pub fn verify_hash(&mut self) -> Result<bool> {
+    pub fn verify_hash(&mut self, progress: Option<&dyn Fn(u64, u64)>) -> Result<bool> {
         let handle = self.handle.clone();
         let mut handle = handle.lock().expect("无法获得文件句柄锁");
-        handle.verify_hash()
+        handle.verify_hash(progress)
     }
     fn add_pos_i64(&mut self, pos: i64) {
         match pos {
