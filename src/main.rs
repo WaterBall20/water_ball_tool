@@ -1,11 +1,12 @@
 use crate::command::Cli;
 use clap::Parser;
 use indicatif::MultiProgress;
-use std::io;
+use std::{io};
 use std::io::Write;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
+use tracing::{error};
 
 mod command;
 
@@ -15,7 +16,10 @@ fn main() {
     let mp = MultiProgress::new();
     init_global_logging(&mp);
 
-    command::cli(cli, Option::from(&mp))
+    let result = command::cli(cli, Option::from(&mp));
+    if let Err(err) = result {
+        error!("运行时发生错误， err: {}", err);
+    }
 }
 
 /// 创建一个包装类，让 MultiProgress 兼容 Write trait。

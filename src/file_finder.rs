@@ -181,6 +181,15 @@ impl FileInfo {
     pub fn file_kind(&self) -> &FileKind {
         &self.file_kind
     }
+
+    pub fn new(name: String, length: u64, modified_time: u128, file_kind: FileKind) -> Self {
+        Self {
+            name,
+            length,
+            modified_time,
+            file_kind
+        }
+    }
 }
 
 /// 目录专属信息 / Directory-specific information
@@ -258,7 +267,7 @@ impl FileFinder {
     ///
     /// 返回自 UNIX 纪元以来的毫秒数。如果无法获取则返回 0。
     /// Returns milliseconds since UNIX epoch. Returns 0 if unavailable.
-    fn get_file_modified(metadata: &Metadata) -> u128 {
+    pub fn get_file_modified(metadata: &Metadata) -> u128 {
         metadata
             .modified()
             .ok()

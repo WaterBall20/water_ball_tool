@@ -3,6 +3,7 @@
 */
 use crate::command::ff::FileFinderArgs;
 use crate::command::wbfp::WaterBallFilePackArgs;
+use clap::error::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -79,7 +80,7 @@ fn update_pb(
     }
 }
 
-pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) {
+pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn std::error::Error>>{
     match cli.command {
         Commands::Ff(ff) => ff::ff(ff, mp),
         Commands::Wbfp(wbfp) => wbfp::wbfp(wbfp, mp),

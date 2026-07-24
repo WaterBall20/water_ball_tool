@@ -1,6 +1,8 @@
 #[cfg(test)]
 use std::fs;
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+};
 
 //内部路径工具
 pub struct PathTool;
@@ -31,6 +33,22 @@ impl PathTool {
             }
         }
         path_list
+    }
+
+    /// 去除路径的前部部分，变成相对路径
+    pub fn path_remove_head<P: AsRef<Path>>(path: P, head: P) -> Option<PathBuf> {
+        let head_vec = PathTool::path_to_string_vec(head);
+        let path_vec = PathTool::path_to_string_vec(path);
+        let mut new_path = PathBuf::new();
+
+        if path_vec > head_vec {
+            for name in &path_vec[head_vec.len()..] {
+                new_path = new_path.join(name);
+            }
+            Some(new_path)
+        } else {
+            None
+        }
     }
 }
 

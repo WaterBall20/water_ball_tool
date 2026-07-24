@@ -1,10 +1,11 @@
 use crate::command::create_pb;
 use clap::Args;
+use clap::error::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc;
-use std::{io, thread};
+use std::{error, io, thread};
 use tracing::{error, info};
 use water_ball_tool::file_finder::{FileFinder, FilesList};
 
@@ -33,7 +34,7 @@ impl FileFinderArgs {
 /// 文件查找器——多线程扫描目录并输出 JSON 文件列表。
 ///
 /// File finder — multi-threaded directory scanner that outputs a JSON file list.
-pub fn ff(args: FileFinderArgs, mp: Option<&MultiProgress>) {
+pub fn ff(args: FileFinderArgs, mp: Option<&MultiProgress>) -> Result<(),Box<dyn error::Error>> {
     //进度条
     let pb = create_pb(mp);
 
@@ -48,13 +49,16 @@ pub fn ff(args: FileFinderArgs, mp: Option<&MultiProgress>) {
                 let data = serde_json::to_vec_pretty(&files_list).expect("数据转换错误");
                 f.write_all(&data).expect("保存到文件错误");
                 info!(r#"搜索结果已输出到文件: "{out_path}""#);
+                Ok(())
             }
             Err(err) => {
-                error!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#)
+                error!(r#"无法打开输出文件: "{out_path}" , Error: '{err}'"#);
+                Err(err)?
             }
         }
     } else {
         info!("搜索结果：{files_list:?}");
+        Ok(())
     } /**/
 }
 
