@@ -107,6 +107,7 @@ fn wbfp_create_new_pack_m() {
                 Some(out_file_path.clone()),
                 false,
                 None,
+                true,
             ),
         )),
         Some(&mp),
@@ -132,7 +133,7 @@ fn wbfp_create_new_pack_m_longtime() {
     let path = String::from("/usr/lib/");
     wbfp(
         WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
-            WaterBallFilePackCommandsPack::new(path, Some(out_file_path.clone()), false, None),
+            WaterBallFilePackCommandsPack::new(path, Some(out_file_path.clone()), false, None, true),
         )),
         Some(&mp),
     );
@@ -157,6 +158,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
                 Some(out_file_path.clone()),
                 true,
                 None,
+                true
             ),
         )),
         Some(&mp),
@@ -218,6 +220,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() {
                     Some(out_file_path.clone()),
                     true,
                     None,
+                    true
                 ),
             )),
             Some(&mp),
@@ -314,6 +317,7 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
                 Some(out_file_path.clone()),
                 false,
                 None,
+                true
             ),
         )),
         Some(&mp),

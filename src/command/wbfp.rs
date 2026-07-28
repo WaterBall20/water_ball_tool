@@ -238,14 +238,18 @@ impl WaterBallFilePackArgsRuning {
         let wb_pb = create_pb(mp).map(|pb| Arc::new(Mutex::new(pb)));
 
         info!("开始准备打包");
-        info!("创建新包文件并初始化");
 
         let data_len = Arc::new(Mutex::new(0));
 
         let mut pack = {
             if pack_path.exists() {
+                info!("包文件已存在，将打开并修改");
+                if write_optimization {
+                    info!("已启用写入优化，未更改的文件将跳过");
+                }
                 Allocator::open_pack_file(&pack_path).expect("打开包文件错误")
             } else {
+                info!("创建新包文件并初始化");
                 Allocator::create_new_pack_file(&pack_path, false, separate_manifest).expect(
                     "创建包文件错误"
                 )
@@ -657,11 +661,23 @@ impl WaterBallFilePackArgsRuning {
                 //尝试打开文件
                 match pack_man.open_file(this_pack_path, false) {
                     Ok(mut v) => {
-                        //基于修改时间简单的写入优化判断
+                        //基于检查修改时间和大小，简单的写入优化判断
                         if
                             write_optimization &&
-                            v.get_modified().unwrap_or(0) == info.modified_time()
+                            (v.get_modified().unwrap_or(0) == info.modified_time() ||
+                                v.get_len().unwrap_or(0) == info.length())
                         {
+                            update_pb(
+                                info.length(),
+                                info.length(),
+                                info,
+                                this_in_path,
+                                this_pack_path
+                            );
+                            //更新总进度条
+                            if let Some(main_pb_tx) = main_pb_tx {
+                                let _ = main_pb_tx.send((0, info.length()));
+                            }
                             return;
                         }
                         if let Err(err) = v.set_len(info.length()) {
