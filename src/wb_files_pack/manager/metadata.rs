@@ -35,6 +35,9 @@ impl WBFPManager {
                             pack_struct,
                             metadata,
                         )?;
+                        if r.unlocked_occurred {
+                            self.manifest.root_struct_mut().dec_child_locked_count();
+                        }
                         let (new_pos, pos) = self.save_pack_struct_write(pack_struct)?;
                         if new_pos {
                             *struct_file_pos = pos;
@@ -54,6 +57,7 @@ impl WBFPManager {
                             struct_item.set_metadata_file_pos(pos);
                         }
                         struct_item.metadata_mut().unlock(metadata);
+                        self.manifest.root_struct_mut().dec_child_locked_count();
                         if let PackStructItemType::File { handle } = struct_item.item_type_mut() {
                             *handle = None;
                         }
@@ -113,6 +117,7 @@ impl WBFPManager {
     ) -> Result<DirFileAddReturn> {
         if let Some(name) = path_list.next() {
             let this_path = s_path.join(&name);
+            let mut needs_dec_child_locked = false; // 延迟到 item 借用结束后执行 / Deferred until after item borrow ends
             if let Some(item) = pack_struct.get_item_mut(&name) {
                 let r = ({
                     let r = (match item.item_type_mut() {
@@ -127,6 +132,9 @@ impl WBFPManager {
                                     pack_struct,
                                     metadata,
                                 )?;
+                                if r.unlocked_occurred {
+                                    pack_struct.dec_child_locked_count();
+                                }
                                 let (new_pos, pos) = self.save_pack_struct_write(pack_struct)?;
                                 if new_pos {
                                     *struct_file_pos = pos;
@@ -146,10 +154,13 @@ impl WBFPManager {
                                 if let PackStructItemType::File { handle } = item.item_type_mut() {
                                     *handle = None;
                                 }
+                                // 标记需要解锁后减少子项锁定计数 / Mark for deferred child locked count decrement
+                                needs_dec_child_locked = true;
                                 Ok(DirFileAddReturn {
                                     length: 0,
                                     file_count: 0,
                                     dir_count: 0,
+                                    unlocked_occurred: true,
                                 })
                             } else {
                                 Err(
@@ -167,6 +178,9 @@ impl WBFPManager {
                     Ok::<_, PackFileError>(r)
                 })?;
                 pack_struct.mark_dirty();
+                if needs_dec_child_locked {
+                    pack_struct.dec_child_locked_count();
+                }
                 Ok(r)
             } else if path_list.next().is_none() {
                 let (_, metadata_file_pos) = self
@@ -190,6 +204,7 @@ impl WBFPManager {
                     length: len,
                     file_count: 1,
                     dir_count: 0,
+                    unlocked_occurred: false,
                 })
             } else {
                 Err(
@@ -243,21 +258,29 @@ impl WBFPManager {
                             )
                         )?
                     } else {
-                        self.create_or_get_handle_for_item(
+                        let (handle, new_lock) = self.create_or_get_handle_for_item(
                             &mut pack_struct_item,
                             path_list,
                             &PathBuf::from(two_name),
                             end_pos,
                             manager_arc,
                             pack_io,
-                        )?
+                        )?;
+                        if new_lock {
+                            self.manifest.root_struct_mut().inc_child_locked_count();
+                        }
+                        (handle, false)
                     }
                 }
             };
+            let (handle, new_lock) = r;
+            if new_lock {
+                self.manifest.root_struct_mut().inc_child_locked_count();
+            }
             self.manifest
                 .root_struct_mut()
                 .add_item(two_name.clone(), pack_struct_item);
-            r
+            handle
         } else {
             Err(PackFileError::NotFound("文件或目录不存在".into()))?
         };
@@ -273,7 +296,7 @@ impl WBFPManager {
         end_pos: bool,
         manager_arc: &Arc<Mutex<WBFPManager>>,
         pack_io: &Arc<Mutex<PackIO>>,
-    ) -> Result<Arc<Mutex<PackFileHandle>>> {
+    ) -> Result<(Arc<Mutex<PackFileHandle>>, bool)> {
         if let Some(name) = path_list.next() {
             let this_path = s_path.join(name);
             if let Some(item) = pack_struct.get_item_mut(name) {
@@ -283,7 +306,7 @@ impl WBFPManager {
                             *sub_ps = Some(self.load_pack_struct(*struct_file_pos)?);
                         }
                         if let Some(pack_struct) = sub_ps {
-                            self.get_or_create_file_handle_inner(
+                            let (handle, new_lock) = self.get_or_create_file_handle_inner(
                                 path_list,
                                 &this_path,
                                 pack_struct,
@@ -291,7 +314,11 @@ impl WBFPManager {
                                 end_pos,
                                 manager_arc,
                                 pack_io,
-                            )
+                            )?;
+                            if new_lock {
+                                pack_struct.inc_child_locked_count();
+                            }
+                            Ok((handle, new_lock))
                         } else {
                             panic!("逻辑错误")
                         }
@@ -338,14 +365,14 @@ impl WBFPManager {
         end_pos: bool,
         manager_arc: &Arc<Mutex<WBFPManager>>,
         pack_io: &Arc<Mutex<PackIO>>,
-    ) -> Result<Arc<Mutex<PackFileHandle>>> {
+    ) -> Result<(Arc<Mutex<PackFileHandle>>, bool)> {
         let existing = if let PackStructItemType::File { handle } = item.item_type_mut() {
             handle.as_ref().and_then(|w| w.upgrade())
         } else {
             None
         };
         if let Some(arc) = existing {
-            return Ok(arc);
+            return Ok((arc, false));
         }
         self.load_metadata_to_item(this_path, item)?;
         let metadata = item.metadata_mut().try_lock()?;
@@ -360,6 +387,6 @@ impl WBFPManager {
         if let PackStructItemType::File { handle } = item.item_type_mut() {
             *handle = Some(Arc::downgrade(&arc));
         }
-        Ok(arc)
+        Ok((arc, true))
     }
 }

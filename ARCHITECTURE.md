@@ -85,6 +85,7 @@ main.rs (binary)
         │   │   ├── metadata.rs     ← file handle creation + metadata update / 文件句柄与元数据更新
         │   │   ├── lock.rs         ← process-level write lock / 进程写锁
         │   │   ├── gc.rs           ← GC orchestration / 垃圾回收调度
+        │   │   ├── delete.rs       ← virtual file/dir delete + erase / 虚拟文件与目录删除/擦除
         │   │   └── test.rs         ← internal API tests / 内部 API 测试
         │   ├── allocator.rs        ← public API layer (Arc<Mutex<>>) / 公共 API 层
         │   │   └── test.rs         ← public API tests / 公共 API 测试
@@ -327,7 +328,7 @@ Parallel scan produces a flat `HashMap<PathBuf, FileInfo>`. `build_tree()` recon
 
 > 水球包文件
 
-**Files**: `src/wb_files_pack/*.rs` (~4,500+ lines total) / 约 4,500+ 行
+**Files**: `src/wb_files_pack/*.rs` (~6,000+ lines total) / 约 6,000+ 行
 
 ### 7.1 Overall Architecture
 
@@ -617,7 +618,7 @@ Flow / 流程:
 
 > 公共 API 层
 
-**File**: `src/wb_files_pack/allocator.rs` (438 lines)
+| **File**: `src/wb_files_pack/allocator.rs` (438 lines)
 
 `Allocator` is the thread-safe wrapper around `WBFPManager` + `PackIO`:
 
@@ -641,7 +642,20 @@ pub struct Allocator {
 | **Open** | `open_pack_file` | Open existing pack | 打开已有包 |
 | **Read** | `get_manifest_attribute` / `get_root_struct_items` / `get_dir` / `load_all_data` | | 读取各类信息 |
 | **Write** | `create_dir_all` / `create_file` / `create_file_auto_sized` / `create_file_raw` / `open_file` / `get_file_wr` | | 创建与写入 |
+| **Delete** | `delete_file` / `delete_dir_all` | Remove metadata + structure, GC data blocks (no overwrite) | 删除元数据和结构，数据块回收不覆写 |
+| **Erase** | `erase_file(strategy)` / `erase_dir_all(strategy)` | Overwrite data + manifest blocks → GC → remove | 覆写数据块和清单块 → 回收 → 删除 |
 | **Verify** | `verify_all_file_hash` | Recursively hash-verify all files | 递归校验所有文件哈希 |
+
+**Overwrite strategies** / 覆写策略:
+
+| Strategy | Passes | Description | 描述 |
+|---|---|---|---|
+| `Zero` | 1 | Single pass of 0x00 | 单次 0x00 覆写 |
+| `Random` | 1 | Single pass of random bytes | 单次随机字节覆写 |
+| `Dod5220` | 3 | DoD 5220.22-M: 0x00 → 0xFF → random (each pass written to disk) | 三次独立磁盘覆写 |
+
+> `child_locked_count` on `PackStruct` tracks how many descendant files have active write handles. A directory can only be deleted/erased when `child_locked_count == 0`.
+> `PackStruct.child_locked_count` 字段追踪后代有多少文件持有活跃写入句柄。仅当计数为 0 时才可删除/擦除该目录。
 
 **Design notes** / 设计说明:
 
@@ -906,7 +920,7 @@ tracing subscriber
 | `file_finder/test.rs` | Unit | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream | 符号链接各场景 |
 | `wb_files_pack/test.rs` | Module | Pack file create, read/write, verify | 包文件创建与校验 |
 | `wb_files_pack/manager/test.rs` | Internal API | Manager internal logic | 管理器内部逻辑 |
-| `wb_files_pack/allocator/test.rs` | Public API | Allocator external interface | 外部接口测试 |
+| `wb_files_pack/allocator/test.rs` | Public API | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access | 删除/擦除（11 项测试）、文件创建读写、COW、哈希校验、多线程访问 |
 
 **Testing conventions** / 测试约定:
 
@@ -948,6 +962,9 @@ tracing subscriber
 | PID lock file + sysinfo | More reliable than pure file locks; detects stale locks | 比纯文件锁更可靠，可检测残留锁 |
 | `Arc<Mutex<>>` instead of Actor model | Simpler implementation; direct state sharing, no message passing | 简化实现，直接状态共享 |
 | PackFileHandle commits on Drop | Guarantees persistence even if caller forgets to close | 确保调用方即使忘记关闭也不会丢数据 |
+| `child_locked_count` per PackStruct | Directory safety: inc on file handle creation, dec on unlock; delete/erase blocked when > 0 | 目录安全检查：创建文件句柄时递增，解锁时递减；计数>0 时阻止删除/擦除 |
+| Delete vs Erase as separate APIs | Delete is fast (metadata-only I/O, GC data without overwrite); Erase overwrites every byte on disk before removal | 删除快速（仅元数据 I/O，不覆写数据）；擦除在移除前覆写磁盘上所有字节 |
+| DoD 5220 writes each pass to disk | All three passes (0x00, 0xFF, random) perform independent disk writes — not just in-memory buffer churn | 三次覆写全部独立写入磁盘，非仅在内存中操作缓冲区 |
 
 ### Overall / 总体
 

@@ -38,10 +38,13 @@ static BUF_LEN: usize = 1024 * 1024;
 
 /// 搜索进度条样式模板 / Search progress bar style template
 const PROGRESS_STYLE_TEMPLATE: &str =
-    "{spinner:.green} [{elapsed_precise}({eta})] [{bar:40.cyan/blue}] {msg:>7}";
+    "{spinner:.green} [{bar:40.cyan/blue}] [{elapsed_precise}] {msg}";
 
 /// 打包进度条样式模板 / Pack progress bar style template
-const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix}{spinner:.green} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta})] {percent:>6.2}% {bytes:>11}/{total_bytes:>11} \n {msg}";
+const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta:>4})] {percent_precise:>7}% {bytes:>11}/{total_bytes:>11} \n {msg}";
+
+// 挂起时 spinner 模板 / Spinner template when suspended
+const SPINNER_TEMPLATE: &str = "{spinner:.blue} {prefix:<8} {msg}";
 
 /// 创建并注册一个进度条实例到 `MultiProgress` 中。
 ///
@@ -113,7 +116,7 @@ fn update_pb(
     }
 }
 
-pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn std::error::Error>>{
+pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Ff(ff) => ff::ff(ff, mp),
         Commands::Wbfp(wbfp) => wbfp::wbfp(wbfp, mp),

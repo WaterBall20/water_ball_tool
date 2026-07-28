@@ -91,6 +91,7 @@ impl WBFPManager {
                     length: 0,
                     file_count: 0,
                     dir_count: 0,
+                    unlocked_occurred: false,
                 },
             )
         } else {
@@ -99,7 +100,8 @@ impl WBFPManager {
                 DirFileAddReturn {
                     length: 0,
                     file_count: 0,
-                    dir_count: 1,
+                      dir_count: 1,
+                    unlocked_occurred: false,
                 },
             )
         };
@@ -221,7 +223,8 @@ impl WBFPManager {
                 Ok(DirFileAddReturn {
                     dir_count: r.dir_count,
                     file_count: r.file_count,
-                    length: r.length,
+                      length: r.length,
+                    unlocked_occurred: false,
                 })
             } else {
                 let mut item = PackStructItem::new_empty_dir(
@@ -253,15 +256,17 @@ impl WBFPManager {
                 Ok(DirFileAddReturn {
                     length: r.length,
                     file_count: r.file_count,
-                    dir_count: r.dir_count + 1,
+                      dir_count: r.dir_count + 1,
+                    unlocked_occurred: false,
                 })
             }
         } else {
             Ok(DirFileAddReturn {
                 length: 0,
                 file_count: 0,
-                dir_count: 0,
-            })
+                      dir_count: 0,
+                    unlocked_occurred: false,
+                })
         }
     }
 }

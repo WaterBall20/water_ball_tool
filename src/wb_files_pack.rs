@@ -19,6 +19,7 @@ pub use error::{ PackFileError, Result };
 pub use data::{
     Attribute,
     DataPosList,
+    OverwriteStrategy,
     PackFileMetadata,
     PackFileMetadataRun,
     PackFileMetadataType,

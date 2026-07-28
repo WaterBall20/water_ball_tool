@@ -19,7 +19,7 @@ impl WBFPManager {
         Ok(pack_file.get_file_pos(length))
     }
 
-    fn _file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> Result<()> {
+    pub(crate) fn _file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> Result<()> {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()

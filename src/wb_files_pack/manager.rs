@@ -76,6 +76,8 @@ pub(crate) struct DirFileAddReturn {
     pub(crate) length: u64,
     pub(crate) file_count: u64,
     pub(crate) dir_count: u64,
+    /// 本次操作中是否发生了元数据解锁 / Whether a metadata unlock occurred in this operation
+    pub(crate) unlocked_occurred: bool,
 }
 
 pub(crate) enum PackLockType {
@@ -92,6 +94,7 @@ pub(crate) struct PackLockInfo {
     pub(crate) file_lock_pid_run: Option<bool>,
 }
 
+mod delete;
 mod file_ops;
 mod gc;
 mod lock;

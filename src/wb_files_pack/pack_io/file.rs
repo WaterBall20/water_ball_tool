@@ -33,9 +33,11 @@ impl PackFileWR {
     /// Returns the total length of this virtual file in bytes.
     //获取大小
     pub fn get_len(&self) -> Result<u64> {
-        let handle = self.handle.clone();
-        let handle = handle.lock().expect("无法获得文件句柄锁");
-        Ok(handle.get_len())
+        Ok(self.handle.lock().expect("无法获得文件句柄锁").get_len())
+    }
+
+    pub fn get_modified(&self) -> Result<u128> {
+        Ok(self.handle.lock().expect("无法获得文件句柄锁").get_modified())
     }
 
     /// 设置虚拟文件的大小。
@@ -51,6 +53,12 @@ impl PackFileWR {
         let handle = self.handle.clone();
         let mut handle = handle.lock().expect("无法获得文件句柄锁");
         handle.set_len(len)?;
+        Ok(())
+    }
+
+    pub fn set_modified(&mut self, modified: u128) -> Result<()> {
+        let mut handle = self.handle.lock().expect("无法获得文件句柄锁");
+        handle.set_modified(modified);
         Ok(())
     }
 

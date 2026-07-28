@@ -83,6 +83,7 @@ water_ball_tool wbfp h my.pack
 | **BLAKE3 哈希** | 文件数据完整性校验                   |
 | **增量保存**      | 跟踪 dirty 标记，仅写入变更部分         |
 | **垃圾回收**      | 自动合并相邻空闲块，复用释放空间            |
+| **虚拟文件增删**   | `create_dir_all`/`create_file` 创建，`delete_file`/`delete_dir_all`/`erase_file`/`erase_dir_all` 删除/擦除：删除仅移除元数据（数据块回收不覆写），擦除先覆写至磁盘再移除（支持 Zero/Random/DoD 5220 策略） |
 | **渐进式保存**     | 每写入一些数据或一些文件后再自动保存一次        |
 | **进程写锁**      | `.lock` 文件 + PID 实现进程级互斥    |
 | **清单分离**      | 可选将索引数据分离为 `.wbm` 文件        |
@@ -109,8 +110,10 @@ src/
 ├── wb_files_pack.rs    # 水球包文件模块入口 / Water Ball Files Pack module entry
 ├── wb_files_pack/
 │   ├── data.rs         # 核心数据结构（Attribute/PackStruct/ManifestDataBlock 等）
-│   ├── manager.rs      # 包文件管理器（创建/打开/保存/GC/锁）
-│   ├── manager/test.rs # 内部 API 测试
+│   ├── manager.rs      # 包文件管理器（创建/打开/保存/GC/锁/删除/擦除）
+│   ├── manager/
+│   │   ├── delete.rs    # 虚拟文件/目录删除与擦除实现
+│   │   └── test.rs      # 内部 API 测试
 │   ├── allocator.rs    # 线程安全封装层（Arc<Mutex<>>）
 │   ├── allocator/test.rs # 外部 API 测试
 │   ├── pack_io.rs      # 底层文件 I/O + 空间分配 + GC

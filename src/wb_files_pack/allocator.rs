@@ -3,7 +3,7 @@ use crate::wb_files_pack::manager::{WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_M
 use crate::wb_files_pack::pack_io::file::PackFileWR;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
-use crate::wb_files_pack::{Attribute, PackStruct, PackStructItem, PackStructItemType};
+use crate::wb_files_pack::{Attribute, OverwriteStrategy, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
 use crate::wb_files_pack::error::{Result, PackFileError};
@@ -365,6 +365,54 @@ impl Allocator /*写*/ {
             &self.pack_io,
         )?;
         Ok(PackFileWR::create(0, handle))
+    }
+}
+
+impl Allocator /*删除*/ {
+    /// 删除虚拟文件（仅移除元数据和结构，数据块提交GC不覆写）。
+    /// Delete a virtual file (remove metadata and structure only, data blocks submitted to GC without overwriting).
+    pub fn delete_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        manager.delete_file(path_list)
+    }
+
+    /// 删除虚拟目录及其所有子项（仅移除元数据和结构，数据块提交GC不覆写）。
+    /// Delete a virtual directory and all its descendants (remove metadata and structure only, data blocks submitted to GC without overwriting).
+    pub fn delete_dir_all<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        manager.delete_dir_all(path_list)?;
+        Ok(())
+    }
+
+    /// 擦除虚拟文件（覆写所有数据块和元数据后提交GC并删除结构）。
+    /// Erase a virtual file (overwrite all data blocks and metadata, then submit to GC and remove structure).
+    pub fn erase_file<P: AsRef<Path>>(&mut self, path: P, strategy: OverwriteStrategy) -> Result<()> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        manager.erase_file(path_list, strategy)
+    }
+
+    /// 擦除虚拟目录及其所有子项（覆写所有数据块和元数据后提交GC并删除结构）。
+    /// Erase a virtual directory and all its descendants (overwrite all data and metadata, then submit to GC and remove structure).
+    pub fn erase_dir_all<P: AsRef<Path>>(&mut self, path: P, strategy: OverwriteStrategy) -> Result<()> {
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        let path_list = PathTool::path_to_string_vec(path);
+        manager.erase_dir_all(path_list, strategy)?;
+        Ok(())
     }
 }
 

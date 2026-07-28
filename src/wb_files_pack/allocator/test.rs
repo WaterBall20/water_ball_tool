@@ -1,5 +1,6 @@
 use crate::{tools::TestTool, wb_files_pack::allocator::Allocator};
 use crate::wb_files_pack::pack_io::file::PackFileWR;
+use crate::wb_files_pack::OverwriteStrategy;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -571,6 +572,242 @@ fn multi_instance_independent_positions() {
         assert_eq!(&buf[15..17], b"EF");
         assert_eq!(&buf[17..19], b"GH");
         assert_eq!(buf[19], 0);
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+// === 删除/擦除功能 / Delete/Erase ===
+
+#[test]
+fn delete_file_root() {
+    let (dir, pack) = setup_ok_test("delete_file_root");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        write_then_read_back(&mut alloc, "test.txt", &[1, 2, 3, 4, 5]);
+        assert!(alloc.path_exists("test.txt").unwrap());
+        alloc.delete_file("test.txt").unwrap();
+        assert!(!alloc.path_exists("test.txt").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_file_subdir() {
+    let (dir, pack) = setup_ok_test("delete_file_subdir");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        alloc.create_dir_all(&String::from("A/B")).unwrap();
+        write_then_read_back(&mut alloc, "A/B/file.txt", &[10, 20, 30]);
+        assert!(alloc.path_exists("A/B/file.txt").unwrap());
+        assert!(alloc.path_exists("A/B").unwrap());
+        alloc.delete_file("A/B/file.txt").unwrap();
+        assert!(!alloc.path_exists("A/B/file.txt").unwrap());
+        assert!(alloc.path_exists("A/B").unwrap());
+        assert!(alloc.path_exists("A").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_dir_all_empty() {
+    let (dir, pack) = setup_ok_test("delete_dir_all_empty");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        alloc.create_dir_all(&String::from("empty_dir")).unwrap();
+        assert!(alloc.path_exists("empty_dir").unwrap());
+        alloc.delete_dir_all("empty_dir").unwrap();
+        assert!(!alloc.path_exists("empty_dir").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_dir_all_with_files() {
+    let (dir, pack) = setup_ok_test("delete_dir_all_with_files");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        alloc.create_dir_all(&String::from("A/B")).unwrap();
+        write_then_read_back(&mut alloc, "A/1", &[1]);
+        write_then_read_back(&mut alloc, "A/2", &[2, 2]);
+        write_then_read_back(&mut alloc, "A/B/3", &[3, 3, 3]);
+        assert!(alloc.path_exists("A/1").unwrap());
+        assert!(alloc.path_exists("A/2").unwrap());
+        assert!(alloc.path_exists("A/B/3").unwrap());
+        assert!(alloc.path_exists("A/B").unwrap());
+        alloc.delete_dir_all("A").unwrap();
+        assert!(!alloc.path_exists("A").unwrap());
+        assert!(!alloc.path_exists("A/1").unwrap());
+        assert!(!alloc.path_exists("A/2").unwrap());
+        assert!(!alloc.path_exists("A/B").unwrap());
+        assert!(!alloc.path_exists("A/B/3").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_dir_all_nonempty() {
+    let (dir, pack) = setup_ok_test("delete_dir_all_nonempty");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        alloc.create_dir_all(&String::from("data")).unwrap();
+        write_then_read_back(&mut alloc, "data/f1", &[1, 2]);
+        write_then_read_back(&mut alloc, "data/f2", &[3, 4]);
+        assert!(alloc.path_exists("data").unwrap());
+        alloc.delete_dir_all("data").unwrap();
+        assert!(!alloc.path_exists("data").unwrap());
+        assert!(!alloc.path_exists("data/f1").unwrap());
+        assert!(!alloc.path_exists("data/f2").unwrap());
+        assert!(alloc.get_root_struct_item_name_list().is_ok());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn erase_file() {
+    let (dir, pack) = setup_ok_test("erase_file");
+    // 写入数据后关闭包再重新打开，确保数据已持久化到磁盘再擦除
+    // Write data, close then reopen to ensure data is on disk before erase
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        write_then_read_back(&mut alloc, "secret.txt", &[1u8; 256]);
+        assert!(alloc.path_exists("secret.txt").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(alloc.path_exists("secret.txt").unwrap());
+        alloc.erase_file("secret.txt", OverwriteStrategy::Zero).unwrap();
+        assert!(!alloc.path_exists("secret.txt").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(!alloc.path_exists("secret.txt").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn erase_dir_all() {
+    let (dir, pack) = setup_ok_test("erase_dir_all");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        alloc.create_dir_all(&String::from("top/mid")).unwrap();
+        write_then_read_back(&mut alloc, "top/f1", &[1, 2, 3]);
+        write_then_read_back(&mut alloc, "top/mid/f2", &[4, 5, 6]);
+        assert!(alloc.path_exists("top/f1").unwrap());
+        assert!(alloc.path_exists("top/mid/f2").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(alloc.path_exists("top/f1").unwrap());
+        assert!(alloc.path_exists("top/mid/f2").unwrap());
+        alloc.erase_dir_all("top", OverwriteStrategy::Zero).unwrap();
+        assert!(!alloc.path_exists("top").unwrap());
+        assert!(!alloc.path_exists("top/f1").unwrap());
+        assert!(!alloc.path_exists("top/mid").unwrap());
+        assert!(!alloc.path_exists("top/mid/f2").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(!alloc.path_exists("top").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn erase_file_random() {
+    let (dir, pack) = setup_ok_test("erase_file_random");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        write_then_read_back(&mut alloc, "rnd.txt", &[10, 20, 30, 40, 50]);
+        assert!(alloc.path_exists("rnd.txt").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(alloc.path_exists("rnd.txt").unwrap());
+        alloc.erase_file("rnd.txt", OverwriteStrategy::Random).unwrap();
+        assert!(!alloc.path_exists("rnd.txt").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn erase_file_dod5220() {
+    let (dir, pack) = setup_ok_test("erase_file_dod5220");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        write_then_read_back(&mut alloc, "dod.txt", &[100, 200, 150]);
+        assert!(alloc.path_exists("dod.txt").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(alloc.path_exists("dod.txt").unwrap());
+        alloc.erase_file("dod.txt", OverwriteStrategy::Dod5220).unwrap();
+        assert!(!alloc.path_exists("dod.txt").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(!alloc.path_exists("dod.txt").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn delete_nonexistent() {
+    let (dir, pack) = setup_ok_test("delete_nonexistent");
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let result = alloc.delete_file("nonexistent.txt");
+        assert!(result.is_err());
+        let result = alloc.delete_dir_all("nonexistent_dir");
+        assert!(result.is_err());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn reopen_after_delete() {
+    let (dir, pack) = setup_ok_test("reopen_after_delete");
+    let data_a = &[1, 2, 3, 4, 5];
+    let data_b = &[10, 20, 30, 40, 50];
+    let data_c = &[100, 200, 250];
+    {
+        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        write_then_read_back(&mut alloc, "keep_a", data_a);
+        write_then_read_back(&mut alloc, "keep_b", data_b);
+        write_then_read_back(&mut alloc, "delete_c", data_c);
+        assert!(alloc.path_exists("keep_a").unwrap());
+        assert!(alloc.path_exists("keep_b").unwrap());
+        assert!(alloc.path_exists("delete_c").unwrap());
+        alloc.delete_file("delete_c").unwrap();
+        assert!(!alloc.path_exists("delete_c").unwrap());
+    }
+    {
+        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        assert!(!alloc.path_exists("delete_c").unwrap());
+        assert!(alloc.path_exists("keep_a").unwrap());
+        assert!(alloc.path_exists("keep_b").unwrap());
+        let mut buf = vec![0u8; data_a.len()];
+        let mut r = alloc.open_file("keep_a", false).unwrap();
+        r.seek(SeekFrom::Start(0)).unwrap();
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, data_a);
+        drop(r);
+        let mut buf = vec![0u8; data_b.len()];
+        let mut r = alloc.open_file("keep_b", false).unwrap();
+        r.seek(SeekFrom::Start(0)).unwrap();
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, data_b);
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);

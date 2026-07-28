@@ -22,7 +22,7 @@
       }
     },
     {
-      "name": "Debug executable 'water_ball_tool'",
+      "name": "Debug executable 'water_ball_tool' wbfp h",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -31,7 +31,31 @@
           "--bin=water_ball_tool"
         ]
       },
-      "args": []
+      "args": ["wbfp", "h", "/home/waterball/BF/Apps.wbfp", "-t", "1"]
+    },
+    {
+      "name": "Debug executable 'water_ball_tool' wbfp u",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=water_ball_tool"
+        ]
+      },
+      "args": ["wbfp", "u", "/home/waterball/BF/Apps.wbfp", "/home/waterball/BF/Apps", "-t", "1"]
+    },
+    {
+      "name": "Debug executable 'water_ball_tool' wbfp p",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "run",
+          "--bin=water_ball_tool"
+        ]
+      },
+      "args": ["wbfp", "p", "/home/waterball/Apps", "/home/waterball/BF/Apps", "-t", "1"]
     },
     {
       "name": "Debug unit tests in executable 'water_ball_tool'",

@@ -50,6 +50,11 @@ cargo test                     # all tests including slow
 - `Allocator` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
 - `Allocator::create_new_pack_file2(path)` uses defaults (separate manifest, no COW).
 - `Allocator::create_new_pack_file(path, cow, separate_manifest)` for custom config.
+- Delete/erase API: `delete_file`, `delete_dir_all`, `erase_file(strategy)`, `erase_dir_all(strategy)`.
+  - Delete: removes metadata + structure, submits data blocks to GC (no overwrite).
+  - Erase: overwrites data blocks + manifest blocks to storage, then GC + remove.
+  - `OverwriteStrategy` enum: `Zero`, `Random` (rand crate), `Dod5220` (3-pass: 0x00→0xFF→random — each pass written to disk).
+  - Root protection: empty path list rejected. `child_locked_count` on `PackStruct` prevents deleting dirs with locked children.
 
 ### Logging + progress bars
 - `main.rs` creates a `MultiProgress` and passes it to `init_global_logging()`, which routes `tracing` output through a `MultiProgressWriter` adapter so logs don't overwrite the progress bar.
