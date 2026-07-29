@@ -1,8 +1,8 @@
 use crate::tools::PathTool;
-use crate::wb_files_pack::manager::{WBFPManager, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST};
-use crate::wb_files_pack::pack_io::file::PackFileWR;
-use crate::wb_files_pack::pack_io::PackIO;
+use crate::wb_files_pack::manager::{DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST, WBFPManager};
+use crate::wb_files_pack::pack_io::file::{PackVirtualFile, VirtualFileOpenOptions};
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
+use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::{Attribute, OverwriteStrategy, PackStruct, PackStructItem, PackStructItemType};
 use std::collections::HashMap;
 use std::fs::File;
@@ -11,6 +11,20 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
+
+/// 包文件访问模式 / Pack file access mode
+///
+/// 控制分配器级别的读写许可，用于验证虚拟文件工厂方法的权限。
+/// Controls allocator-level read/write permissions, used to validate virtual file factory methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackAccessMode {
+    /// 只读模式 / Read-only mode
+    Read,
+    /// 只写模式 / Write-only mode
+    Write,
+    /// 读写模式 / Read-write mode
+    ReadWrite,
+}
 
 /// 水球包文件分配器——公共 API 入口。
 ///
@@ -23,87 +37,232 @@ mod test;
 /// All externally-facing read/write operations are proxied through this struct.
 #[derive(Clone, Debug)]
 pub struct Allocator {
+    /// 分配器访问模式（读写许可）/ Allocator access mode (read/write permissions)
+    pub(crate) access_mode: PackAccessMode,
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
 }
 impl Allocator {
-    /// 打开一个已存在的水球包文件。
+    /// 打开已存在的水球包文件（只读模式）。
     ///
-    /// 读取文件头、属性、根结构，获取写入锁。
-    ///
-    /// Open an existing WaterBall pack file.
-    ///
-    /// Reads the file header, attributes, and root structure, and acquires a write lock.
-    pub fn open_pack_file<P: AsRef<Path>>(path: &P) -> Result<Allocator> {
-        let pack_file = File::options().read(true).write(true).open(path)?;
-        let pack_io = PackIO::new(pack_file);
-        let pack_io = Arc::new(Mutex::new(pack_io));
-        let manager = WBFPManager::open_pack_file(path, pack_io.clone())?;
-        let manager = Arc::new(Mutex::new(manager));
-        Ok(Self { manager, pack_io })
+    /// Open an existing WaterBall pack file in Read mode.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::options().read(true).open(path)
     }
 
-    /// 使用默认参数创建新包文件（默认 COW 和分离清单）。
+    /// 使用默认参数创建新水球包文件（写入模式）。
     ///
     /// 如果文件已存在则返回错误。
     ///
-    /// Create a new pack file with default settings (default COW and separate manifest).
+    /// Create a new pack file with default settings in Write mode.
     ///
     /// Returns an error if the file already exists.
-    pub fn create_new_pack_file2<P: AsRef<Path>>(path: &P) -> Result<Allocator> {
-        Self::create_new_pack_file(path, DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST)
+    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::options()
+            .write(true)
+            .create_new(true)
+            .open(path)
     }
 
-    /// 创建新包文件，指定写时复制和清单分离策略。
+    /// 获取 `PackOpenOptions` 构建器，用于自定义打开/创建参数。
     ///
-    /// 如果文件已存在则返回错误。
+    /// Get a `PackOpenOptions` builder for custom open/create parameters.
+    pub fn options() -> PackOpenOptions {
+        PackOpenOptions::new()
+    }
+
+    /// 以只读模式打开已存在的虚拟文件。
     ///
-    /// Create a new pack file with the specified COW and separate-manifest policy.
+    /// Open an existing virtual file in read-only mode.
+    pub fn open_virtual_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackVirtualFile> {
+        Self::virtual_file_options()
+            .read(true)
+            .end_pos(end_pos)
+            .open(self, path)
+    }
+
+    /// 创建新的虚拟文件（写入模式），行为类似于 `File::create`。
     ///
-    /// Returns an error if the file already exists.
-    pub fn create_new_pack_file<P: AsRef<Path>>(
-        path: &P,
-        cow: bool,
-        separate_manifest: bool,
-    ) -> Result<Allocator> {
-        match path.as_ref().try_exists() {
-            Ok(true) => Err(PackFileError::Other("文件可能已存在，无法创建！".into())),
-            Ok(false) | Err(_) => Self::create_pack_file(path, cow, separate_manifest, true),
+    /// Create a new virtual file in write-only mode, similar to `File::create`.
+    pub fn create_virtual_file<P: AsRef<Path>>(&mut self, path: P) -> Result<PackVirtualFile> {
+        Self::virtual_file_options()
+            .write(true)
+            .create_new(true)
+            .open(self, path)
+    }
+
+    /// 获取 `VirtualFileOpenOptions` 构建器。
+    ///
+    /// Get a `VirtualFileOpenOptions` builder.
+    pub fn virtual_file_options() -> VirtualFileOpenOptions {
+        VirtualFileOpenOptions::new()
+    }
+}
+
+/// 包文件打开选项构建器 / Pack file open options builder
+pub struct PackOpenOptions {
+    read: bool,
+    write: bool,
+    create: bool,
+    create_new: bool,
+    cow: bool,
+    separate_manifest: bool,
+}
+
+impl PackOpenOptions {
+    fn new() -> Self {
+        Self {
+            read: false,
+            write: false,
+            create: false,
+            create_new: false,
+            cow: DEFAULT_COW,
+            separate_manifest: DEFAULT_SEPARATE_MANIFEST,
         }
     }
 
-    /// 创建包文件（完整参数版本）。
+    /// 以读取模式打开 / Open in read mode
+    pub fn read(&mut self, v: bool) -> &mut Self {
+        self.read = v;
+        self
+    }
+
+    /// 以写入模式打开 / Open in write mode
+    pub fn write(&mut self, v: bool) -> &mut Self {
+        self.write = v;
+        self
+    }
+
+    /// 如果文件不存在则创建新包文件 / Create a new pack file if it does not exist
+    pub fn create(&mut self, v: bool) -> &mut Self {
+        self.create = v;
+        self
+    }
+
+    /// 创建新包文件，如果已存在则报错 / Create a new pack file, fail if it exists
+    pub fn create_new(&mut self, v: bool) -> &mut Self {
+        self.create_new = v;
+        self
+    }
+
+    /// 设置写时复制策略 / Set the copy-on-write policy
+    pub fn cow(&mut self, v: bool) -> &mut Self {
+        self.cow = v;
+        self
+    }
+
+    /// 设置是否分离清单文件 / Set whether to use a separate manifest file
+    pub fn separate_manifest(&mut self, v: bool) -> &mut Self {
+        self.separate_manifest = v;
+        self
+    }
+
+    /// 根据配置的选项打开或创建包文件。
     ///
-    /// `create_new` 控制是否使用 `File::create_new`（失败时返回 `AlreadyExists` 错误）。
-    ///
-    /// Create a pack file (full-parameter version).
-    ///
-    /// `create_new` controls whether `File::create_new` is used (returns `AlreadyExists` on conflict).
-    pub fn create_pack_file<P: AsRef<Path>>(
-        path: &P,
-        cow: bool,
-        separate_manifest: bool,
-        create_new: bool,
-    ) -> Result<Allocator> {
-        let pack_file = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .create_new(create_new)
-            .open(path)?;
-        let pack_io = PackIO::new(pack_file);
-        let pack_io = Arc::new(Mutex::new(pack_io));
-        let mut manager = WBFPManager::create_pack_file(
-            path,
-            pack_io.clone(),
-            cow,
-            separate_manifest,
-            create_new,
-        )?;
-        manager.init_new_pack()?;
-        let manager = Arc::new(Mutex::new(manager));
-        Ok(Self { manager, pack_io })
+    /// Open or create a pack file according to the configured options.
+    pub fn open<P: AsRef<Path>>(&self, path: P) -> Result<Allocator> {
+        let path = path.as_ref();
+        let access_mode = match (self.read, self.write) {
+            (true, false) => PackAccessMode::Read,
+            (false, true) => PackAccessMode::Write,
+            (true, true) => PackAccessMode::ReadWrite,
+            (false, false) => {
+                return Err(PackFileError::Other(
+                    "必须指定至少 read 或 write 访问模式".into(),
+                ));
+            }
+        };
+
+        if self.create && self.create_new {
+            return Err(PackFileError::Other(
+                "create 和 create_new 不能同时为 true".into(),
+            ));
+        }
+
+        let path_buf = path.to_path_buf();
+
+        if self.create_new {
+            // 创建新文件，如果已存在则报错 / Create new, fail if exists
+            match path.try_exists() {
+                Ok(true) => {
+                    return Err(PackFileError::Other(
+                        "文件可能已存在，无法创建！".into(),
+                    ));
+                }
+                Ok(false) | Err(_) => {}
+            }
+            let pack_file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .create_new(true)
+                .open(path)?;
+            let pack_io = PackIO::new(pack_file);
+            let pack_io = Arc::new(Mutex::new(pack_io));
+            let mut manager = WBFPManager::create_pack_file(
+                &path_buf,
+                pack_io.clone(),
+                self.cow,
+                self.separate_manifest,
+                true,
+            )?;
+            manager.init_new_pack()?;
+            let manager = Arc::new(Mutex::new(manager));
+            Ok(Allocator {
+                manager,
+                pack_io,
+                access_mode,
+            })
+        } else if self.create {
+            // 打开已存在的文件，不存在则创建新文件 / Open existing or create new
+            let pack_file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(path)?;
+            let metadata = pack_file.metadata()?;
+            let is_new = metadata.len() == 0;
+            let pack_io = PackIO::new(pack_file);
+            let pack_io = Arc::new(Mutex::new(pack_io));
+
+            if is_new {
+                let mut manager = WBFPManager::create_pack_file(
+                    &path_buf,
+                    pack_io.clone(),
+                    self.cow,
+                    self.separate_manifest,
+                    false,
+                )?;
+                manager.init_new_pack()?;
+                let manager = Arc::new(Mutex::new(manager));
+                Ok(Allocator {
+                    manager,
+                    pack_io,
+                    access_mode,
+                })
+            } else {
+                let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
+                let manager = Arc::new(Mutex::new(manager));
+                Ok(Allocator {
+                    manager,
+                    pack_io,
+                    access_mode,
+                })
+            }
+        } else {
+            // 打开已存在的文件 / Open existing file
+            let pack_file = File::options().read(true).write(true).open(path)?;
+            let pack_io = PackIO::new(pack_file);
+            let pack_io = Arc::new(Mutex::new(pack_io));
+            let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
+            let manager = Arc::new(Mutex::new(manager));
+            Ok(Allocator {
+                manager,
+                pack_io,
+                access_mode,
+            })
+        }
     }
 }
 
@@ -116,6 +275,54 @@ impl Allocator /*读*/ {
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         Ok(manager.path_exists(path))
+    }
+
+    /// 已存在的虚拟文件——返回 PackVirtualFile（内部使用）。
+    ///
+    /// 通过管理器查找指定路径的虚拟文件句柄，包装为 PackVirtualFile 返回。
+    ///
+    /// Open an existing virtual file — returns a PackVirtualFile (internal use).
+    ///
+    /// Looks up the virtual file handle via the manager and wraps it in a PackVirtualFile.
+    pub(crate) fn open_virtual_file_impl<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackVirtualFile> {
+        let mgr = self.manager.clone();
+        let mut mgr = mgr
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        mgr.this_write_lock()?;
+        let path_list = PathTool::path_to_string_vec(path);
+        let handle = mgr.get_or_create_file_handle(
+            &path_list,
+            end_pos,
+            &self.manager,
+            &self.pack_io,
+        )?;
+        Ok(PackVirtualFile::new(0, handle))
+    }
+
+    /// 创建新虚拟文件——返回 PackVirtualFile（内部使用）。
+    ///
+    /// 通过管理器创建虚拟文件并分配初始大小，包装为 PackVirtualFile 返回。
+    ///
+    /// Create a new virtual file — returns a PackVirtualFile (internal use).
+    ///
+    /// Creates the virtual file via the manager with auto-sized allocation.
+    pub(crate) fn create_virtual_file_impl<P: AsRef<Path>>(&mut self, path: P) -> Result<PackVirtualFile> {
+        let mgr = self.manager.clone();
+        let mut mgr = mgr
+            .lock()
+            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+        mgr.this_write_lock()?;
+        let (path_list, metadata) = mgr.create_file_auto_sized(path)?;
+        let handle = Arc::new(Mutex::new(PackFileHandle::create(
+            true,
+            self.manager.clone(),
+            &self.pack_io,
+            path_list,
+            metadata,
+            false,
+        )?));
+        Ok(PackVirtualFile::new(0, handle))
     }
 
     /// 获取包文件的全局属性。
@@ -244,128 +451,6 @@ impl Allocator /*写*/ {
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         manager.create_dir_all(path)
     }
-
-    /// 创建虚拟文件（使用默认写时复制和哈希设置）
-    /// Create a virtual file (using default COW and hash settings)
-    pub fn create_file<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        modified: u128,
-        len: u64,
-    ) -> Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
-        manager.this_write_lock()?;
-        let (path_list, metadata) = manager.create_file(path, modified, len)?;
-        let handle = Arc::new(
-            Mutex::new(
-                PackFileHandle::create(
-                    true,
-                    self.manager.clone(),
-                    &self.pack_io.clone(),
-                    path_list,
-                    metadata,
-                    false,
-                )?
-            )
-        );
-        Ok(PackFileWR::create(0, handle))
-    }
-
-    /// 创建虚拟文件（自动分配初始大小，无需预先指定长度）
-    /// Create a virtual file (auto-allocate initial size, no need to pre-specify length)
-    pub fn create_file_auto_sized<P: AsRef<Path>>(&mut self, path: P) -> Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
-        manager.this_write_lock()?;
-        let (path_list, metadata) = manager.create_file_auto_sized(path)?;
-        let handle = Arc::new(
-            Mutex::new(
-                PackFileHandle::create(
-                    true,
-                    self.manager.clone(),
-                    &self.pack_io.clone(),
-                    path_list,
-                    metadata,
-                    false,
-                )?
-            )
-        );
-        Ok(PackFileWR::create(0, handle))
-    }
-    /// 创建虚拟文件（完整参数版本，用于需要自定义写时复制和哈希算法的场景）
-    /// Create a virtual file (full parameter version, for custom COW and hash algorithm scenarios)
-    pub fn create_file_raw<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        modified: u128,
-        len: u64,
-        cow: bool,
-        hash_type: u8,
-    ) -> Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
-        manager.this_write_lock()?;
-        let (path_list, metadata) = manager.create_file_raw(path, modified, len, cow, hash_type)?;
-        let handle = Arc::new(
-            Mutex::new(
-                PackFileHandle::create(
-                    true,
-                    self.manager.clone(),
-                    &self.pack_io.clone(),
-                    path_list,
-                    metadata,
-                    false,
-                )?
-            )
-        );
-        Ok(PackFileWR::create(0, handle))
-    }
-
-    /// 以读写模式打开已存在的虚拟文件。
-    ///
-    /// `end_pos` 为 `true` 时文件指针定位到末尾，为 `false` 时定位到开头。
-    ///
-    /// Open an existing virtual file for reading and writing.
-    ///
-    /// When `end_pos` is `true`, the file pointer is positioned at the end;
-    /// when `false`, it is positioned at the beginning.
-    pub fn open_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackFileWR> {
-        self.get_file_wr(path, end_pos)
-    }
-
-    /// 获取虚拟文件的读写器（与 `open_file` 相同但语义更明确）。
-    ///
-    /// 锁定文件的元数据以确保独占写入访问。
-    ///
-    /// Get a read-writer for a virtual file (same as `open_file` with clearer semantics).
-    ///
-    /// Locks the file's metadata to ensure exclusive write access.
-    pub fn get_file_wr<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        end_pos: bool,
-    ) -> Result<PackFileWR> {
-        let manager = self.manager.clone();
-        let mut manager = manager
-            .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
-        manager.this_write_lock()?;
-        let path_list = PathTool::path_to_string_vec(path);
-        let handle = manager.get_or_create_file_handle(
-            &path_list,
-            end_pos,
-            &self.manager,
-            &self.pack_io,
-        )?;
-        Ok(PackFileWR::create(0, handle))
-    }
 }
 
 impl Allocator /*删除*/ {
@@ -447,14 +532,32 @@ impl Allocator /*工具方法*/ {
                 Ok(())
             }
             PackStructItemType::File { .. } => {
-                let mut file = self.get_file_wr(path, false)?;
+                let mut file = {
+                    let mgr = self.manager.clone();
+                    let mut mgr = mgr
+                        .lock()
+                        .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+                    mgr.this_write_lock()?;
+                    let path_list = PathTool::path_to_string_vec(path);
+                    let handle = mgr.get_or_create_file_handle(
+                        &path_list,
+                        false,
+                        &self.manager,
+                        &self.pack_io,
+                    )?;
+                    PackVirtualFile::new(0, handle)
+                };
+                let path_str = path
+                    .to_str()
+                    .ok_or(PackFileError::Format("路径包含无效 UTF-8".into()))?
+                    .to_string();
                 match file.verify_hash(None) {
-                    Ok(true) => verify_hash_r.ok_path.push(path.to_str().unwrap().to_string()),
+                    Ok(true) => verify_hash_r.ok_path.push(path_str),
                     Ok(false) =>
-                        verify_hash_r.err_path.push((path.to_str().unwrap().to_string(), None)),
+                        verify_hash_r.err_path.push((path_str, None)),
                     Err(err) =>
                         verify_hash_r.err_path.push((
-                            path.to_str().unwrap().to_string(),
+                            path_str,
                             Some(err),
                         )),
                 }

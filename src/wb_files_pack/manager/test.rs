@@ -7,7 +7,7 @@ use crate::wb_files_pack::manager::{
     DEFAULT_HASH_TYPE,
     DEFAULT_SEPARATE_MANIFEST,
 };
-use crate::wb_files_pack::pack_io::file::PackFileWR;
+use crate::wb_files_pack::pack_io::file::PackVirtualFile;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use pretty_assertions::assert_eq;
@@ -70,19 +70,19 @@ fn open_file_rw<P: AsRef<Path>>(
     manager: &Arc<Mutex<WBFPManager>>,
     pack_io: &Arc<Mutex<PackIO>>,
     end_pos: bool,
-) -> Result<PackFileWR> {
+) -> Result<PackVirtualFile> {
     let path_list = PathTool::path_to_string_vec(pack_path);
     let handle = manager
         .lock()
         .expect("无法获得包文件锁")
         .get_or_create_file_handle(&path_list, end_pos, &manager.clone(), pack_io)
         .expect("无法获得虚拟文件句柄");
-    Ok(PackFileWR::create(0, handle))
+    Ok(PackVirtualFile::new(0, handle))
 }
 
 fn setup_ok_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::path::PathBuf::from(TEST_TEMP_OK_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("创建测试目录失败");
     let pack = dir.join("pack");
     TestTool::remove_test_pack_files(&pack);
     (dir, pack)
@@ -90,7 +90,7 @@ fn setup_ok_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 
 fn setup_err_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::path::PathBuf::from(TEST_TEMP_ERR_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("创建测试目录失败");
     let pack = dir.join("pack");
     TestTool::remove_test_pack_files(&pack);
     (dir, pack)
@@ -105,7 +105,7 @@ fn create_stress_and_reopen() {
     let test_data = vec![51, 31, 55, 6, 7, 8, 3, 67, 93];
 
     let (initial_root, random_names) = {
-        let (manager, pack_io) = create_manager_default(&pack_file).unwrap();
+        let (manager, pack_io) = create_manager_default(&pack_file).expect("创建管理器失败");
         let man = Arc::new(Mutex::new(manager));
 
         let mut random_names = Vec::new();
@@ -117,7 +117,7 @@ fn create_stress_and_reopen() {
 
             let (path_list, metadata) = man
                 .lock()
-                .unwrap()
+                .expect("获取管理器锁失败")
                 .create_file_raw(&name, modified, len, false, DEFAULT_HASH_TYPE)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
             let handle = Arc::new(
@@ -129,10 +129,10 @@ fn create_stress_and_reopen() {
                         path_list,
                         metadata,
                         false,
-                    ).unwrap()
+                    ).expect("创建文件句柄失败")
                 )
             );
-            let mut wr = PackFileWR::create(0, handle);
+            let mut wr = PackVirtualFile::new(0, handle);
             wr.write_all(&test_data).unwrap_or_else(|_|
                 panic!("循环第{i}次，无法写入虚拟随机文件:{name}")
             );
@@ -140,7 +140,7 @@ fn create_stress_and_reopen() {
 
         let (path_list, metadata) = man
             .lock()
-            .unwrap()
+            .expect("获取管理器锁失败")
             .create_file(test_path, 0, test_data.len() as u64)
             .expect("无法创建虚拟文件");
 
@@ -153,14 +153,14 @@ fn create_stress_and_reopen() {
                     path_list,
                     metadata,
                     false,
-                ).unwrap()
+                ).expect("创建文件句柄失败")
             )
         );
-        let mut wr = PackFileWR::create(0, handle);
+        let mut wr = PackVirtualFile::new(0, handle);
         _ = wr.write(&test_data).expect("无法写入虚拟文件");
         drop(wr);
 
-        let man_guard = man.lock().unwrap();
+        let man_guard = man.lock().expect("获取管理器锁失败");
         let root = man_guard.manifest.root_struct().clone();
         (root, random_names)
     };
@@ -170,17 +170,17 @@ fn create_stress_and_reopen() {
         let (manager, pack_io) = open_manager(&pack_file);
         let man = Arc::new(Mutex::new(manager));
 
-        let mut rw = open_file_rw(&test_path, &man, &pack_io, false).unwrap();
+        let mut rw = open_file_rw(&test_path, &man, &pack_io, false).expect("打开虚拟文件失败");
         let mut read_buf = vec![0; test_data.len()];
         let bytes_read = rw.read(&mut read_buf).expect("无法读取虚拟文件");
         assert_eq!(bytes_read, test_data.len());
         assert_eq!(test_data, read_buf);
         drop(rw);
 
-        man.lock().unwrap().load_all_data(false).expect("无法加载所有元数据");
+        man.lock().expect("获取管理器锁失败").load_all_data(false).expect("无法加载所有元数据");
 
         // 逐个比对随机文件的结构项
-        let man_guard = man.lock().unwrap();
+        let man_guard = man.lock().expect("获取管理器锁失败");
         let reopened = man_guard.manifest.root_struct();
         for name in &random_names {
             let a = initial_root
@@ -205,7 +205,7 @@ fn create_stress_and_reopen() {
 fn open_pack_compatible_version() {
     let (dir, pack_file) = setup_ok_test("open_pack_compatible_version");
     {
-        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        let mut manager = create_manager_default(&pack_file).expect("创建管理器失败").0;
         manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
         manager.manifest
             .attribute_mut()
@@ -223,7 +223,7 @@ fn open_pack_compatible_version() {
 fn open_pack_version_too_high_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_high_should_panic");
     {
-        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        let mut manager = create_manager_default(&pack_file).expect("创建管理器失败").0;
         manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION + 1);
         manager.manifest.attribute_mut().set_version_compatible(super::super::MANIFEST_VERSION + 1);
     }
@@ -239,7 +239,7 @@ fn open_pack_version_too_high_should_panic() {
 fn open_pack_version_too_low_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_low_should_panic");
     {
-        let mut manager = create_manager_default(&pack_file).unwrap().0;
+        let mut manager = create_manager_default(&pack_file).expect("创建管理器失败").0;
         manager.manifest.attribute_mut().set_version(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
         manager.manifest
             .attribute_mut()

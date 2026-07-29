@@ -17,6 +17,8 @@ pub enum PackFileError {
     NotADirectory(String),
     /// 版本不兼容 / Version incompatibility
     Version(String),
+    /// 权限错误 / Permission denied
+    PermissionDenied(String),
     /// 状态错误（未加载、已锁定等）/ State error (not loaded, locked, etc.)
     State(String),
     /// 其他错误 / Other error
@@ -36,6 +38,9 @@ impl fmt::Display for PackFileError {
             PackFileError::NotFound(msg) => write!(f, "未找到 / Not found: {}", msg),
             PackFileError::NotADirectory(msg) => write!(f, "不是目录 / Not a directory: {}", msg),
             PackFileError::Version(msg) => write!(f, "版本错误 / Version error: {}", msg),
+            PackFileError::PermissionDenied(reason) => {
+                write!(f, "Permission denied: {}", reason)
+            }
             PackFileError::State(msg) => write!(f, "状态错误 / State error: {}", msg),
             PackFileError::Other(msg) => write!(f, "{}", msg),
         }
@@ -62,6 +67,11 @@ impl From<std::io::Error> for PackFileError {
 /// Used in std::io trait implementations (Read/Write/Seek) that must return `io::Result`.
 impl From<PackFileError> for std::io::Error {
     fn from(e: PackFileError) -> Self {
-        std::io::Error::other(e.to_string())
+        match e {
+            PackFileError::PermissionDenied(reason) => {
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason)
+            }
+            _ => std::io::Error::other(e.to_string()),
+        }
     }
 }

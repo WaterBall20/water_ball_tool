@@ -108,7 +108,11 @@ impl PackFileHandle {
             && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type()
             && pos_index < data_pos_list.list().len()
         {
-            let (mut pos, mut len) = *data_pos_list.list().get(pos_index).unwrap();
+            let (mut pos, mut len) = *data_pos_list.list().get(pos_index).ok_or(
+                PackFileError::State(format!(
+                    "数据位置列表索引 {} 越界", pos_index
+                ))
+            )?;
             //当前校准
             if pos_index == start_pos_list_item_index {
                 //位置偏移
@@ -203,9 +207,7 @@ impl PackFileHandle {
                             new_pos_list.push((pos, item_len - s_len));
                             gc_list.push((pos + s_len, s_len));
                         } else {
-                            //删除的大小等于快大小
-                            assert_eq!(s_len, item_len); //逻辑判断
-                            //不执行任何操作
+                            gc_list.push((pos, item_len));
                         }
                     } else {
                         new_pos_list.push(*value);
@@ -233,7 +235,11 @@ impl PackFileHandle {
             //块索引
             let pos_index = pos_s.len() - 1;
             //块长度
-            let (_, pos_len) = pos_s.get(pos_index).unwrap();
+            let (_, pos_len) = pos_s.get(pos_index).ok_or(
+                PackFileError::State(format!(
+                    "位置列表索引 {} 越界", pos_index
+                ))
+            )?;
             self.temp_pos_index = pos_index;
             self.temp_pos_this_len = *pos_len;
             self.pos = pos;
@@ -244,14 +250,18 @@ impl PackFileHandle {
     //追加文件位置
     fn add_pos(&mut self, length: u64) -> Result<()> {
         //获取需要添加的块列表
-        self.add_pos2(length, &self.get_add_pos_list2(length, false)?);
+        self.add_pos2(length, &self.get_add_pos_list2(length, false)?)?;
         Ok(())
     }
-    fn add_pos2(&mut self, length: u64, add_pos_s: &[(u64, u64)]) {
+    fn add_pos2(&mut self, length: u64, add_pos_s: &[(u64, u64)]) -> Result<()> {
         //需要添加的索引数
         let add_pos_index = add_pos_s.len() - 1;
         //缓存_当前块添加的大小
-        let (_, add_pos_len) = add_pos_s.get(add_pos_index).unwrap();
+        let (_, add_pos_len) = add_pos_s.get(add_pos_index).ok_or(
+            PackFileError::State(format!(
+                "添加位置列表索引 {} 越界", add_pos_index
+            ))
+        )?;
         //更新位置缓存
         self.temp_pos_index += add_pos_index;
         if add_pos_index == 0 {
@@ -263,6 +273,7 @@ impl PackFileHandle {
         }
         //更新位置
         self.pos += length;
+        Ok(())
     }
 
     //减少文件位置 / Move file position backward
@@ -329,7 +340,7 @@ impl PackFileHandle {
         {
             let len = metadata.len();
             let hash_type = *hash_type;
-            let mut buf = vec![0; usize::try_from(DATA_DATA_BLOCK_LEN).unwrap()];
+            let mut buf = vec![0; DATA_DATA_BLOCK_LEN as usize];
             //设置位置
             self.set_pos(0)?;
             let mut read_hash = PackFileHash::new(hash_type);
@@ -439,14 +450,14 @@ impl PackFileHandle {
         let mut pack_file = pack_file
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
-        let buf_len = buf.len();
         //当前大小所需的位置列表
         let pos_s = self.get_add_pos_list2(buf.len() as u64, true)?;
         //当前已读取大小
         let mut read_len = 0;
         //读取
         for (pos, len) in pos_s {
-            let len = usize::try_from(len).unwrap();
+            let len = usize::try_from(len)
+                .map_err(|_| PackFileError::Format(format!("文件块长度 {len} 无法转换为 usize")))?;
             let this_buf = &mut buf[read_len..read_len + len];
 
             //更改文件位置
@@ -483,7 +494,8 @@ impl PackFileHandle {
         let mut write_len = 0;
         //写入
         for (pos, len) in pos_s {
-            let len = usize::try_from(len).unwrap();
+            let len = usize::try_from(len)
+                .map_err(|_| PackFileError::Format(format!("文件块长度 {len} 无法转换为 usize")))?;
             
             let this_data = &buf[write_len..write_len + len];
             

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use super::*;
 use std::fs;
 use std::io::Write;
@@ -40,25 +42,25 @@ fn search_dir(path: &Path, skip_symlink: bool) -> FilesList {
     let (rtx, rrx) = mpsc::channel();
     let t_path = path.to_path_buf();
     thread::spawn(move || {
-        rtx.send(FileFinder.search(&t_path, skip_symlink, tx, 4)).unwrap();
+        _ = rtx.send(FileFinder.search(&t_path, skip_symlink, tx, 4));
     });
     for _ in rx {}
-    rrx.recv().unwrap().unwrap()
+    rrx.recv().expect("接收搜索结果失败").expect("搜索返回错误").into_files_list()
 }
 
 /// 准备测试目录：清理并创建 / Prepare test dir: clean and create
 fn setup_test_dir(name: &str) -> PathBuf {
     let dir = PathBuf::from(TEST_DIR).join(name);
     _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("创建测试目录失败");
     dir
 }
 
 /// 创建测试文件 / Create a test file with content
 fn create_test_file(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
-    let mut f = fs::File::create(&path).unwrap();
-    f.write_all(b"test content").unwrap();
+    let mut f = fs::File::create(&path).expect("创建测试文件失败");
+    f.write_all(b"test content").expect("写入测试文件内容失败");
     path
 }
 
@@ -89,7 +91,7 @@ fn symlink_to_file_is_found() {
 fn symlink_to_dir_is_traversed() {
     let root = setup_test_dir("symlink_to_dir");
     let sub = root.join("subdir");
-    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&sub).expect("创建子目录 subdir 失败");
     create_test_file(&sub, "inside.txt");
     let link = root.join("link_to_subdir");
     if try_create_symlink(&sub, &link).is_none() {
@@ -111,7 +113,7 @@ fn symlink_to_dir_is_traversed() {
 fn symlink_to_ancestor_is_detected() {
     let root = setup_test_dir("symlink_ancestor");
     let sub = root.join("sub");
-    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&sub).expect("创建子目录 sub 失败");
     create_test_file(&sub, "child.txt");
     let link_back = sub.join("link_back");
     if try_create_symlink(&root, &link_back).is_none() {
@@ -132,7 +134,7 @@ fn multi_level_symlinks_work() {
     let dir_a = root.join("a");
     let dir_b = root.join("b");
     let dir_c = root.join("c");
-    fs::create_dir_all(&dir_c).unwrap();
+    fs::create_dir_all(&dir_c).expect("创建子目录 c 失败");
     create_test_file(&dir_c, "target.txt");
 
     if try_create_symlink(&dir_c, &dir_b).is_none()
@@ -192,7 +194,7 @@ fn mixed_real_and_symlinks() {
     let root = setup_test_dir("mixed");
     create_test_file(&root, "real_file.txt");
     let real_dir = root.join("real_dir");
-    fs::create_dir_all(&real_dir).unwrap();
+    fs::create_dir_all(&real_dir).expect("创建真实目录 real_dir 失败");
     create_test_file(&real_dir, "nested.txt");
 
     let link_file = root.join("link_file.txt");
@@ -221,7 +223,7 @@ fn mixed_real_and_symlinks() {
 fn same_target_via_different_chains() {
     let root = setup_test_dir("different_chains");
     let target = root.join("target_dir");
-    fs::create_dir_all(&target).unwrap();
+    fs::create_dir_all(&target).expect("创建目标目录 target_dir 失败");
     create_test_file(&target, "data.txt");
 
     let link_a = root.join("link_a");
@@ -243,9 +245,9 @@ fn same_target_via_different_chains() {
 fn chain_propagates_correctly() {
     let root = setup_test_dir("chain_propagate");
     let level1 = root.join("level1");
-    fs::create_dir_all(&level1).unwrap();
+    fs::create_dir_all(&level1).expect("创建 level1 目录失败");
     let level2 = level1.join("level2");
-    fs::create_dir_all(&level2).unwrap();
+    fs::create_dir_all(&level2).expect("创建 level2 目录失败");
     create_test_file(&level2, "deep.txt");
 
     let link_back = level2.join("back_to_root");
@@ -267,22 +269,24 @@ fn search_stream_receives_all_entries() {
     create_test_file(&root, "a.txt");
     create_test_file(&root, "b.txt");
     let sub = root.join("sub");
-    fs::create_dir_all(&sub).unwrap();
+    fs::create_dir_all(&sub).expect("创建流式测试子目录 sub 失败");
     create_test_file(&sub, "c.txt");
 
-    // search_stream 内部包线程，立即返回线程句柄和接收器
-    // search_stream wraps a thread internally, returns handle and receiver immediately
+    // search_stream 返回 SearchEvent 接收器
     let (tx, rx) = mpsc::channel();
     let (handle, stream_rx) =
-        FileFinder.search_stream(&root, false, tx, 4).unwrap();
-    let entries: Vec<_> = stream_rx.into_iter().collect();
+        FileFinder.search_stream(&root, false, tx, 4).expect("启动流式搜索失败");
+    // 从 SearchEvent 中提取 Entry 条目
+    let entries: Vec<_> = stream_rx.into_iter().filter_map(|event| match event {
+        SearchEvent::Entry(p, i) => Some((p, i)),
+        SearchEvent::Warning(_) => None,
+    }).collect();
     // 消费进度 / consume progress
     for _ in rx {}
     // 等待搜索完成 / wait for search completion
-    handle.join().unwrap().unwrap();
+    handle.join().expect("搜索线程异常终止").expect("搜索过程返回错误");
 
     // 验证：sub 目录 + 3 个文件 = 至少 4 条流式条目（根目录不会被流式输出）
-    // Verify: sub dir + 3 files = at least 4 streamed entries (root dir not streamed)
     assert!(entries.len() >= 4, "应至少收到 4 条流式条目，实际: {}", entries.len());
 
     let file_entry_count = entries
@@ -308,10 +312,10 @@ fn search_stream_empty_dir() {
 
     let (tx, rx) = mpsc::channel();
     let (handle, stream_rx) =
-        FileFinder.search_stream(&root, false, tx, 4).unwrap();
+        FileFinder.search_stream(&root, false, tx, 4).expect("启动空目录流式搜索失败");
     let entries: Vec<_> = stream_rx.into_iter().collect();
     for _ in rx {}
-    handle.join().unwrap().unwrap();
+    handle.join().expect("搜索线程异常终止").expect("搜索过程返回错误");
 
     assert_eq!(entries.len(), 0, "空目录应无流式条目");
 

@@ -8,18 +8,29 @@ Rust 2024 CLI toolkit. Two commands: `ff` (parallel file finder) and `wbfp` (cus
 cargo build --release          # release build
 cargo check                    # compile check only (fast)
 cargo clippy                   # lint
-cargo test -- --skip longtime  # skip slow/integration tests (CI-compatible)
-cargo test                     # all tests including slow
+cargo test                     # 跳过长时间测试（#[ignore] 自动处理）
+cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测试）
 ./target/release/water_ball_tool -h
 ```
 
 ## Testing conventions
 
-- Slow tests are marked `#[ignore = "longtime"]`. Skip them with `cargo test -- --skip longtime`. CI also skips them (no `--include-ignored` flag).
+- Slow tests are marked `#[ignore = "longtime"]`. Skip them with `cargo test` (默认跳过)。CI 主分支 push 时使用 `--include-ignored` 全量运行。
 - Tests that use `indicatif::MultiProgress` must call `crate::init_global_logging(&mp)` first — otherwise logging panics because tracing subscriber isn't initialized.
 - Test temp dirs live under `./temp/test/` (gitignored).
 - Use `TestTool::remove_test_pack_files(path)` from `tools.rs` to clean up `.pack`, `.wbm`, and `.lock` files after pack tests.
 - Cross-platform tests use `#[cfg(unix)]` / `#[cfg(windows)]` for symlink creation and platform-specific paths.
+
+## Error handling conventions
+
+- `src/lib.rs` globally denies `clippy::unwrap_used`. Never suppress it. Never use `.unwrap()`, `.expect()`, or any panicking-unwrap in library or application code.
+- **Recoverable errors MUST be propagated** via the `?` operator to the caller using the module's error type (`PackFileError` in `wb_files_pack`, `io::Error` or `SearchResult`/`SearchWarning` in `file_finder`).
+- **Non-fatal errors (warnings)** that should not abort execution:
+  - Synchronous API (`FileFinder::search`): collected in `SearchResult.warnings: Vec<SearchWarning>`.
+  - Streaming API (`FileFinder::search_stream`): emitted as `SearchEvent::Warning(SearchWarning)` on the receiver channel.
+- **Mutex poisoning**: use `.lock().unwrap_or_else(|e| e.into_inner())` to recover the lock — avoid panicking on poison.
+- **Thread join**: use `handle.join().map_err(|_| ...)?` to propagate panics as errors rather than calling `.unwrap()`.
+- **Test code** for library modules (e.g. `file_finder::test`) may use `#![allow(clippy::unwrap_used)]` at the module level, but only where the `.unwrap()` is in a test setup/assertion context, never in production logic.
 
 ## Architecture notes (non-obvious from file layout)
 
@@ -30,6 +41,7 @@ cargo test                     # all tests including slow
 - `command/ff.rs` — `ff` subcommand handler: argument parsing, progress bar setup, and file search orchestration. Calls `FileFinder::search()` from the library.
 - `command/wbfp.rs` — `wbfp` subcommand handler: pack/unpack/hash-verify with multi-threaded file I/O, progress bars per worker thread, and streaming file discovery via `FileFinder::search_stream()`.
 - `command/test.rs` — integration tests for `ff` and `wbfp` commands, including cross-platform symlink cycle detection tests.
+  - Longtime tests (`#[ignore = "longtime"]`) use `create_large_fixture()` to generate 1,000 random files (25 dirs × 40 files, random content/size via `rand` crate) for stress testing. These replace old system-dir-scraping tests.
 
 ### File finder API (`src/file_finder.rs`)
 - `FileFinder::search(path, skip_symlinks, pb_tx, max_threads)` — blocking multi-threaded search returning `FilesList` tree.
@@ -37,6 +49,7 @@ cargo test                     # all tests including slow
 - Symlink cycle detection uses per-thread inode chain: each worker maintains a `Vec<InodeKey>` of directories entered via symlinks. When encountering a symlink→dir, the target's inode is checked against the chain.
 - Inode key: `(dev << 64) | ino` on Unix; `canonicalize()` on Windows.
 - Rate-limited progress: 50 files or 10 dirs per update.
+- Tree rebuild uses **iterative stack-based post-order traversal** (Pre/Post state machine) instead of recursion — avoids stack overflow on deeply nested directories. Parent lookup uses `rposition()` backward search for correct path matching.
 - Test file: `src/file_finder/test.rs` — covers symlink discovery, ancestor cycle detection, multi-level symlinks, skip flag, broken symlinks, mixed scenarios, chain propagation, and `search_stream` correctness.
 
 ### Tools API (`src/tools.rs`)
@@ -48,8 +61,13 @@ cargo test                     # all tests including slow
 ### WBFP public API
 - The public entry point is `Allocator` (`src/wb_files_pack/allocator.rs`), not `WBFPManager`.
 - `Allocator` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
-- `Allocator::create_new_pack_file2(path)` uses defaults (separate manifest, no COW).
-- `Allocator::create_new_pack_file(path, cow, separate_manifest)` for custom config.
+- `Allocator::open(path)` — opens an existing pack file in read-only mode.
+- `Allocator::create_new(path)` — creates a new pack file with default config (separate manifest, no COW). Fails if file exists.
+- `Allocator::options() -> PackOpenOptions` — builder pattern for full control: `read()`, `write()`, `create()`, `create_new()`, `cow()`, `separate_manifest()`.
+- `Allocator::open_virtual_file(path, end_pos)` — opens an existing virtual file in read-only mode.
+- `Allocator::create_virtual_file(path)` — creates a new virtual file in write-only mode.
+- `Allocator::virtual_file_options() -> VirtualFileOpenOptions` — builder for virtual file access: `read()`, `write()`, `create_new()`, `end_pos()`.
+- `PackVirtualFile` (renamed from `PackFileWR`) — virtual file handle implementing `Read`/`Write`/`Seek` with access mode enforcement.
 - Delete/erase API: `delete_file`, `delete_dir_all`, `erase_file(strategy)`, `erase_dir_all(strategy)`.
   - Delete: removes metadata + structure, submits data blocks to GC (no overwrite).
   - Erase: overwrites data blocks + manifest blocks to storage, then GC + remove.
@@ -77,8 +95,17 @@ cargo test                     # all tests including slow
 - File extension: `.pack` (pack file), `.wbm` (separate manifest), `.lock` (PID-based write lock).
 - Uses A/B dual-block atomic writes for manifest data blocks, BLAKE3 for integrity.
 - Progressive save: auto-saves every 128KB written or 10,000 files added.
-- Garbage collection: merges adjacent free blocks.
+- Garbage collection: batch sort (`sort_unstable_by_key`) + single-pass merge of adjacent free blocks. O((K+M) log(K+M)).
 - Full spec: `docs/wb_files_pack/manifest-data.md`
+
+## Documentation sync
+
+- Every coding task MUST update all related documentation files to reflect changes made. This includes:
+  - **Project root management/architecture docs**: `AGENTS.md`, `README.md`, and any other Markdown files at the repository root.
+  - **Technical spec docs**: `docs/*.md` — format specifications, architecture decisions, design documents.
+  - **Code-level docs**: module-level doc comments (`//!`), public API doc comments (`///`), inline comments.
+- Outdated documentation is treated as a defect. The implementation is not complete until all affected docs are updated.
+- Sync scope includes but is not limited to: new public APIs, changed signatures, removed methods, new modules, changed behavior, and updated conventions.
 
 ## Bilingual comments
 

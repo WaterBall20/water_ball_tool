@@ -21,7 +21,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{ Arc, Condvar, Mutex, mpsc };
 use std::{ fs, io };
 use tracing::{ error, info, warn };
-use water_ball_tool::file_finder::{ FileFinder, FileInfo, FileKind };
+use water_ball_tool::file_finder::{ FileFinder, FileInfo, FileKind, SearchEvent };
 use water_ball_tool::tools::PathTool;
 use water_ball_tool::wb_files_pack::PackStructItemType;
 use water_ball_tool::wb_files_pack::allocator::Allocator;
@@ -247,12 +247,21 @@ impl WaterBallFilePackArgsRuning {
                 if write_optimization {
                     info!("已启用写入优化，未更改的文件将跳过");
                 }
-                Allocator::open_pack_file(&pack_path).expect("打开包文件错误")
+                Allocator::options()
+                    .read(true)
+                    .write(true)
+                    .open(&pack_path)
+                    .expect("打开包文件错误")
             } else {
                 info!("创建新包文件并初始化");
-                Allocator::create_new_pack_file(&pack_path, false, separate_manifest).expect(
-                    "创建包文件错误"
-                )
+                Allocator::options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .cow(false)
+                    .separate_manifest(separate_manifest)
+                    .open(&pack_path)
+                    .expect("创建包文件错误")
             }
         };
         //复制操作===
@@ -324,16 +333,13 @@ impl WaterBallFilePackArgsRuning {
             );
         } else {
             //复制时所用的线程数
-            let thread_count = match args.thread_count {
-                Some(v) => v,
-                None => {
-                    let thread_count = thread
-                        ::available_parallelism()
-                        .unwrap_or(NonZero::new(8).unwrap())
-                        .get();
-                    info!("未指定线程数量，将使用{thread_count}线程");
-                    thread_count
-                }
+            let thread_count = if let Some(v) = args.thread_count { v } else {
+                let thread_count = thread
+                    ::available_parallelism()
+                    .unwrap_or(NonZero::new(8).unwrap())
+                    .get();
+                info!("未指定线程数量，将使用{thread_count}线程");
+                thread_count
             };
 
             //搜索文件===
@@ -395,12 +401,23 @@ impl WaterBallFilePackArgsRuning {
                             });
                         }
 
-                        for item in stream_results {
-                            //只有文件才会加入队列
-                            if let FileKind::File = item.1.file_kind() {
-                                *data_len.lock().unwrap() += item.1.length();
-                                results.lock().unwrap().push_back(item);
-                                condver.notify_one();
+                        for event in stream_results {
+                            match event {
+                                SearchEvent::Entry(path, info) => {
+                                    //只有文件才会加入队列
+                                    if let FileKind::File = info.file_kind() {
+                                        *data_len.lock().unwrap() += info.length();
+                                        results.lock().unwrap().push_back((path, info));
+                                        condver.notify_one();
+                                    }
+                                }
+                                SearchEvent::Warning(warning) => {
+                                    warn!(
+                                        "文件搜索警告 [{:?}]: {:?}",
+                                        warning.warning_type,
+                                        warning.path
+                                    );
+                                }
                             }
                         }
 
@@ -411,6 +428,8 @@ impl WaterBallFilePackArgsRuning {
                             *dir_count.lock().unwrap()
                         );
                         *ff_end.lock().unwrap() = true;
+                        //唤醒所有线程，避免死锁
+                        condver.notify_all();
                         Ok(())
                     }
                 )
@@ -485,20 +504,27 @@ impl WaterBallFilePackArgsRuning {
                             pb.set_length(*data_len.lock().unwrap());
                             pb.set_position(write_len);
                             pb.set_message(
-                                format!("[{write_file_count}/{}个文件]", file_count.lock().unwrap())
+                                format!("[{write_file_count}/{}个文件]", file_count.lock().expect("获取文件数量"))
                             );
                             last_write_len = write_len;
                         }
                     }
 
                     //等待所有工作线程结束
-                    for item in thread_handle {
-                        item.join().unwrap().unwrap();
+                    for (index, item) in thread_handle.into_iter().enumerate() {
+                        if let Err(err) = item.join().unwrap() {
+                            error!("线程{index}，发生错误：{err}");
+                        }
                     }
                 })
             };
             //等待线程结束
-            ff_thread.join().unwrap().unwrap();
+            if let Err(e) = ff_thread.join().unwrap() {
+                error!("文件搜索线程错误：{e}");
+            }
+            *ff_end.lock().unwrap() = true;
+            //唤醒所有线程，避免死锁
+            condver.notify_all();
             wp_thread.join().unwrap();
         }
         info!("操作已完成,文件保存到{}", pack_path.display());
@@ -654,12 +680,26 @@ impl WaterBallFilePackArgsRuning {
         };
         //尝试创建虚拟文件
         let mut out_file = match
-            pack_man.create_file(this_pack_path, info.modified_time(), info.length())
+            pack_man.create_virtual_file(this_pack_path)
         {
-            Ok(v) => v,
+            Ok(mut v) => {
+                if let Err(err) = v.set_len(info.length()) {
+                    warn!(
+                        r#"无法设置虚拟文件"{}"的大小，将继续，err: {err}"#,
+                        this_pack_path.display()
+                    );
+                }
+                if let Err(err) = v.set_modified(info.modified_time()) {
+                    warn!(
+                        r#"无法设置虚拟文件"{}"的修改时间，将继续，err: {err}"#,
+                        this_pack_path.display()
+                    );
+                }
+                v
+            }
             Err(err) => {
                 //尝试打开文件
-                match pack_man.open_file(this_pack_path, false) {
+                match pack_man.open_virtual_file(this_pack_path, false) {
                     Ok(mut v) => {
                         //基于检查修改时间和大小，简单的写入优化判断
                         if
@@ -808,7 +848,7 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备解包");
         info!("打开包文件");
-        let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
+        let mut pack = Allocator::open(pack_path).expect("打开包文件错误");
         info!("开始复制数据");
         fs::create_dir_all(&out_dir_path).expect("无法创建数据路径");
 
@@ -1042,7 +1082,7 @@ impl WaterBallFilePackArgsRuning {
         run_buf: &mut [u8],
         progress: Option<&dyn Fn(u64, u64)>
     ) -> io::Result<u64> {
-        let mut in_file = match pack.get_file_wr(pack_path, false) {
+        let mut in_file = match pack.open_virtual_file(pack_path, false) {
             Ok(v) => v,
             Err(err) => {
                 error!("无法打开虚拟文件{:?}，将跳过，err:{err}", pack_path);
@@ -1153,7 +1193,7 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备哈希校验");
         info!("打开包文件");
-        let mut pack = Allocator::open_pack_file(pack_path).expect("打开包文件错误");
+        let mut pack = Allocator::open(pack_path).expect("打开包文件错误");
         info!("开始哈希校验");
         Self::verify_hash(&mut pack, mp, thread_count).unwrap();
         info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");
@@ -1222,7 +1262,7 @@ impl WaterBallFilePackArgsRuning {
             Condvar::new(),
         ));
         let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
-        let all_done = Arc::new(AtomicBool::new(false));
+        let all_done = Arc::new(AtomicBool::new(root_name_list.is_empty()));
 
         {
             let mut q = queue.0.lock().unwrap();
@@ -1348,7 +1388,7 @@ impl WaterBallFilePackArgsRuning {
                                     }
                                 }
                                 PackStructItemType::File { .. } => {
-                                    let mut rw = match pack.get_file_wr(&path, false) {
+                                    let mut rw = match pack.open_virtual_file(&path, false) {
                                         Ok(v) => v,
                                         Err(err) => {
                                             error!("无法获取包文件读写器，err: {err}");

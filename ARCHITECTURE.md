@@ -1,7 +1,7 @@
 # WaterBall Tool — Architecture
 
-> Last Updated: 2026-07-24
-> 最后更新: 2026-07-24
+> Last Updated: 2026-07-29
+> 最后更新: 2026-07-29
 
 ---
 
@@ -91,7 +91,7 @@ main.rs (binary)
         │   │   └── test.rs         ← public API tests / 公共 API 测试
         │   ├── pack_io.rs          ← low-level file I/O + space allocation + GC merging
         │   │   │                      / 底层文件 I/O、空间分配与 GC 合并
-        │   │   ├── file.rs         ← PackFileWR (virtual file reader-writer) / 虚拟文件读写器
+        │   │   ├── file.rs         ← PackVirtualFile (virtual file handle with access mode enforcement) / 虚拟文件句柄（含访问模式强制）
         │   │   ├── file_handle.rs  ← PackFileHandle (493 lines, core file logic) / 文件句柄核心逻辑
         │   │   └── file_hash.rs    ← PackFileHash (BLAKE3 state machine) / BLAKE3 哈希状态机
         │   ├── net_server.rs       ← network server (WIP) / 网络服务（开发中）
@@ -318,7 +318,7 @@ Parallel scan produces a flat `HashMap<PathBuf, FileInfo>`. `build_tree()` recon
 > 并行扫描产生扁平 HashMap，`build_tree()` 将其还原为嵌套树：
 
 1. Group all entries by parent path → `HashMap<PathBuf, Vec<PathBuf>>`
-2. Recursively build from root → `build_recursive()`
+2. Iterative stack-based post-order build (Pre/Post state machine with explicit `Fr` frames) — avoids stack overflow on deeply nested hierarchies; parent-child linkage uses `rposition()` backward search for correct path matching
 3. Directory `length` = sum of all descendant file sizes
 4. Directory `file_count`/`dir_count` = cumulative across all subdirectories
 
@@ -554,8 +554,10 @@ Stage 1 — Staging (file_gc_add): / 暂存阶段
    ├─ PackFileHandle drops → manager → file_gc_add buffers into gc_data_pos_list
 
 Stage 2 — Merging (file_gc): / 合并阶段
-   ├─ Sort staging items into empty_data_list / 排序插入空闲列表
-   ├─ Merge adjacent: pos1 + len1 == pos2 → merge into one block / 合并相邻块
+   ├─ Append staging items to empty_data_list, then batch sort_unstable_by_key(pos)
+   │  O((K+M) log(K+M)) — 替代了原 O(K·M) 插入排序
+   │  / batch sort replaces the previous insertion sort
+   ├─ Single-pass merge adjacent: pos1 + len1 == pos2 → merge into one block / 单次扫描合并相邻块
    └─ Write updated empty data list / 写入更新后的空闲列表
 ```
 
@@ -635,13 +637,15 @@ pub struct Allocator {
 **Public API surface** / 公共 API:
 
 | Category | Methods | Purpose | 用途 |
-|---|---|---|---|
-| **Create** | `create_new_pack_file2` | Default-params create | 默认参数创建 |
-| | `create_new_pack_file(cow, separate)` | Full-params create | 全参数创建 |
-| | `create_pack_file` | Low-level create (controls `create_new`) | 底层创建 |
-| **Open** | `open_pack_file` | Open existing pack | 打开已有包 |
+|---|---|---|---|---|
+| **Open/Create** | `open(path)` | Read-only open existing pack | 只读打开已有包 |
+| | `create_new(path)` | Create new pack (defaults from PackOpenOptions), fail if exists | 创建新包，失败如已存在 |
+| | `options() -> PackOpenOptions` | Full builder: `read()`/`write()`/`create()`/`create_new()`/`cow()`/`separate_manifest()` | 完整构造器模式 |
+| **Virtual** | `open_virtual_file(path, end_pos)` | Read-only open existing virtual file | 只读打开已有虚拟文件 |
+| | `create_virtual_file(path)` | Write-only create new virtual file | 只写创建新虚拟文件 |
+| | `virtual_file_options() -> VirtualFileOpenOptions` | Builder: `read()`/`write()`/`create_new()`/`end_pos()` | 虚拟文件构造器 |
 | **Read** | `get_manifest_attribute` / `get_root_struct_items` / `get_dir` / `load_all_data` | | 读取各类信息 |
-| **Write** | `create_dir_all` / `create_file` / `create_file_auto_sized` / `create_file_raw` / `open_file` / `get_file_wr` | | 创建与写入 |
+| **Write** | `create_dir_all` / `delete_file` / `delete_dir_all` | | 目录与删除操作 |
 | **Delete** | `delete_file` / `delete_dir_all` | Remove metadata + structure, GC data blocks (no overwrite) | 删除元数据和结构，数据块回收不覆写 |
 | **Erase** | `erase_file(strategy)` / `erase_dir_all(strategy)` | Overwrite data + manifest blocks → GC → remove | 覆写数据块和清单块 → 回收 → 删除 |
 | **Verify** | `verify_all_file_hash` | Recursively hash-verify all files | 递归校验所有文件哈希 |
@@ -659,20 +663,21 @@ pub struct Allocator {
 
 **Design notes** / 设计说明:
 
-- `Arc<Mutex<>>` for thread safety — multiple `PackFileWR` instances can operate concurrently / 多个 PackFileWR 可并发操作
+- `Arc<Mutex<>>` for thread safety — multiple `PackVirtualFile` instances can operate concurrently / 多个 PackVirtualFile 可并发操作
 - Every method acquires the manager lock → serialized access / 每次方法调用获取锁 → 序列化
 - `Allocator` is `Clone` — multiple holders share the same pack reference / Clone 语义共享同一包引用
 
-### 7.9 Virtual File I/O — PackFileWR + PackFileHandle
+### 7.9 Virtual File I/O — PackVirtualFile + PackFileHandle
 
 > 虚拟文件读写
 
-**PackFileWR** (`pack_io/file.rs`, 146 lines):
+**PackVirtualFile** (`pack_io/file.rs`, 210+ lines) — renamed from `PackFileWR`:
 
-- Implements `Read + Write + Seek` traits
+- Implements `Read + Write + Seek` traits with **access mode enforcement**
 - Holds `Arc<Mutex<PackFileHandle>>`
-- Tracks `pos` (current read/write position)
+- Tracks `pos` (current read/write position) + `AccessMode` (Read/Write/ReadWrite)
 - All operations delegated to `PackFileHandle` / 所有操作委托给 PackFileHandle
+- Opened via `VirtualFileOpenOptions` builder pattern (std::fs::File-compatible) / 通过 VirtualFileOpenOptions 构造器打开
 
 **PackFileHandle** (`pack_io/file_handle.rs`, 493 lines — the most complex single file / 最复杂单文件):
 
@@ -719,7 +724,7 @@ enum PackFileHash {
 **Hash verification triggers** / 哈希校验触发:
 
 - Pack/write: `PackFileHandle.commit_data()` → `read_hash_v()` recomputes on close / 关闭时重新计算
-- Unpack/read: `PackFileWR.verify_hash()` optional pre-read check / 可选读取前校验
+- Unpack/read: `PackVirtualFile::verify_hash()` optional pre-read check / 可选读取前校验
 - CLI: `wbfp h` command traverses all files / 遍历所有文件
 
 ### 7.11 Error Types
@@ -736,6 +741,7 @@ pub enum PackFileError {
     Format(String),
     NotFound(String),
     NotADirectory(String),
+    PermissionDenied(String),
     Version(String),
     State(String),
     Other(String),
@@ -753,22 +759,41 @@ pub enum PackFileError {
 ```
 wbfp_p (command/wbfp.rs)
   │
-  ├─ Determine output path / 确定输出路径
+  ├─ Determine output path (.wbfp extension) / 确定输出路径（.wbfp 扩展名）
   │    ├─ out_pack_path provided → if dir? join with input filename : use as-is
   │    └─ not provided → CWD + input filename
   │
   ├─ separate_manifest = !args.no_separation
+  ├─ write_optimization = !args.write_optimization  (inverted CLI flag)
   │
-  ├─ Allocator::create_new_pack_file() → creates .pack (+ .wbm)
+  ├─ Pack open or create / 打开或创建包:
+  │    ├─ If .pack exists → `Allocator::options().read(true).write(true).open(&pack_path)` (modify mode)
+  │    │   / 文件已存在 → 以修改模式打开（ReadWrite）
+  │    └─ If not exists → `Allocator::options().read(true).write(true).create_new(true).cow(false).separate_manifest(separate_manifest).open(&pack_path)` (create mode)
+  │       / 文件不存在 → 创建新包（ReadWrite）
   │
   ├─ Input type check / 输入类型判断:
-  │    ├─ File: direct copy_file_into_pack (single file mode) / 单文件直接复制
+  │    ├─ File: direct copy_file_into_pack (single file mode, no search phase)
+  │    │   / 单文件直接复制（无搜索阶段）
   │    └─ Directory:
   │        ├─ FileFinder::search_stream() → streaming file discovery (skips symlinks)
   │        │   / 流式发现文件（跳过符号链接）
-  │        ├─ 8 worker threads pull from shared file queue / 8 个工作线程从队列取文件
-  │        │    └─ write_pack(): per-thread independent progress bar / 每线程独立进度条
-  │        └─ Main thread aggregates progress (total bytes + file count) / 主线程聚合进度
+  │        ├─ Dedicated search thread populates shared VecDeque / 专用搜索线程填充队列
+  │        │    └─ progress updates sent via mpsc channel / 进度通过 mpsc 通道发送
+  │        ├─ Thread pool (count from -t flag or CPU count / 线程数：-t 参数或 CPU 数)
+  │        │   pulls from shared file queue + Condvar mechanism / 从共享队列取文件 + Condvar
+  │        │    └─ write_pack(): per-thread independent progress bar (determinate during write,
+  │        │       spinner when idle waiting for files) / 每线程独立进度条（写入时确定条，空闲时 spinner）
+  │        └─ Main thread aggregates total progress via mpsc channel (total bytes + file count,
+  │           rate-limited to every 10 MiB) / 主线程通过 mpsc 聚合总进度（限频每 10 MiB）
+  │
+  ├─ copy_file_into_pack() reads source file (1 MiB buffer) → creates/opens virtual file
+  │   in pack → loops read/write. On write_optimization enabled and file unchanged
+  │   (same modified time and size), skips re-write entirely. Permission-denied files
+  │   are logged and skipped, not fatal.
+  │   / 读取源文件（1 MiB 缓冲区）→ 在包中创建/打开虚拟文件 → 循环读写。
+  │     启用写入优化且文件未变更（相同修改时间和大小）时完全跳过。
+  │     权限不足的文件记录日志并跳过，不中断流程。
   │
   └─ Exit: WBFPManager.drop() → save_all() auto-persists / 自动持久化
 ```
@@ -780,21 +805,44 @@ wbfp_p (command/wbfp.rs)
 ```
 wbfp_u (command/wbfp.rs)
   │
-  ├─ Allocator::open_pack_file() → parse header + attribute + read lock
+  ├─ Allocator::open() → open existing pack in read-only mode (Read)
   │
-  ├─ load_all_data(no_err=false)
-  │    ├─ Recursive: for each PackStructItem: / 递归遍历每个 PackStructItem
-  │    │    ├─ Dir: load child PackStruct → recurse / 加载子结构 → 递归
-  │    │    ├─ NoLoad: load PackFileMetadata / 加载元数据
-  │    │    └─ First error stops processing (no_err=false) / 首次错误即停止
-  │    └─ All directory structures + metadata → in memory / 全部加载到内存
+  ├─ Smart output dir deduction / 智能推导输出路径:
+  │    └─ If not specified → strip .wbfp suffix from filename, use in CWD
+  │       / 未指定时取文件名去掉 .wbfp 后缀放在工作目录下
   │
-  ├─ read_pack() → read_pack_recursive()
-  │    ├─ File: copy_pack_file_to_disk() → PackFileWR::read → File::write
-  │    └─ Dir: fs::create_dir_all() → recurse
+  ├─ Thread count: from -t flag or CPU count / 线程数：-t 参数或 CPU 数
   │
-  └─ Progress: data_len-based determinate bar (percent + file count)
-      / 按数据量显示百分比和文件数进度
+  ├─ Multi-threaded discover-as-you-unpack (NO load_all_data) / 多线程边发现边解包（不预加载）
+  │  ┌─────────────────────────────────────────────────────────────────┐
+  │  │  Shared work queue: (Mutex<VecDeque<PathBuf>>, Condvar)         │
+  │  │  Termination control: AtomicUsize pending + AtomicBool all_done │
+  │  │  Per-worker progress bars: independent determinate per file     │
+  │  │  / 共享工作队列 + Condvar，AtomicUsize 待处理计数 + 每线程独立进度条  │
+  │  └─────────────────────────────────────────────────────────────────┘
+  │
+  ├─ Worker thread loop / 工作线程循环:
+  │    ├─ 1. Pop path from queue (Condvar::wait when empty) / 从队列取路径
+  │    │      all_done flag checked on wake to detect completion / 唤醒后检查完成标志
+  │    ├─ 2. get_pack_struct_item() → on-demand struct+metadata loading / 按需加载
+  │    │    ├─ PackStructItemType::Dir:
+  │    │    │    ├─ fs::create_dir_all() → create disk directory / 创建磁盘目录
+  │    │    │    ├─ get_struct_item_name_list() → push children to shared queue
+  │    │    │    │   / 获取子项名称推入共享队列
+  │    │    │    ├─ pending.fetch_add(n) + condvar.notify_all() / 递增计数+唤醒
+  │    │    │    └─ pending.fetch_sub(1) → if reaches 1 → all_done = true
+  │    │    │       / 递减计数，归零时设置完成标志
+  │    │    └─ PackStructItemType::File:
+  │    │         ├─ PackVirtualFile::read → File::write (1 MiB buffer) / 读取虚拟文件写入磁盘
+  │    │         ├─ Large file (>512 MiB) logged with info / 大文件独立 info 日志
+  │    │         ├─ Progress reported via closure (per-chunk) + mpsc channel (total bytes)
+  │    │         │   / 逐块进度闭包 + mpsc 通道发送总字节
+  │    │         └─ pending.fetch_sub(1) → completion check / 递减并检查完成
+  │    └─ Repeat until all_done && queue drained / 重复直至全部完成
+  │
+  └─ Main thread: aggregate bytes via mpsc rx channel + main determinate progress bar
+     (rate-limited to every 10 MiB, shows "file_count/all_file_count files")
+     / 主线程通过 mpsc 通道汇总字节 + 总进度条（限频每 10 MiB，显示文件数进度）
 ```
 
 ### 7.14 Hash Verify Flow
@@ -804,13 +852,44 @@ wbfp_u (command/wbfp.rs)
 ```
 wbfp_h (command/wbfp.rs)
   │
-  ├─ Allocator::open_pack_file()
-  ├─ load_all_data()
-  ├─ Recursive verify_hash_inner(): / 递归校验
-  │    ├─ Dir: iterate children → recurse
-  │    └─ File: PackFileWR::verify_hash() → re-read all data + BLAKE3 compare
-  │        / 重读全部数据 + BLAKE3 比较
-  └─ Result: warn-log failed entries; info on success / warn 日志输出失败项
+  ├─ Allocator::open() → open existing pack in read-only mode (Read)
+  │
+  ├─ Thread count: from -t flag or CPU count / 线程数：-t 参数或 CPU 数
+  │
+  ├─ Multi-threaded discover-as-you-verify (same pattern as unpack, with empty-pack early exit) / 多线程边发现边校验（空包提前退出）
+  │  ┌───────────────────────────────────────────────────────────────┐
+  │  │  Shared work queue: (Mutex<VecDeque<PathBuf>>, Condvar)       │
+  │  │  Termination: AtomicUsize pending + AtomicBool all_done       │
+  │  │  Per-worker progress bars: determinate per file during verify  │
+  │  │  / 共享工作队列，AtomicUsize 待处理计数，每线程独立进度条         │
+  │  └───────────────────────────────────────────────────────────────┘
+  │
+  ├─ Worker thread loop / 工作线程循环:
+  │    ├─ 1. Pop path from queue (Condvar::wait when empty, checks all_done on wake)
+  │    │   / 从队列取路径，空时 Condvar 挂起，唤醒后检查完成标志
+  │    ├─ 2. get_pack_struct_item() → on-demand type detection / 按需类型判定
+  │    │    ├─ PackStructItemType::Dir:
+  │    │    │    ├─ get_struct_item_name_list() → push children to shared queue
+  │    │    │    │   / 获取子项名称推入队列
+  │    │    │    ├─ pending.fetch_add(n) + condvar.notify_all() / 递增+唤醒
+  │    │    │    └─ pending.fetch_sub(1) → all_done check / 递减完成检查
+  │    │    └─ PackStructItemType::File:
+│    │         ├─ open_virtual_file(path, false) → open virtual file in read-only mode / 只读打开虚拟文件
+│    │         ├─ PackVirtualFile::verify_hash(progress_closure) → re-reads all data
+  │    │         │   + BLAKE3 compare against stored hash / 重读数据 + BLAKE3 比较
+  │    │         ├─ Progress closure updates per-worker pb (per-chunk position)
+  │    │         │   / 进度闭包更新每线程进度条
+  │    │         ├─ Send (path_str, file_len, Option<bool>) via mpsc to main thread
+  │    │         │   / 通过 mpsc 发送路径、长度和校验结果给主线程
+  │    │         └─ pending.fetch_sub(1) → all_done check
+  │    └─ Repeat until all_done && queue drained
+  │
+  └─ Main thread: / 主线程：
+       ├─ Aggregate verified_len via mpsc rx + main determinate progress bar
+       │  (rate-limited to every 10 MiB, shows "file_count/all_file_count")
+       │  / 汇总校验字节 + 总进度条（限频每 10 MiB）
+       └─ Collect failures: warn-log each failed file with "[N] path" format
+          / 收集失败项：warn 日志输出 "[N] 路径" 格式
 ```
 
 ---
@@ -916,7 +995,7 @@ tracing subscriber
 
 | File | Type | Coverage | 覆盖内容 |
 |---|---|---|---|
-| `command/test.rs` | Integration | ff + wbfp commands, cross-platform symlink cycle detection | 命令级集成测试 |
+| `command/test.rs` | Integration | ff + wbfp commands, cross-platform symlink cycle detection, synthetic fixture longtime tests (1000 random files via `rand`) | 命令级集成测试；长时间测试使用 1000 个随机文件的合成夹具 |
 | `file_finder/test.rs` | Unit | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream | 符号链接各场景 |
 | `wb_files_pack/test.rs` | Module | Pack file create, read/write, verify | 包文件创建与校验 |
 | `wb_files_pack/manager/test.rs` | Internal API | Manager internal logic | 管理器内部逻辑 |
@@ -924,7 +1003,7 @@ tracing subscriber
 
 **Testing conventions** / 测试约定:
 
-- Slow tests marked `#[ignore = "longtime"]`, skipped via `cargo test -- --skip longtime`
+- Slow tests marked `#[ignore = "longtime"]`, skipped via `cargo test` (默认跳过)。CI 主分支 push 时使用 `--include-ignored` 全量运行。
   > 慢测试标记 `#[ignore = "longtime"]`
 - Test temp dir: `./temp/test/` (gitignored) / 测试临时目录
 - Tests using `indicatif::MultiProgress` must call `crate::init_global_logging(&mp)` first

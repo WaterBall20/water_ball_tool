@@ -26,7 +26,7 @@ impl PathTool {
         */
         let mut path_list: Vec<String> = Vec::new();
         for item in path {
-            let item = String::from(item.to_str().expect("转换文本错误"));
+            let item = item.to_string_lossy().to_string();
             //排除根
             if item != "/" {
                 path_list.push(item);

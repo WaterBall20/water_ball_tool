@@ -167,23 +167,23 @@ impl ManifestDataBlock {
         self.block_data.len()
     }
 
-    pub(crate) fn update(&mut self, data: &[u8]) -> bool {
+    pub(crate) fn update(&mut self, data: &[u8]) -> Result<bool> {
         let old_len = self.get_this_block_len_us();
         let block_len = Self::get_block_len_us(data.len());
         if block_len == old_len {
             self.is_a_data =
-                Self::save_data_to_block_data(data, &mut self.block_data, block_len).unwrap();
+                Self::save_data_to_block_data(data, &mut self.block_data, block_len)?;
             self.data_len = data.len() as u64;
-            self.hash_value = Self::get_hash(&self.block_data).unwrap().to_vec();
-            false
+            self.hash_value = Self::get_hash(&self.block_data)?.to_vec();
+            Ok(false)
         } else {
             self.block_data.resize(block_len, 0);
             self.block_data.fill(0);
             Self::save_data_to_block_data_new(data, &mut self.block_data, block_len);
             self.is_a_data = true;
             self.data_len = data.len() as u64;
-            self.hash_value = Self::get_hash(&self.block_data).unwrap().to_vec();
-            true
+            self.hash_value = Self::get_hash(&self.block_data)?.to_vec();
+            Ok(true)
         }
     }
 
@@ -191,7 +191,8 @@ impl ManifestDataBlock {
         if data.len() < MANIFEST_DATA_BLOCK_DATA_LEN_LEN {
             Err(PackFileError::Format("提供的数据块数据不完整".into()))
         } else {
-            let data_len = usize::try_from(Self::get_data_len(data)).unwrap();
+            let data_len = usize::try_from(Self::get_data_len(data)?)
+                .map_err(|_| PackFileError::Format("数据长度转换失败".into()))?;
             Ok(Self::get_block_len_us(data_len) as u64)
         }
     }
@@ -221,12 +222,12 @@ impl ManifestDataBlock {
             data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
                 ..MANIFEST_DATA_BLOCK_DATA_VER_INDEX + MANIFEST_DATA_BLOCK_DATA_VER_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let end_ver = u32::from_le_bytes(
             data[data.len() - MANIFEST_DATA_BLOCK_DATA_VER_LEN..]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         if ver == end_ver && ver != 0 {
             Ok(ver)
@@ -246,8 +247,12 @@ impl ManifestDataBlock {
         hash == in_hash
     }
 
-    fn get_data_len(data: &[u8]) -> u64 {
-        u64::from_le_bytes(data[..MANIFEST_DATA_BLOCK_DATA_LEN_LEN].try_into().unwrap())
+    fn get_data_len(data: &[u8]) -> Result<u64> {
+        Ok(u64::from_le_bytes(
+            data[..MANIFEST_DATA_BLOCK_DATA_LEN_LEN]
+                .try_into()
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
+        ))
     }
 
     fn get_data(data: &[u8]) -> Result<&[u8]> {
@@ -282,7 +287,8 @@ impl ManifestDataBlock {
             Ok((
                 read_a,
                 if read_a {
-                    let a_data_len = usize::try_from(Self::get_data_len(a_data)).unwrap();
+                    let a_data_len = usize::try_from(Self::get_data_len(a_data)?)
+                        .map_err(|_| PackFileError::Format("数据长度转换失败".into()))?;
                     &a_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
@@ -291,7 +297,8 @@ impl ManifestDataBlock {
                             + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                             + a_data_len]
                 } else {
-                    let b_data_len = usize::try_from(Self::get_data_len(b_data)).unwrap();
+                    let b_data_len = usize::try_from(Self::get_data_len(b_data)?)
+                        .map_err(|_| PackFileError::Format("数据长度转换失败".into()))?;
                     &b_data[MANIFEST_DATA_BLOCK_DATA_LEN_LEN
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
@@ -401,11 +408,11 @@ impl ManifestDataBlock {
 pub(crate) trait ManifestDataBlockTrait {
     fn to_bytes_vec(&self) -> Vec<u8>;
     fn data_block_mut(&mut self) -> &mut ManifestDataBlock;
-    fn get_block_data(&mut self) -> (Vec<u8>, bool) {
+    fn get_block_data(&mut self) -> Result<(Vec<u8>, bool)> {
         let update = self.to_bytes_vec();
         let data_block = self.data_block_mut();
-        let new_block = data_block.update(&update);
-        (data_block.get_block_data().to_vec(), new_block)
+        let new_block = data_block.update(&update)?;
+        Ok((data_block.get_block_data().to_vec(), new_block))
     }
 }
 
@@ -602,13 +609,14 @@ impl Attribute {
             .get_this_data()
             .map_err(|err| PackFileError::Format(format!(r"无法获取属性数据, err: {err}")))?;
         let version =
-            u16::from_le_bytes(data[..MANIFEST_ATTRIBUTE_VERSION_LEN].try_into().unwrap());
+            u16::from_le_bytes(data[..MANIFEST_ATTRIBUTE_VERSION_LEN].try_into()
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?);
         let version_compatible = u16::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                 ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                     + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         if version != MANIFEST_VERSION {
             if version < MANIFEST_VERSION_COMPATIBLE {
@@ -623,46 +631,46 @@ impl Attribute {
             data[MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
                     + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let manifest_file_len = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
                 ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
                     + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let root_struct_pos = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                 ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
                     + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let file_count = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX
                 ..MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let dir_count = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX
                 ..MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let data_len = u64::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_DATA_LEN_INDEX
                 ..MANIFEST_ATTRIBUTE_DATA_LEN_INDEX + MANIFEST_ATTRIBUTE_DATA_LEN_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         Ok(Self {
             version,
@@ -776,7 +784,10 @@ impl DataPosList {
     }
 
     pub(crate) fn load(data: &[u8], data_block: Option<ManifestDataBlock>) -> Self {
-        let count = usize::from_le_bytes(data[..DATA_POS_LIST_COUNT_LEN].try_into().unwrap());
+        let count = usize::from_le_bytes(
+            data[..DATA_POS_LIST_COUNT_LEN].try_into()
+                .unwrap_or([0; 8])
+        );
         let data_len = count
             .checked_mul(DATA_POS_LIST_ITEM_LEN)
             .and_then(|v| v.checked_add(DATA_POS_LIST_COUNT_LEN))
@@ -789,13 +800,13 @@ impl DataPosList {
                 data_pos_list_data[index * DATA_POS_LIST_ITEM_LEN
                     ..index * DATA_POS_LIST_ITEM_LEN + DATA_POS_LIST_ITEM_POS_LEN]
                     .try_into()
-                    .unwrap(),
+                    .unwrap_or([0; 8]),
             );
             let len = u64::from_le_bytes(
                 data_pos_list_data[index * DATA_POS_LIST_ITEM_LEN + DATA_POS_LIST_ITEM_POS_LEN
                     ..index * DATA_POS_LIST_ITEM_LEN + DATA_POS_LIST_ITEM_LEN]
                     .try_into()
-                    .unwrap(),
+                    .unwrap_or([0; 8]),
             );
             list.push((pos, len));
         }
@@ -839,10 +850,10 @@ impl DataPosList {
     pub(crate) fn get_block_data(&mut self) -> Option<(Vec<u8>, bool)> {
         if self.data_block.is_some() {
             let up_data = self.to_bytes_vec();
-            if let Some(data_block) = &mut self.data_block {
-                let new_block = data_block.update(&up_data);
-                Some((data_block.get_block_data().to_vec(), new_block))
-            } else {
+        if let Some(data_block) = &mut self.data_block {
+            let new_block = data_block.update(&up_data).ok()?;
+            Some((data_block.get_block_data().to_vec(), new_block))
+        } else {
                 None
             }
         } else {
@@ -950,15 +961,16 @@ impl PackStructItem {
             data[PACK_STRUCT_ITEM_NAME_LEN_INDEX
                 ..PACK_STRUCT_ITEM_NAME_LEN_INDEX + PACK_STRUCT_ITEM_NAME_LEN_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let name_end_pos = PACK_STRUCT_ITEM_NAME_INDEX + (name_len as usize);
         let name =
-            String::from_utf8(data[PACK_STRUCT_ITEM_NAME_INDEX..name_end_pos].to_vec()).unwrap();
+            String::from_utf8(data[PACK_STRUCT_ITEM_NAME_INDEX..name_end_pos].to_vec())
+                .map_err(|_| PackFileError::Format("文件名UTF-8解码失败".into()))?;
         let metadata_file_pos = u64::from_le_bytes(
             data[name_end_pos..name_end_pos + PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let type_data_start_pos = name_end_pos + PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN;
         let type_data = &data[type_data_start_pos..];
@@ -968,7 +980,7 @@ impl PackStructItem {
                 struct_file_pos: u64::from_le_bytes(
                     type_data[..PACK_STRUCT_DIR_STRUCT_FILE_POS_LEN]
                         .try_into()
-                        .unwrap(),
+                        .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
                 ),
                 pack_struct: None,
             },
@@ -1009,7 +1021,7 @@ impl PackStructItem {
             data.push(to_le_byte);
         }
         data.push(type_data.0);
-        for to_le_byte in u16::try_from(name_len).unwrap().to_le_bytes() {
+        for to_le_byte in u16::try_from(name_len).unwrap_or(0).to_le_bytes() {
             data.push(to_le_byte);
         }
         for name_b in name_vec {
@@ -1257,7 +1269,7 @@ impl PackStruct {
             let item_data_len = usize::from_le_bytes(
                 data[read_len..read_len + PACK_STRUCT_ITEM_LEN_LEN]
                     .try_into()
-                    .unwrap(),
+                    .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
             );
             let item = PackStructItem::load(&data[read_len..read_len + item_data_len])?;
             items.insert(item.name.clone(), item);
@@ -1271,11 +1283,11 @@ impl PackStruct {
         })
     }
 
-    pub(crate) fn get_block_data(&mut self) -> (Vec<u8>, bool) {
+    pub(crate) fn get_block_data(&mut self) -> Result<(Vec<u8>, bool)> {
         let update = self.to_bytes_vec();
         let data_block = &mut self.data_block;
-        let new_block = data_block.update(&update);
-        (data_block.get_block_data().to_vec(), new_block)
+        let new_block = data_block.update(&update)?;
+        Ok((data_block.get_block_data().to_vec(), new_block))
     }
 }
 
@@ -1328,7 +1340,7 @@ impl PackFileMetadataRun {
 
     pub(crate) fn try_lock(&mut self) -> Result<PackFileMetadata> {
         match self {
-            Self::Loaded(_) => Ok(self.take(Self::Locked).expect("行为异常")),
+            Self::Loaded(_) => Ok(self.take(Self::Locked).ok_or(PackFileError::State("内部状态异常".into()))?),
             Self::NoLoad => Err(PackFileError::State("实例没有被加载".into())),
             Self::Locked => Err(PackFileError::Lock("无法获得锁，已被锁定".into())),
             Self::None => Err(PackFileError::State("无法对没有元数据的类型获得锁".into())),
@@ -1344,7 +1356,7 @@ impl PackFileMetadataRun {
     fn _try_metadata_drop(&mut self) -> Result<()> {
         match self {
             Self::Loaded(_) => {
-                drop(self.take(PackFileMetadataRun::NoLoad).expect("行为异常"));
+                drop(self.take(PackFileMetadataRun::NoLoad).ok_or(PackFileError::State("内部状态异常".into()))?);
                 Ok(())
             }
             Self::Locked => Err(PackFileError::Lock("元数据正在被锁定".into())),
@@ -1573,12 +1585,12 @@ impl PackFileMetadata {
         let len = u64::from_le_bytes(
             data[PACK_FILE_METADATA_LEN_INDEX..PACK_FILE_METADATA_MODIFIED_INDEX]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let modified = u128::from_le_bytes(
             data[PACK_FILE_METADATA_MODIFIED_INDEX..PACK_FILE_METADATA_TYPE_DATA_INDEX]
                 .try_into()
-                .unwrap(),
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let type_data = &data[PACK_FILE_METADATA_TYPE_DATA_INDEX..];
         let file_type = match this_type {
@@ -1604,13 +1616,13 @@ impl PackFileMetadata {
                 let file_count = u64::from_le_bytes(
                     type_data[..PACK_METADATA_DIR_DIR_COUNT_INDEX]
                         .try_into()
-                        .unwrap(),
+                        .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
                 );
                 let dir_count = u64::from_le_bytes(
                     type_data[PACK_METADATA_DIR_DIR_COUNT_INDEX
                         ..PACK_METADATA_DIR_DIR_COUNT_INDEX + PACK_METADATA_DIR_DIR_COUNT_LEN]
                         .try_into()
-                        .unwrap(),
+                        .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
                 );
                 PackFileMetadataType::Dir {
                     file_count,
@@ -1647,7 +1659,7 @@ impl ManifestDataBlockTrait for PackFileMetadata {
                         + data_pos_list_data.len(),
                 );
                 data.push(*hash_type);
-                let hash_len = u8::try_from(hash_value.len()).expect("哈希值长度值过大");
+                let hash_len = u8::try_from(hash_value.len()).unwrap_or(u8::MAX);
                 data.push(hash_len);
                 for hash in hash_value {
                     data.push(*hash);

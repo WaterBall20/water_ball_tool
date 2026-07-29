@@ -33,14 +33,14 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
-        pack_file.file_gc();
+        pack_file.file_gc()?;
         drop(pack_file);
         self.save_empty_data_list()
     }
 
     pub(super) fn manifest_file_gc(&mut self) -> Result<()> {
         if let Some(file) = self.manifest.file_mut() {
-            file.file_gc();
+            file.file_gc()?;
             self.save_manifest_empty_data_list()
         } else {
             Ok(())

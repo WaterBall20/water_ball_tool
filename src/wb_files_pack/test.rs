@@ -70,8 +70,8 @@ fn pack_struct_to_bytes_vec_and_load() {
         );
         ps.to_bytes_vec();
     }
-    let block_data = ManifestDataBlock::from_block_data_new(ps.get_block_data().0, 0).unwrap();
-    let ps_load = PackStruct::load(block_data).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(ps.get_block_data().expect("获取块数据失败").0, 0).expect("从块数据创建ManifestDataBlock失败");
+    let ps_load = PackStruct::load(block_data).expect("加载PackStruct失败");
     assert_eq!(ps, ps_load);
 }
 #[test]
@@ -86,7 +86,7 @@ fn pack_struct_item_dir_to_bytes_vec_and_load() {
         PackFileMetadataRun::NoLoad,
     );
     let data = psi.to_bytes_vec();
-    let psi_load = PackStructItem::load(&data).unwrap();
+    let psi_load = PackStructItem::load(&data).expect("加载PackStructItem失败");
     assert_eq!(psi, psi_load);
 }
 #[test]
@@ -98,7 +98,7 @@ fn pack_struct_item_file_to_bytes_vec_and_load() {
         PackFileMetadataRun::NoLoad,
     );
     let data = psi.to_bytes_vec();
-    let psi_load = PackStructItem::load(&data).unwrap();
+    let psi_load = PackStructItem::load(&data).expect("加载PackStructItem失败");
     assert_eq!(psi, psi_load);
     let psi_load_data = psi_load.to_bytes_vec();
     assert_eq!(data, psi_load_data);
@@ -110,8 +110,8 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
         hash_value: Vec::new(),
         data_pos_list: DataPosList::new(vec![(0, 100), (10, 1), (223, 5890)]),
     });
-    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
-    let pfm_load = PackFileMetadata::load(block_data).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().expect("获取块数据失败").0, 0).expect("从块数据创建ManifestDataBlock失败");
+    let pfm_load = PackFileMetadata::load(block_data).expect("加载PackFileMetadata失败");
     assert_eq!(pfm, pfm_load);
     //2
     let hash_value = vec![
@@ -163,9 +163,9 @@ fn pack_file_metadata_file_to_bytes_vec_and_load() {
         *hash_type = 1;
         *this_hash_value = hash_value;
     }
-    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
-    let pfm_load = PackFileMetadata::load(block_data).unwrap();
-    pfm2.get_block_data();
+    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().expect("获取块数据失败").0, 0).expect("从块数据创建ManifestDataBlock失败");
+    let pfm_load = PackFileMetadata::load(block_data).expect("加载PackFileMetadata失败");
+    pfm2.get_block_data().expect("获取块数据失败");
     assert_eq!(pfm2, pfm_load);
 }
 #[test]
@@ -174,17 +174,17 @@ fn pack_file_metadata_dir_to_bytes_vec_and_load() {
         file_count: 0,
         dir_count: 0,
     });
-    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().0, 0).unwrap();
-    let pfm_load = PackFileMetadata::load(block_data).unwrap();
+    let block_data = ManifestDataBlock::from_block_data_new(pfm.get_block_data().expect("获取块数据失败").0, 0).expect("从块数据创建ManifestDataBlock失败");
+    let pfm_load = PackFileMetadata::load(block_data).expect("加载PackFileMetadata失败");
     assert_eq!(pfm, pfm_load);
 }
 
 #[test]
 fn pack_file_metadata_data_block_save_and_load() {
     let mut a = Attribute::default();
-    let a_block_data = a.get_block_data().0;
-    let a_data_block = ManifestDataBlock::from_block_data_new(a_block_data, 0).unwrap();
-    let a_load = Attribute::load(a_data_block).unwrap();
+    let a_block_data = a.get_block_data().expect("获取块数据失败").0;
+    let a_data_block = ManifestDataBlock::from_block_data_new(a_block_data, 0).expect("从块数据创建ManifestDataBlock失败");
+    let a_load = Attribute::load(a_data_block).expect("加载Attribute失败");
     assert_eq!(a, a_load);
     //Save2
     let mut b = Attribute::default();
@@ -196,18 +196,18 @@ fn pack_file_metadata_data_block_save_and_load() {
     b.set_empty_data_pos_list_pos(255);
     b.set_manifest_empty_data_pos_list_pos(241);
     b.set_manifest_file_len(123);
-    let b_block_data = b.get_block_data().0;
+    let b_block_data = b.get_block_data().expect("获取块数据失败").0;
     //Load
     let b_load = Attribute::load(
-        ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()
-    ).unwrap();
+        ManifestDataBlock::from_block_data_new(b_block_data, 0).expect("从块数据创建ManifestDataBlock失败")
+    ).expect("加载Attribute失败");
     assert_eq!(b, b_load);
     //Save3
-    let b_block_data = b.get_block_data().0;
+    let b_block_data = b.get_block_data().expect("获取块数据失败").0;
     //Load
     let b_load = Attribute::load(
-        ManifestDataBlock::from_block_data_new(b_block_data, 0).unwrap()
-    ).unwrap();
+        ManifestDataBlock::from_block_data_new(b_block_data, 0).expect("从块数据创建ManifestDataBlock失败")
+    ).expect("加载Attribute失败");
     assert_eq!(b, b_load);
 }
 
@@ -256,13 +256,13 @@ fn ab_b_corrupted_higher_ver_reads_a() {
     let mut md = prepare_ab_block(data1, data2);
 
     // 确认当前读到的是 B 的数据 (ver=2 > ver=1)
-    assert_eq!(md.get_this_data().unwrap(), data2);
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), data2);
 
     // 损坏 B 块
     corrupt_b_tail_ver(&mut md);
 
     // 应回退读取 A 的数据
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data1);
 }
 
@@ -277,7 +277,7 @@ fn ab_a_corrupted_lower_ver_reads_b() {
     corrupt_a_tail_ver(&mut md);
 
     // 应读取 B (ver=2)
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data2);
 }
 
@@ -293,12 +293,12 @@ fn ab_a_corrupted_higher_ver_reads_b() {
     md.update(data2); // B=2
     md.update(data3); // A=3 (higher)
 
-    assert_eq!(md.get_this_data().unwrap(), data3);
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), data3);
 
     corrupt_a_tail_ver(&mut md);
 
     // A 损坏 → 应回退读取 B (ver=2)
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data2);
 }
 
@@ -326,13 +326,13 @@ fn ab_both_valid_selects_higher_ver() {
     let mut md = prepare_ab_block(data1, data2);
 
     // B 更新，应读到 data2
-    assert_eq!(md.get_this_data().unwrap(), data2);
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), data2);
 
     let data3 = b"even_higher_version_data";
     md.update(data3); // A=3
 
     // A 更新，应读到 data3
-    assert_eq!(md.get_this_data().unwrap(), data3);
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), data3);
 }
 
 #[test]
@@ -347,9 +347,9 @@ fn ab_from_block_data_new_preserves_fallback() {
 
     // 序列化再反序列化 / Serialize then deserialize
     let block_data = md.block_data().to_vec();
-    let md2 = ManifestDataBlock::from_block_data_new(block_data, 0).unwrap();
+    let md2 = ManifestDataBlock::from_block_data_new(block_data, 0).expect("从块数据创建ManifestDataBlock失败");
 
-    let recovered = md2.get_this_data().unwrap();
+    let recovered = md2.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data1);
 }
 
@@ -438,7 +438,7 @@ fn get_ver_accepts_nonzero() {
     let tail_start = block_size - MANIFEST_DATA_BLOCK_DATA_VER_LEN;
     data[tail_start..tail_start + MANIFEST_DATA_BLOCK_DATA_VER_LEN].copy_from_slice(&ver_bytes);
 
-    let result = ManifestDataBlock::get_ver(&data).unwrap();
+    let result = ManifestDataBlock::get_ver(&data).expect("获取版本号失败");
     assert_eq!(result, 42);
 }
 
@@ -482,13 +482,13 @@ fn update_wraps_version_near_max() {
     md.update(data2);
 
     // 现在 B 应该 ver=1，应读取 data2
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data2);
 
     // 再次 update 验证能继续正常交替
     let data3 = b"data_after_wrap";
     md.update(data3);
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data3);
 }
 
@@ -529,15 +529,15 @@ fn update_wraps_at_boundary_then_continues() {
     // 3 < 4 billion → MAX is older! Correct.
     md.update(b"step2_wrap");
 
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, b"step2_wrap");
 
     // 继续正常更新 / Continue normal updates
     md.update(b"step3");
-    assert_eq!(md.get_this_data().unwrap(), b"step3");
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), b"step3");
 
     md.update(b"step4");
-    assert_eq!(md.get_this_data().unwrap(), b"step4");
+    assert_eq!(md.get_this_data().expect("获取当前数据失败"), b"step4");
 }
 
 #[test]
@@ -567,13 +567,13 @@ fn ab_fallback_works_after_wrap_around() {
     // 再次 update: ver_is_older(MAX-1, MAX)=true → 更新 A: next_ver(MAX)=1
     md.update(b"newest_data");
 
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, b"newest_data");
 
     // 损坏 B (ver=MAX) → 应回退到 A (ver=1)
     corrupt_b_tail_ver(&mut md);
 
-    let recovered = md.get_this_data().unwrap();
+    let recovered = md.get_this_data().expect("获取当前数据失败");
     // A 在 wrap 后被更新为 "newest_data" (ver=1)
     assert_eq!(recovered, b"newest_data");
 }

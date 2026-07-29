@@ -179,7 +179,13 @@ impl WBFPManager {
         ) -> Result<()> {
             let keys: Vec<String> = pack_struct.items().keys().cloned().collect();
             for name in keys {
-                let item = pack_struct.get_item_mut(&name).unwrap();
+                let item = pack_struct.get_item_mut(&name).ok_or(
+                    PackFileError::State(format!(
+                        "虚拟路径\"{}\"的结构项\"{}\"不存在",
+                        s_path.display(),
+                        name
+                    ))
+                )?;
                 let item_name = item.name().clone();
                 if
                 let PackStructItemType::Dir { struct_file_pos, pack_struct: sub_ps } =
@@ -225,18 +231,30 @@ impl WBFPManager {
         let root_keys: Vec<String> = self.manifest.root_struct().items().keys().cloned().collect();
         let mut temp_ps = PackStruct::default();
         for name in &root_keys {
-            let item = self.manifest.root_struct_mut().remove_item(name).unwrap();
+            let item = self.manifest.root_struct_mut().remove_item(name).ok_or(
+                PackFileError::State(format!(
+                    "根目录结构项\"{name}\"不存在"
+                ))
+            )?;
             temp_ps.add_item(name.clone(), item);
         }
         if let Err(err) = m_load_all_data(self, &mut temp_ps, no_err, &PathBuf::new()) && !no_err {
             for name in &root_keys {
-                let item = temp_ps.remove_item(name).unwrap();
+                let item = temp_ps.remove_item(name).ok_or(
+                    PackFileError::State(format!(
+                        "临时结构项\"{name}\"不存在"
+                    ))
+                )?;
                 self.manifest.root_struct_mut().add_item(name.clone(), item);
             }
             Err(err)?;
         }
         for name in &root_keys {
-            let item = temp_ps.remove_item(name).unwrap();
+            let item = temp_ps.remove_item(name).ok_or(
+                PackFileError::State(format!(
+                    "临时结构项\"{name}\"不存在"
+                ))
+            )?;
             self.manifest.root_struct_mut().add_item(name.clone(), item);
         }
         Ok(())
@@ -255,7 +273,9 @@ impl WBFPManager {
         is_dir: bool,
     ) -> Result<()> {
         let mut path_list = path_list.iter();
-        let two_name = path_list.next().unwrap();
+        let two_name = path_list.next().ok_or(
+            PackFileError::State("路径列表为空，无法加载结构元数据".into())
+        )?;
         let two_pack_struct = if
         let Some(mut struct_item) = self.manifest.root_struct_mut().remove_item(two_name)
         {

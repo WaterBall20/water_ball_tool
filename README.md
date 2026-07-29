@@ -117,7 +117,7 @@ src/
 │   ├── allocator.rs    # 线程安全封装层（Arc<Mutex<>>）
 │   ├── allocator/test.rs # 外部 API 测试
 │   ├── pack_io.rs      # 底层文件 I/O + 空间分配 + GC
-│   ├── pack_io/file.rs # 虚拟文件读写器（PackFileWR）
+│   ├── pack_io/file.rs # 虚拟文件读写器（PackVirtualFile，含访问模式强制）
 │   └── net_server.rs   # 网络服务（开发中）
 └── gakumasu/           # 学园偶像大师游戏器（开发中）
     ├── data.rs
@@ -129,11 +129,11 @@ src/
 ## 构建与测试 / Build & Test
 
 ```bash
-# 运行全部测试（跳过长时间测试）
-cargo test -- --skip longtime
-
-# 运行包括长时间测试
+# 运行全部测试（跳过长时间测试，#[ignore] 自动处理）
 cargo test
+
+# 运行包括长时间测试（主分支 CI 全量测试）
+cargo test -- --include-ignored
 
 # 仅编译检查
 cargo check

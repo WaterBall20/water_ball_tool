@@ -111,12 +111,18 @@ impl WBFPManager {
             }
         } else {
             match lock_info.file_lock_pid_run {
-                Some(true) => panic!("无法为包文件上写入锁，正在被其他进程持有。"),
-                Some(false) => panic!(
-                    r#"包文件未正常解锁，但相关进程(pid:{})可能已停止。如果你认为可以继续，可以删除锁文件"{}"强制解锁"#,
-                    lock_info.file_lock_pid.expect("pid参数不存在"),
-                    write_lock_path.display()
-                ),
+                Some(true) => Err(PackFileError::Lock(
+                    "无法为包文件上写入锁，正在被其他进程持有。".into(),
+                )),
+                Some(false) => {
+                    let pid = lock_info
+                        .file_lock_pid
+                        .ok_or(PackFileError::State("pid参数不存在".into()))?;
+                    Err(PackFileError::Lock(format!(
+                        r#"包文件未正常解锁，但相关进程(pid:{pid})可能已停止。如果你认为可以继续，可以删除锁文件"{}"强制解锁"#,
+                        write_lock_path.display()
+                    )))
+                }
                 None => Ok(Some(Self::write_lock_file(write_lock_path)?)),
             }
         }

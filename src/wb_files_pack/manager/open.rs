@@ -39,7 +39,7 @@ impl WBFPManager {
         for (index, byte) in self
             .manifest
             .attribute_mut()
-            .get_block_data()
+            .get_block_data()?
             .0
             .into_iter()
             .enumerate()
@@ -53,8 +53,7 @@ impl WBFPManager {
                 .lock()
                 .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
             pack_file
-                .write_all(&file_header_buf)
-                .expect("无法写入文件头");
+                .write_all(&file_header_buf)?;
             pack_file
                 .set_len(FILE_HEADER_BLOCK_LEN as u64)?;
         }
@@ -97,20 +96,20 @@ impl WBFPManager {
         }
         let bool_data = header[FILE_HEADER_BOOL_DATA_INDEX];
         let separate_manifest = ((bool_data << 1) >> 7) == 1;
-        let pack_len = u64::from_le_bytes(
-            header[FILE_HEADER_DATA_LENGTH_INDEX
+        let pack_len = {
+            let arr: [u8; 8] = header[FILE_HEADER_DATA_LENGTH_INDEX
                 ..(FILE_HEADER_DATA_LENGTH_INDEX + FILE_HEADER_DATA_LENGTH_LENGTH)]
                 .try_into()
-                .unwrap(),
-        );
+                .map_err(|_| PackFileError::Format("文件头长度字段长度固定".into()))?;
+            u64::from_le_bytes(arr)
+        };
         m_pack_file.len = pack_len;
         let attribute_data =
             &header_block_data[FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX..FILE_HEADER_BLOCK_LEN];
         let attribute_data = ManifestDataBlock::from_block_data_new(
             attribute_data.to_vec(),
             FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64,
-        )
-            .expect("无法解析数据块");
+        )?;
         let attribute = Attribute::load(attribute_data)?;
         let mut write_lock_file_path = pack_path.clone();
         write_lock_file_path.push_str(".lock");
@@ -128,8 +127,7 @@ impl WBFPManager {
             let empty_pos_data_block =
                 m_pack_file.manifest_data_block_read(attribute.empty_data_pos_list_pos())?;
             let empty_pos_data = empty_pos_data_block
-                .get_this_data()
-                .expect("读取空数据列表失败")
+                .get_this_data()?
                 .to_vec();
             m_pack_file.empty_data_list =
                 DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
@@ -139,13 +137,13 @@ impl WBFPManager {
             let manifest = WBFilesPackManifest::new(attribute, root_struct, None);
             drop(m_pack_file);
             drop(m_pack_file_arc);
-            Ok(WBFPManager::new(
+            WBFPManager::new(
                 pack_path,
                 manifest,
                 pack_file,
                 separate_manifest,
                 Some(write_lock_file),
-            ))
+            )
         }
     }
 
@@ -164,16 +162,14 @@ impl WBFPManager {
         let empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos())?;
         let empty_pos_data = empty_pos_data_block
-            .get_this_data()
-            .expect("读取空数据列表失败")
+            .get_this_data()?
             .to_vec();
         m_pack_file.empty_data_list =
             DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
         let manifest_empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.manifest_empty_data_pos_list_pos())?;
         let manifest_empty_pos_data = manifest_empty_pos_data_block
-            .get_this_data()
-            .expect("读取清单空数据列表失败")
+            .get_this_data()?
             .to_vec();
         manifest_file.empty_data_list = DataPosList::load(
             &manifest_empty_pos_data,
@@ -183,13 +179,13 @@ impl WBFPManager {
             manifest_file.manifest_data_block_read(attribute.root_struct_pos())?;
         let root_struct = PackStruct::load(root_struct_block_data)?;
         let manifest = WBFilesPackManifest::new(attribute, root_struct, Some(manifest_file));
-        Ok(WBFPManager::new(
+        WBFPManager::new(
             pack_path,
             manifest,
             pack_file,
             separate_manifest,
             Some(write_lock_file),
-        ))
+        )
     }
 
     pub(crate) fn create_pack_file<P: AsRef<Path>>(
@@ -202,14 +198,14 @@ impl WBFPManager {
         let mut write_lock_path = path
             .as_ref()
             .to_str()
-            .expect("无法将路径转换成文本")
+            .ok_or(PackFileError::Format("无法将路径转换成文本".into()))?
             .to_string();
         write_lock_path.push_str(".lock");
         let write_lock_path = PathBuf::from(write_lock_path);
         let write_lock_file = Self::write_lock(false, &write_lock_path)?;
         let manifest_file = if separate_manifest {
             let mut manifest_path =
-                String::from(path.as_ref().to_str().expect("无法将路径转换成文件"));
+                String::from(path.as_ref().to_str().ok_or(PackFileError::Format("无法将路径转换成文本".into()))?);
             manifest_path.push_str(".wbm");
             let manifest_pack_file = File::options()
                 .read(true)
@@ -222,14 +218,14 @@ impl WBFPManager {
         } else {
             None
         };
-        Ok(Self::create_pack(
+        Self::create_pack(
             path,
             cow,
             pack_file,
             separate_manifest,
             manifest_file,
             write_lock_file,
-        ))
+        )
     }
 
     pub(super) fn create_pack<P: AsRef<Path>>(
@@ -239,7 +235,7 @@ impl WBFPManager {
         separate_manifest: bool,
         manifest_file: Option<PackIO>,
         write_lock_file: Option<File>,
-    ) -> WBFPManager {
+    ) -> Result<WBFPManager> {
         let mut attribute = Attribute::default();
         attribute.set_cow(cow);
         WBFPManager::new(

@@ -1,5 +1,5 @@
 use crate::{tools::TestTool, wb_files_pack::allocator::Allocator};
-use crate::wb_files_pack::pack_io::file::PackFileWR;
+use crate::wb_files_pack::pack_io::file::PackVirtualFile;
 use crate::wb_files_pack::OverwriteStrategy;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,42 +12,81 @@ static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/allocator/err";
 
 // === 辅助函数 / Helpers ===
 
+/// 创建新包（读写模式）/ Create new pack in ReadWrite mode
+fn create_new_rw(path: impl AsRef<std::path::Path>) -> Allocator {
+    Allocator::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .cow(false)
+        .separate_manifest(true)
+        .open(path)
+        .expect("创建包文件失败")
+}
+
 /// 准备测试目录并清理旧文件
 fn setup_ok_test(name: &str) -> (PathBuf, PathBuf) {
     let dir = PathBuf::from(WBFP_TEST_TEMP_OK_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).expect("创建测试目录失败");
     let pack = dir.join("pack");
     TestTool::remove_test_pack_files(&pack);
     (dir, pack)
 }
 
-/// 创建虚拟文件 → 写入数据 → 回读 → 断言一致（指定长度）
+/// 创建虚拟文件（读写模式）→ 写入数据 → 回读 → 断言一致（指定长度）
+///
+/// 使用 `virtual_file_options()` 而非 `create_virtual_file`，因为需要读写双重权限。
 fn write_then_read_back(pack: &mut Allocator, path: &str, data: &[u8]) {
-    let mut rw = pack.create_file(path, 0, data.len() as u64).unwrap();
-    rw.write_all(data).unwrap();
-    rw.seek(SeekFrom::Start(0)).unwrap();
+    let mut rw = Allocator::virtual_file_options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(pack, path)
+        .expect("创建虚拟文件失败");
+    rw.set_len(data.len() as u64).expect("设置长度失败");
+    rw.write_all(data).expect("写入数据失败");
+    rw.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
     let mut buf = vec![0u8; data.len()];
-    _ = rw.read(&mut buf).unwrap();
+    _ = rw.read(&mut buf).expect("读取数据失败");
     assert_eq!(data, buf.as_slice());
 }
 
-/// 创建虚拟文件 → 写入数据 → 回读 → 断言一致（不预指定长度）
+/// 创建虚拟文件（读写模式）→ 写入数据 → 回读 → 断言一致（不预指定长度）
 fn write_then_read_back_no_len(pack: &mut Allocator, path: &str, data: &[u8]) {
-    let mut rw = pack.create_file_auto_sized(path).unwrap();
-    rw.write_all(data).unwrap();
-    rw.seek(SeekFrom::Start(0)).unwrap();
+    let mut rw = Allocator::virtual_file_options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(pack, path)
+        .expect("创建虚拟文件失败");
+    rw.write_all(data).expect("写入数据失败");
+    rw.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
     let mut buf = vec![0u8; data.len()];
-    _ = rw.read(&mut buf).unwrap();
+    _ = rw.read(&mut buf).expect("读取数据失败");
     assert_eq!(data, buf.as_slice());
 }
 
-/// 打开已存在的虚拟文件 → 覆写 → 回读 → 断言一致
+/// 打开已存在的虚拟文件（读写模式）/ Open an existing virtual file in read-write mode
+fn open_rw(alloc: &mut Allocator, path: &str) -> PackVirtualFile {
+    Allocator::virtual_file_options()
+        .read(true)
+        .write(true)
+        .open(alloc, path)
+        .expect("打开虚拟文件失败")
+}
+
+/// 打开已存在的虚拟文件 → 设置大小 → 覆写 → 回读 → 断言一致
+///
+/// 始终调用 `set_len` 设置精确大小（缩小和扩大都需要），不妥协。
+/// Always call `set_len` to set the exact size (both shrink and extend).
 fn reopen_write_then_read_back(pack: &mut Allocator, path: &str, data: &[u8]) {
-    let mut rw = pack.open_file(path, false).unwrap();
-    rw.write_all(data).unwrap();
-    rw.seek(SeekFrom::Start(0)).unwrap();
+    let mut rw = open_rw(pack, path);
+    rw.set_len(data.len() as u64).expect("设置长度失败");
+    rw.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+    rw.write_all(data).expect("写入数据失败");
+    rw.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
     let mut buf = vec![0u8; data.len()];
-    _ = rw.read(&mut buf).unwrap();
+    rw.read_exact(&mut buf).expect("读取数据失败");
     assert_eq!(data, buf.as_slice());
 }
 
@@ -57,7 +96,7 @@ fn reopen_write_then_read_back(pack: &mut Allocator, path: &str, data: &[u8]) {
 fn create_pack() {
     let (dir, pack) = setup_ok_test("create_pack");
     {
-        Allocator::create_new_pack_file2(&pack).unwrap();
+        Allocator::create_new(&pack).expect("创建包文件失败");
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -67,9 +106,9 @@ fn create_pack() {
 fn create_dir_all_and_get() {
     let (dir, pack) = setup_ok_test("create_dir_all_and_get");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("Test/Test2")).unwrap();
-        alloc.get_dir("Test/Test2").unwrap();
+        let mut alloc = Allocator::create_new(&pack).expect("创建包文件失败");
+        alloc.create_dir_all(&String::from("Test/Test2")).expect("创建目录失败");
+        alloc.get_dir("Test/Test2").expect("获取目录失败");
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -81,7 +120,7 @@ fn create_dir_all_and_get() {
 fn file_write_read_back() {
     let (dir, pack) = setup_ok_test("file_write_read_back");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         write_then_read_back(
             &mut alloc,
@@ -97,7 +136,7 @@ fn file_write_read_back() {
 fn file_write_read_back_no_len() {
     let (dir, pack) = setup_ok_test("file_write_read_back_no_len");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back_no_len(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         write_then_read_back_no_len(
             &mut alloc,
@@ -115,7 +154,7 @@ fn file_write_read_back_no_len() {
 fn file_write_read_back_no_separate_manifest() {
     let (dir, pack) = setup_ok_test("file_write_read_back_no_separate_manifest");
     {
-        let mut alloc = Allocator::create_pack_file(&pack, false, false, true).unwrap();
+        let mut alloc = Allocator::options().read(true).write(true).create_new(true).cow(false).separate_manifest(false).open(&pack).expect("创建包文件失败");
         write_then_read_back(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         write_then_read_back(
             &mut alloc,
@@ -131,7 +170,7 @@ fn file_write_read_back_no_separate_manifest() {
 fn file_write_read_back_no_len_no_separate_manifest() {
     let (dir, pack) = setup_ok_test("file_write_read_back_no_len_no_separate_manifest");
     {
-        let mut alloc = Allocator::create_pack_file(&pack, false, false, true).unwrap();
+        let mut alloc = Allocator::options().read(true).write(true).create_new(true).cow(false).separate_manifest(false).open(&pack).expect("创建包文件失败");
         write_then_read_back_no_len(&mut alloc, "Test/A", &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         write_then_read_back_no_len(
             &mut alloc,
@@ -153,7 +192,7 @@ fn reopen_and_modify_file() {
 
     // 第一轮：创建包并写入初始数据
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, path_a, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         write_then_read_back(
             &mut alloc,
@@ -164,7 +203,11 @@ fn reopen_and_modify_file() {
 
     // 第二轮：重新打开，覆写（其中 A 从 10 字节扩到 18 字节，B 缩到不同内容）
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
+        let mut alloc = Allocator::options()
+            .read(true)
+            .write(true)
+            .open(&pack)
+            .expect("打开包文件失败");
         reopen_write_then_read_back(
             &mut alloc,
             path_a,
@@ -179,15 +222,206 @@ fn reopen_and_modify_file() {
     _ = fs::remove_dir_all(&dir);
 }
 
+// === 多次重写 + GC 触发 / Multiple rewrites + GC triggering ===
+
+/// 多次随机重写同一虚拟文件，每次重写后读回验证。
+/// 随机数据 + 随机大小 + 多次重写 + 每次写后读验证。
+#[test]
+fn virtual_file_multiple_rewrite_random() {
+    let (dir, pack) = setup_ok_test("virtual_file_multiple_rewrite_random");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let path = "RewriteFile";
+
+        let init_size = rand::random_range(50..=200);
+        let init_data: Vec<u8> = (0..init_size).map(|_| rand::random()).collect();
+        write_then_read_back(&mut alloc, path, &init_data);
+
+        let rewrite_count = rand::random_range(8..=15);
+        for _ in 0..rewrite_count {
+            let new_size = rand::random_range(20..=500);
+            let new_data: Vec<u8> = (0..new_size).map(|_| rand::random()).collect();
+            reopen_write_then_read_back(&mut alloc, path, &new_data);
+        }
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+/// 创建10文件 → 删除5个（暂存GC） → Drop触发GC → 重写剩余5个+新建5个 → 全部验证。
+#[test]
+fn virtual_file_rewrite_trigger_gc() {
+    let (dir, pack) = setup_ok_test("virtual_file_rewrite_trigger_gc");
+    const FILE_COUNT: usize = 10;
+
+    // Phase 1: Create 10 files, delete last 5 (stage GC items)
+    {
+        let mut alloc = create_new_rw(&pack);
+        for i in 0..FILE_COUNT {
+            let size = rand::random_range(100..=1000);
+            let data: Vec<u8> = (0..size).map(|_| rand::random()).collect();
+            write_then_read_back(&mut alloc, &format!("File_{i}"), &data);
+        }
+        for i in 5..FILE_COUNT {
+            alloc.delete_file(&format!("File_{i}")).expect("delete failed");
+            assert!(!alloc.path_exists(&format!("File_{i}")).unwrap());
+        }
+        for i in 0..5 {
+            assert!(alloc.path_exists(&format!("File_{i}")).unwrap());
+        }
+    } // Drop → save_all() → file_gc()
+
+    // Phase 2: Rewrite remaining 5 + create 5 new
+    {
+        let mut alloc = Allocator::options()
+            .read(true)
+            .write(true)
+            .open(&pack)
+            .expect("reopen pack failed");
+
+        for i in 0..5 {
+            let new_size = rand::random_range(50..=800);
+            let new_data: Vec<u8> = (0..new_size).map(|_| rand::random()).collect();
+            reopen_write_then_read_back(&mut alloc, &format!("File_{i}"), &new_data);
+        }
+        for i in 0..5 {
+            let size = rand::random_range(100..=500);
+            let data: Vec<u8> = (0..size).map(|_| rand::random()).collect();
+            write_then_read_back(&mut alloc, &format!("NewFile_{i}"), &data);
+        }
+
+        assert!(alloc.path_exists("File_0").unwrap());
+        assert!(alloc.path_exists("File_4").unwrap());
+        assert!(alloc.path_exists("NewFile_0").unwrap());
+        assert!(alloc.path_exists("NewFile_4").unwrap());
+        assert!(!alloc.path_exists("File_5").unwrap());
+        assert!(!alloc.path_exists("File_9").unwrap());
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+/// 创建3个大文件(5-10KB) → 全部删除 → Drop触发GC → 新建3个文件(GC后空间复用) → 哈希验证。
+#[test]
+fn virtual_file_gc_reuse_rewrite() {
+    let (dir, pack) = setup_ok_test("virtual_file_gc_reuse_rewrite");
+
+    // Phase 1: Create 3 large files (5-10KB each), delete all (stage GC items)
+    {
+        let mut alloc = create_new_rw(&pack);
+        for i in 0..3 {
+            let size = 5000 + rand::random_range(0..=5000);
+            let data: Vec<u8> = (0..size).map(|_| rand::random()).collect();
+            write_then_read_back(&mut alloc, &format!("LargeFile_{i}"), &data);
+        }
+        for i in 0..3 {
+            alloc.delete_file(&format!("LargeFile_{i}")).expect("delete failed");
+        }
+    } // Drop → save_all() → file_gc()
+
+    // Phase 2: Create new files (should reuse GC'd space)
+    {
+        let mut alloc = Allocator::options()
+            .read(true)
+            .write(true)
+            .open(&pack)
+            .expect("reopen pack failed");
+
+        for i in 0..3 {
+            let size = 3000 + rand::random_range(0..=3000);
+            let data: Vec<u8> = (0..size).map(|_| rand::random()).collect();
+            write_then_read_back(&mut alloc, &format!("ReusedFile_{i}"), &data);
+        }
+
+        assert!(!alloc.path_exists("LargeFile_0").unwrap());
+        assert!(alloc.path_exists("ReusedFile_0").unwrap());
+        assert!(alloc.path_exists("ReusedFile_2").unwrap());
+
+        let vhr = alloc.verify_all_file_hash().expect("hash verify failed");
+        assert!(vhr.err_path.is_empty(), "GC后哈希验证应全部通过: {:?}", vhr.err_path);
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
+// === set_len 收缩 / set_len shrink ===
+
+/// 验证 `set_len` 缩小文件大小时的行为。
+///
+/// 通过多次 `set_len` 扩展创建多个内部数据块，写入可识别数据，
+/// 然后大幅收缩（释放超过一个数据块），验证缩小后长度和数据正确性。
+///
+/// Verify `set_len` shrink behavior: extend to create multiple internal data blocks,
+/// write identifiable data, then shrink significantly (freeing more than one block),
+/// and verify the truncated length and data are correct.
+#[test]
+fn virtual_file_set_len_shrink() {
+    let (dir, pack) = setup_ok_test("virtual_file_set_len_shrink");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let mut vf = alloc.create_virtual_file("shrink_file").expect("创建文件失败");
+
+        // 通过多次 set_len 扩展，创建多个内部数据块
+        // Create multiple internal data blocks by repeatedly extending via set_len
+        vf.set_len(768).expect("set_len(768) 扩展失败");
+        vf.set_len(1536).expect("set_len(1536) 扩展失败");
+        vf.set_len(2304).expect("set_len(2304) 扩展失败");
+
+        // 填充可识别数据
+        // Fill with identifiable data
+        let data: Vec<u8> = (0u8..192).cycle().take(2304).collect();
+        vf.seek(SeekFrom::Start(0)).expect("seek 失败");
+        vf.write_all(&data).expect("写入全量数据失败");
+
+        // 关闭，持久化
+    }
+    // 重新打开，执行收缩
+    {
+        let mut alloc = Allocator::options()
+            .read(true)
+            .write(true)
+            .open(&pack)
+            .expect("打开包文件失败");
+        let mut vf = alloc.open_virtual_file("shrink_file", false).expect("打开文件失败");
+
+        // 大幅缩小 — 必须释放多个数据块
+        // Shrink significantly — must free more than one data block
+        let shrunk_len: u64 = 50;
+        vf.set_len(shrunk_len).expect("set_len 收缩失败");
+
+        // 验证缩小后的逻辑长度
+        // Verify the logical length after shrink
+        assert_eq!(
+            vf.get_len().expect("获取长度失败"),
+            shrunk_len,
+            "set_len 收缩后文件长度应等于 shrunk_len"
+        );
+
+        // 读取前 shrunk_len 字节，验证与原始数据一致
+        // Read the first shrunk_len bytes and verify they match the original data
+        let mut buf = vec![0u8; shrunk_len as usize];
+        vf.seek(SeekFrom::Start(0)).expect("seek 失败");
+        vf.read_exact(&mut buf).expect("读取数据失败");
+        let expected: Vec<u8> = (0u8..192).cycle().take(shrunk_len as usize).collect();
+        assert_eq!(
+            buf, expected,
+            "set_len 收缩后前 {} 字节应与原始数据一致",
+            shrunk_len
+        );
+    }
+    TestTool::remove_test_pack_files(&pack);
+    _ = fs::remove_dir_all(&dir);
+}
+
 // === 错误场景 / Error cases ===
 
 #[test]
 #[should_panic(expected = "文件可能已存在")]
 fn create_pack_twice_should_fail() {
     let (dir, pack) = setup_ok_test("create_pack_twice_should_fail");
-    Allocator::create_new_pack_file2(&pack).unwrap();
+    Allocator::create_new(&pack).expect("创建包文件失败");
     // 第二次创建应失败（文件已存在或已被锁定）
-    let r = Allocator::create_new_pack_file2(&pack);
+    let r = Allocator::create_new(&pack);
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
     if let Err(err) = r {
@@ -206,15 +440,16 @@ fn create_pack_twice_should_fail() {
 fn multi_instance_write_non_overlapping() {
     let (dir, pack) = setup_ok_test("multi_instance_write_non_overlapping");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
 
         // 准备初始文件区域（12 字节），预分配空间
         // Prepare initial file region (12 bytes), pre-allocate space
         let path = "shared_file";
         {
-            let mut wr = alloc.create_file(path, 0, 12).unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(12).expect("设置长度失败");
             // 写入初始占位数据 / Write initial placeholder data
-            wr.write_all(&[0u8; 12]).unwrap();
+            wr.write_all(&[0u8; 12]).expect("写入数据失败");
         }
 
         // 克隆分配器，创建两个"独立"的实例入口
@@ -223,29 +458,29 @@ fn multi_instance_write_non_overlapping() {
         let mut alloc3 = alloc.clone();
 
         // 实例 1: 在偏移 0 处写入 4 字节 / Instance 1: write 4 bytes at offset 0
-        let mut inst1 = alloc.open_file(path, false).unwrap();
-        inst1.seek(SeekFrom::Start(0)).unwrap();
-        inst1.write_all(&[10, 20, 30, 40]).unwrap();
+        let mut inst1 = open_rw(&mut alloc, path);
+        inst1.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+        inst1.write_all(&[10, 20, 30, 40]).expect("写入数据失败");
 
         // 实例 2: 在偏移 4 处写入 4 字节 / Instance 2: write 4 bytes at offset 4
-        let mut inst2 = alloc2.open_file(path, false).unwrap();
-        inst2.seek(SeekFrom::Start(4)).unwrap();
-        inst2.write_all(&[50, 60, 70, 80]).unwrap();
+        let mut inst2 = open_rw(&mut alloc2, path);
+        inst2.seek(SeekFrom::Start(4)).expect("设置文件位置失败");
+        inst2.write_all(&[50, 60, 70, 80]).expect("写入数据失败");
 
-        // 实例 3: 在偏移 8 处写入 4 字节 / Instance 3: write 4 bytes at offset 8
-        let mut inst3 = alloc3.open_file(path, false).unwrap();
-        inst3.seek(SeekFrom::Start(8)).unwrap();
-        inst3.write_all(&[90, 100, 110, 120]).unwrap();
+        // 实例 3: 在偏移 8 处写入 4 字节 / Instance 3: write 8 bytes at offset 8
+        let mut inst3 = open_rw(&mut alloc3, path);
+        inst3.seek(SeekFrom::Start(8)).expect("设置文件位置失败");
+        inst3.write_all(&[90, 100, 110, 120]).expect("写入数据失败");
 
         // 释放所有实例后读回验证 / Drop all instances, then read back to verify
         drop(inst1);
         drop(inst2);
         drop(inst3);
 
-        let mut reader = alloc.open_file(path, false).unwrap();
-        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut reader = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
+        reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 12];
-        let n = reader.read(&mut buf).unwrap();
+        let n = reader.read(&mut buf).expect("读取数据失败");
         assert_eq!(n, 12);
         assert_eq!(
             buf,
@@ -263,53 +498,54 @@ fn multi_instance_write_non_overlapping() {
 fn multi_instance_concurrent_write() {
     let (dir, pack) = setup_ok_test("multi_instance_concurrent_write");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         let path = "concurrent_file";
 
         // 预分配 30 字节空间 / Pre-allocate 30 bytes
         {
-            let mut wr = alloc.create_file(path, 0, 30).unwrap();
-            wr.write_all(&[0u8; 30]).unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(30).expect("设置长度失败");
+            wr.write_all(&[0u8; 30]).expect("写入数据失败");
         }
 
         // 从主线程创建所有实例（open_file 需要 &mut alloc 且持有写锁）
         // Create all instances from main thread (open_file requires &mut alloc and holds write lock)
-        let wr1 = alloc.open_file(path, false).unwrap();
-        let wr2 = alloc.open_file(path, false).unwrap();
-        let wr3 = alloc.open_file(path, false).unwrap();
+        let wr1 = open_rw(&mut alloc, path);
+        let wr2 = open_rw(&mut alloc, path);
+        let wr3 = open_rw(&mut alloc, path);
 
         let mut handles = Vec::new();
 
         // 线程 1: 写入偏移 0..10
         handles.push(thread::spawn(move || {
             let mut wr = wr1;
-            wr.seek(SeekFrom::Start(0)).unwrap();
-            wr.write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).unwrap();
+            wr.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+            wr.write_all(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).expect("写入数据失败");
         }));
 
         // 线程 2: 写入偏移 10..20
         handles.push(thread::spawn(move || {
             let mut wr = wr2;
-            wr.seek(SeekFrom::Start(10)).unwrap();
-            wr.write_all(&[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]).unwrap();
+            wr.seek(SeekFrom::Start(10)).expect("设置文件位置失败");
+            wr.write_all(&[11, 12, 13, 14, 15, 16, 17, 18, 19, 20]).expect("写入数据失败");
         }));
 
         // 线程 3: 写入偏移 20..30
         handles.push(thread::spawn(move || {
             let mut wr = wr3;
-            wr.seek(SeekFrom::Start(20)).unwrap();
-            wr.write_all(&[21, 22, 23, 24, 25, 26, 27, 28, 29, 30]).unwrap();
+            wr.seek(SeekFrom::Start(20)).expect("设置文件位置失败");
+            wr.write_all(&[21, 22, 23, 24, 25, 26, 27, 28, 29, 30]).expect("写入数据失败");
         }));
 
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("等待线程失败");
         }
 
         // 主线程读回验证 / Main thread reads back and verifies
-        let mut reader = alloc.open_file(path, false).unwrap();
-        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut reader = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
+        reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 30];
-        let n = reader.read(&mut buf).unwrap();
+        let n = reader.read(&mut buf).expect("读取数据失败");
         assert_eq!(n, 30);
 
         let expected: Vec<u8> = (1..=30).collect();
@@ -325,49 +561,50 @@ fn multi_instance_concurrent_write() {
 fn multi_instance_mixed_read_write() {
     let (dir, pack) = setup_ok_test("multi_instance_mixed_read_write");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         let path = "mixed_file";
 
         // 预分配空间并写入初始数据 / Pre-allocate space and write initial data
         {
-            let mut wr = alloc.create_file(path, 0, 6).unwrap();
-            wr.write_all(b"HELLO ").unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(6).expect("设置长度失败");
+            wr.write_all(b"HELLO ").expect("写入数据失败");
         }
 
         // 从主线程创建所有实例 / Create all instances from main thread
-        let mut inst1 = alloc.open_file(path, false).unwrap();
-        let mut inst2 = alloc.open_file(path, false).unwrap();
-        let mut inst3 = alloc.open_file(path, false).unwrap();
+        let mut inst1 = open_rw(&mut alloc, path);
+        let mut inst2 = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
+        let mut inst3 = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
 
         // 实例 1: 追加写入 "WORLD"（seek 到末尾，扩展文件）
         // Instance 1: append "WORLD" (seek to end, extend file)
-        inst1.seek(SeekFrom::End(0)).unwrap();
-        inst1.write_all(b"WORLD").unwrap();
+        inst1.seek(SeekFrom::End(0)).expect("设置文件位置失败");
+        inst1.write_all(b"WORLD").expect("写入数据失败");
         drop(inst1);
 
         // 实例 2: 从偏移 0 读取前 6 字节
         // Instance 2: read first 6 bytes from offset 0
-        inst2.seek(SeekFrom::Start(0)).unwrap();
+        inst2.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 6];
-        let n = inst2.read(&mut buf).unwrap();
+        let n = inst2.read(&mut buf).expect("读取数据失败");
         assert_eq!(n, 6);
         assert_eq!(&buf, b"HELLO ", "实例2应读取到初始数据");
         drop(inst2);
 
         // 实例 3: 从偏移 6 开始读取后 5 字节（实例1 刚写入的）
         // Instance 3: read last 5 bytes from offset 6 (just written by instance 1)
-        inst3.seek(SeekFrom::Start(6)).unwrap();
+        inst3.seek(SeekFrom::Start(6)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 5];
-        let n = inst3.read(&mut buf).unwrap();
+        let n = inst3.read(&mut buf).expect("读取数据失败");
         assert_eq!(n, 5);
         assert_eq!(&buf, b"WORLD", "实例3应读取到实例1追加的数据");
         drop(inst3);
 
         // 最终读回全部 11 字节 / Final read-back of all 11 bytes
-        let mut reader = alloc.open_file(path, false).unwrap();
-        reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut reader = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
+        reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 11];
-        let n = reader.read(&mut buf).unwrap();
+        let n = reader.read(&mut buf).expect("读取数据失败");
         assert_eq!(n, 11);
         assert_eq!(&buf, b"HELLO WORLD", "混合读写后完整数据不一致");
     }
@@ -381,28 +618,29 @@ fn multi_instance_mixed_read_write() {
 fn multi_instance_cross_file_rw() {
     let (dir, pack) = setup_ok_test("multi_instance_cross_file_rw");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
 
         // 创建三个不同的文件 / Create three different files
         for (path, len) in [("file_a", 10u64), ("file_b", 10), ("file_c", 10)] {
-            let mut wr = alloc.create_file(path, 0, len).unwrap();
-            wr.write_all(&[0u8; 10]).unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(len).expect("设置长度失败");
+            wr.write_all(&[0u8; 10]).expect("写入数据失败");
         }
 
         let mut alloc2 = alloc.clone();
         let mut alloc3 = alloc.clone();
 
         // 实例 1: 写 file_a / Instance 1: write file_a
-        let mut inst1 = alloc.open_file("file_a", false).unwrap();
-        inst1.write_all(b"AAAAAAAAAA").unwrap();
+        let mut inst1 = open_rw(&mut alloc, "file_a");
+        inst1.write_all(b"AAAAAAAAAA").expect("写入数据失败");
 
         // 实例 2: 写 file_b / Instance 2: write file_b
-        let mut inst2 = alloc2.open_file("file_b", false).unwrap();
-        inst2.write_all(b"BBBBBBBBBB").unwrap();
+        let mut inst2 = open_rw(&mut alloc2, "file_b");
+        inst2.write_all(b"BBBBBBBBBB").expect("写入数据失败");
 
         // 实例 3: 写 file_c / Instance 3: write file_c
-        let mut inst3 = alloc3.open_file("file_c", false).unwrap();
-        inst3.write_all(b"CCCCCCCCCC").unwrap();
+        let mut inst3 = open_rw(&mut alloc3, "file_c");
+        inst3.write_all(b"CCCCCCCCCC").expect("写入数据失败");
 
         drop(inst1);
         drop(inst2);
@@ -410,9 +648,9 @@ fn multi_instance_cross_file_rw() {
 
         // 分别读回验证 / Read back each file and verify
         for (name, expected) in [("file_a", b"AAAAAAAAAA"), ("file_b", b"BBBBBBBBBB"), ("file_c", b"CCCCCCCCCC")] {
-            let mut reader = alloc.open_file(name, false).unwrap();
+            let mut reader = alloc.open_virtual_file(name, false).expect("打开虚拟文件失败");
             let mut buf = vec![0u8; 10];
-            reader.read_exact(&mut buf).unwrap();
+            reader.read_exact(&mut buf).expect("读取数据失败");
             assert_eq!(&buf[..], expected, "文件 {name} 数据不一致");
         }
     }
@@ -431,17 +669,18 @@ fn multi_instance_stress_three_instances() {
     const FS: usize = 60;
 
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         let path = "s3";
 
         let initial: Vec<u8> = (0..FS).map(|_| rand::random::<u8>()).collect();
         {
-            let mut wr = alloc.create_file(path, 0, FS as u64).unwrap();
-            wr.write_all(&initial).unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(FS as u64).expect("设置长度失败");
+            wr.write_all(&initial).expect("写入数据失败");
         }
 
-        let instances: Vec<PackFileWR> = (0..N)
-            .map(|_| alloc.open_file(path, false).unwrap())
+        let instances: Vec<PackVirtualFile> = (0..N)
+            .map(|_| open_rw(&mut alloc, path))
             .collect();
 
         let initial = Arc::new(initial);
@@ -454,9 +693,9 @@ fn multi_instance_stress_three_instances() {
                 let len = (FS / N) as u64;
 
                 // 读初始数据
-                wr.seek(SeekFrom::Start(start)).unwrap();
+                wr.seek(SeekFrom::Start(start)).expect("设置文件位置失败");
                 let mut buf = vec![0u8; len as usize];
-                wr.read_exact(&mut buf).unwrap();
+                wr.read_exact(&mut buf).expect("读取数据失败");
                 assert_eq!(
                     buf, init_clone[start as usize..][..len as usize],
                     "线程 {id}: 初始数据读不一致"
@@ -464,25 +703,25 @@ fn multi_instance_stress_three_instances() {
 
                 // 写标记
                 let wdata: Vec<u8> = (0..len).map(|_| (id + 1) as u8).collect();
-                wr.seek(SeekFrom::Start(start)).unwrap();
-                wr.write_all(&wdata).unwrap();
+                wr.seek(SeekFrom::Start(start)).expect("设置文件位置失败");
+                wr.write_all(&wdata).expect("写入数据失败");
 
                 // 读回验证
-                wr.seek(SeekFrom::Start(start)).unwrap();
+                wr.seek(SeekFrom::Start(start)).expect("设置文件位置失败");
                 let mut vbuf = vec![0u8; len as usize];
-                wr.read_exact(&mut vbuf).unwrap();
+                wr.read_exact(&mut vbuf).expect("读取数据失败");
                 assert_eq!(vbuf, wdata, "线程 {id}: 写后读回不一致");
             }));
         }
 
         for h in handles {
-            h.join().unwrap();
+            h.join().expect("等待线程失败");
         }
 
         // 最终验证整个文件
-        let mut reader = alloc.open_file(path, false).unwrap();
+        let mut reader = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
         let mut fb = vec![0u8; FS];
-        reader.read_exact(&mut fb).unwrap();
+        reader.read_exact(&mut fb).expect("读取数据失败");
         for id in 0..N {
             let start = id * (FS / N);
             let end = start + FS / N;
@@ -504,53 +743,54 @@ fn multi_instance_stress_three_instances() {
 fn multi_instance_independent_positions() {
     let (dir, pack) = setup_ok_test("multi_instance_independent_positions");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         let path = "pos_file";
 
         // 预分配 20 字节 / Pre-allocate 20 bytes
         {
-            let mut wr = alloc.create_file(path, 0, 20).unwrap();
-            wr.write_all(&[0u8; 20]).unwrap();
+            let mut wr = alloc.create_virtual_file(path).expect("创建虚拟文件失败");
+            wr.set_len(20).expect("设置长度失败");
+            wr.write_all(&[0u8; 20]).expect("写入数据失败");
         }
 
         let mut alloc2 = alloc.clone();
         let mut alloc3 = alloc.clone();
 
-        let mut inst1 = alloc.open_file(path, false).unwrap();
-        let mut inst2 = alloc2.open_file(path, false).unwrap();
-        let mut inst3 = alloc3.open_file(path, false).unwrap();
+        let mut inst1 = open_rw(&mut alloc, path);
+        let mut inst2 = open_rw(&mut alloc2, path);
+        let mut inst3 = open_rw(&mut alloc3, path);
 
         // 实例 1: seek(2), write "AB"
-        inst1.seek(SeekFrom::Start(2)).unwrap();
-        inst1.write_all(b"AB").unwrap();
+        inst1.seek(SeekFrom::Start(2)).expect("设置文件位置失败");
+        inst1.write_all(b"AB").expect("写入数据失败");
 
         // 实例 2: seek(10), write "CD"
-        inst2.seek(SeekFrom::Start(10)).unwrap();
-        inst2.write_all(b"CD").unwrap();
+        inst2.seek(SeekFrom::Start(10)).expect("设置文件位置失败");
+        inst2.write_all(b"CD").expect("写入数据失败");
 
         // 实例 3: seek(15), write "EF"
-        inst3.seek(SeekFrom::Start(15)).unwrap();
-        inst3.write_all(b"EF").unwrap();
+        inst3.seek(SeekFrom::Start(15)).expect("设置文件位置失败");
+        inst3.write_all(b"EF").expect("写入数据失败");
 
         // 实例 1 继续: seek(0), write "XY" — 验证位置不受实例 2/3 影响
-        inst1.seek(SeekFrom::Start(0)).unwrap();
-        inst1.write_all(b"XY").unwrap();
+        inst1.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+        inst1.write_all(b"XY").expect("写入数据失败");
 
         // 实例 2: seek(8), write "ZZ" — 覆盖已存在区域
-        inst2.seek(SeekFrom::Start(8)).unwrap();
-        inst2.write_all(b"ZZ").unwrap();
+        inst2.seek(SeekFrom::Start(8)).expect("设置文件位置失败");
+        inst2.write_all(b"ZZ").expect("写入数据失败");
 
         // 实例 3: 从当前位置继续写 — 应该在偏移 17 处（之前写到 15+2=17）
-        inst3.write_all(b"GH").unwrap();
+        inst3.write_all(b"GH").expect("写入数据失败");
 
         drop(inst1);
         drop(inst2);
         drop(inst3);
 
         // 读回全量验证 / Read back all and verify
-        let mut reader = alloc.open_file(path, false).unwrap();
+        let mut reader = alloc.open_virtual_file(path, false).expect("打开虚拟文件失败");
         let mut buf = vec![0u8; 20];
-        reader.read_exact(&mut buf).unwrap();
+        reader.read_exact(&mut buf).expect("读取数据失败");
 
         // 预期布局:
         // Expected layout:
@@ -583,11 +823,11 @@ fn multi_instance_independent_positions() {
 fn delete_file_root() {
     let (dir, pack) = setup_ok_test("delete_file_root");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "test.txt", &[1, 2, 3, 4, 5]);
-        assert!(alloc.path_exists("test.txt").unwrap());
-        alloc.delete_file("test.txt").unwrap();
-        assert!(!alloc.path_exists("test.txt").unwrap());
+        assert!(alloc.path_exists("test.txt").expect("检查路径存在失败"));
+        alloc.delete_file("test.txt").expect("删除文件失败");
+        assert!(!alloc.path_exists("test.txt").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -597,15 +837,15 @@ fn delete_file_root() {
 fn delete_file_subdir() {
     let (dir, pack) = setup_ok_test("delete_file_subdir");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("A/B")).unwrap();
+        let mut alloc = create_new_rw(&pack);
+        alloc.create_dir_all(&String::from("A/B")).expect("创建目录失败");
         write_then_read_back(&mut alloc, "A/B/file.txt", &[10, 20, 30]);
-        assert!(alloc.path_exists("A/B/file.txt").unwrap());
-        assert!(alloc.path_exists("A/B").unwrap());
-        alloc.delete_file("A/B/file.txt").unwrap();
-        assert!(!alloc.path_exists("A/B/file.txt").unwrap());
-        assert!(alloc.path_exists("A/B").unwrap());
-        assert!(alloc.path_exists("A").unwrap());
+        assert!(alloc.path_exists("A/B/file.txt").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A/B").expect("检查路径存在失败"));
+        alloc.delete_file("A/B/file.txt").expect("删除文件失败");
+        assert!(!alloc.path_exists("A/B/file.txt").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A/B").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -615,11 +855,11 @@ fn delete_file_subdir() {
 fn delete_dir_all_empty() {
     let (dir, pack) = setup_ok_test("delete_dir_all_empty");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("empty_dir")).unwrap();
-        assert!(alloc.path_exists("empty_dir").unwrap());
-        alloc.delete_dir_all("empty_dir").unwrap();
-        assert!(!alloc.path_exists("empty_dir").unwrap());
+        let mut alloc = Allocator::create_new(&pack).expect("创建包文件失败");
+        alloc.create_dir_all(&String::from("empty_dir")).expect("创建目录失败");
+        assert!(alloc.path_exists("empty_dir").expect("检查路径存在失败"));
+        alloc.delete_dir_all("empty_dir").expect("删除目录失败");
+        assert!(!alloc.path_exists("empty_dir").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -629,21 +869,21 @@ fn delete_dir_all_empty() {
 fn delete_dir_all_with_files() {
     let (dir, pack) = setup_ok_test("delete_dir_all_with_files");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("A/B")).unwrap();
+        let mut alloc = create_new_rw(&pack);
+        alloc.create_dir_all(&String::from("A/B")).expect("创建目录失败");
         write_then_read_back(&mut alloc, "A/1", &[1]);
         write_then_read_back(&mut alloc, "A/2", &[2, 2]);
         write_then_read_back(&mut alloc, "A/B/3", &[3, 3, 3]);
-        assert!(alloc.path_exists("A/1").unwrap());
-        assert!(alloc.path_exists("A/2").unwrap());
-        assert!(alloc.path_exists("A/B/3").unwrap());
-        assert!(alloc.path_exists("A/B").unwrap());
-        alloc.delete_dir_all("A").unwrap();
-        assert!(!alloc.path_exists("A").unwrap());
-        assert!(!alloc.path_exists("A/1").unwrap());
-        assert!(!alloc.path_exists("A/2").unwrap());
-        assert!(!alloc.path_exists("A/B").unwrap());
-        assert!(!alloc.path_exists("A/B/3").unwrap());
+        assert!(alloc.path_exists("A/1").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A/2").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A/B/3").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("A/B").expect("检查路径存在失败"));
+        alloc.delete_dir_all("A").expect("删除目录失败");
+        assert!(!alloc.path_exists("A").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("A/1").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("A/2").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("A/B").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("A/B/3").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -653,15 +893,15 @@ fn delete_dir_all_with_files() {
 fn delete_dir_all_nonempty() {
     let (dir, pack) = setup_ok_test("delete_dir_all_nonempty");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("data")).unwrap();
+        let mut alloc = create_new_rw(&pack);
+        alloc.create_dir_all(&String::from("data")).expect("创建目录失败");
         write_then_read_back(&mut alloc, "data/f1", &[1, 2]);
         write_then_read_back(&mut alloc, "data/f2", &[3, 4]);
-        assert!(alloc.path_exists("data").unwrap());
-        alloc.delete_dir_all("data").unwrap();
-        assert!(!alloc.path_exists("data").unwrap());
-        assert!(!alloc.path_exists("data/f1").unwrap());
-        assert!(!alloc.path_exists("data/f2").unwrap());
+        assert!(alloc.path_exists("data").expect("检查路径存在失败"));
+        alloc.delete_dir_all("data").expect("删除目录失败");
+        assert!(!alloc.path_exists("data").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("data/f1").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("data/f2").expect("检查路径存在失败"));
         assert!(alloc.get_root_struct_item_name_list().is_ok());
     }
     TestTool::remove_test_pack_files(&pack);
@@ -674,19 +914,19 @@ fn erase_file() {
     // 写入数据后关闭包再重新打开，确保数据已持久化到磁盘再擦除
     // Write data, close then reopen to ensure data is on disk before erase
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "secret.txt", &[1u8; 256]);
-        assert!(alloc.path_exists("secret.txt").unwrap());
+        assert!(alloc.path_exists("secret.txt").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(alloc.path_exists("secret.txt").unwrap());
-        alloc.erase_file("secret.txt", OverwriteStrategy::Zero).unwrap();
-        assert!(!alloc.path_exists("secret.txt").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(alloc.path_exists("secret.txt").expect("检查路径存在失败"));
+        alloc.erase_file("secret.txt", OverwriteStrategy::Zero).expect("擦除文件失败");
+        assert!(!alloc.path_exists("secret.txt").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(!alloc.path_exists("secret.txt").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(!alloc.path_exists("secret.txt").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -696,26 +936,26 @@ fn erase_file() {
 fn erase_dir_all() {
     let (dir, pack) = setup_ok_test("erase_dir_all");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
-        alloc.create_dir_all(&String::from("top/mid")).unwrap();
+        let mut alloc = create_new_rw(&pack);
+        alloc.create_dir_all(&String::from("top/mid")).expect("创建目录失败");
         write_then_read_back(&mut alloc, "top/f1", &[1, 2, 3]);
         write_then_read_back(&mut alloc, "top/mid/f2", &[4, 5, 6]);
-        assert!(alloc.path_exists("top/f1").unwrap());
-        assert!(alloc.path_exists("top/mid/f2").unwrap());
+        assert!(alloc.path_exists("top/f1").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("top/mid/f2").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(alloc.path_exists("top/f1").unwrap());
-        assert!(alloc.path_exists("top/mid/f2").unwrap());
-        alloc.erase_dir_all("top", OverwriteStrategy::Zero).unwrap();
-        assert!(!alloc.path_exists("top").unwrap());
-        assert!(!alloc.path_exists("top/f1").unwrap());
-        assert!(!alloc.path_exists("top/mid").unwrap());
-        assert!(!alloc.path_exists("top/mid/f2").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(alloc.path_exists("top/f1").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("top/mid/f2").expect("检查路径存在失败"));
+        alloc.erase_dir_all("top", OverwriteStrategy::Zero).expect("擦除目录失败");
+        assert!(!alloc.path_exists("top").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("top/f1").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("top/mid").expect("检查路径存在失败"));
+        assert!(!alloc.path_exists("top/mid/f2").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(!alloc.path_exists("top").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(!alloc.path_exists("top").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -725,15 +965,15 @@ fn erase_dir_all() {
 fn erase_file_random() {
     let (dir, pack) = setup_ok_test("erase_file_random");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "rnd.txt", &[10, 20, 30, 40, 50]);
-        assert!(alloc.path_exists("rnd.txt").unwrap());
+        assert!(alloc.path_exists("rnd.txt").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(alloc.path_exists("rnd.txt").unwrap());
-        alloc.erase_file("rnd.txt", OverwriteStrategy::Random).unwrap();
-        assert!(!alloc.path_exists("rnd.txt").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(alloc.path_exists("rnd.txt").expect("检查路径存在失败"));
+        alloc.erase_file("rnd.txt", OverwriteStrategy::Random).expect("擦除文件失败");
+        assert!(!alloc.path_exists("rnd.txt").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -743,19 +983,19 @@ fn erase_file_random() {
 fn erase_file_dod5220() {
     let (dir, pack) = setup_ok_test("erase_file_dod5220");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "dod.txt", &[100, 200, 150]);
-        assert!(alloc.path_exists("dod.txt").unwrap());
+        assert!(alloc.path_exists("dod.txt").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(alloc.path_exists("dod.txt").unwrap());
-        alloc.erase_file("dod.txt", OverwriteStrategy::Dod5220).unwrap();
-        assert!(!alloc.path_exists("dod.txt").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(alloc.path_exists("dod.txt").expect("检查路径存在失败"));
+        alloc.erase_file("dod.txt", OverwriteStrategy::Dod5220).expect("擦除文件失败");
+        assert!(!alloc.path_exists("dod.txt").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(!alloc.path_exists("dod.txt").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(!alloc.path_exists("dod.txt").expect("检查路径存在失败"));
     }
     TestTool::remove_test_pack_files(&pack);
     _ = fs::remove_dir_all(&dir);
@@ -765,7 +1005,7 @@ fn erase_file_dod5220() {
 fn delete_nonexistent() {
     let (dir, pack) = setup_ok_test("delete_nonexistent");
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = Allocator::create_new(&pack).expect("创建包文件失败");
         let result = alloc.delete_file("nonexistent.txt");
         assert!(result.is_err());
         let result = alloc.delete_dir_all("nonexistent_dir");
@@ -782,31 +1022,31 @@ fn reopen_after_delete() {
     let data_b = &[10, 20, 30, 40, 50];
     let data_c = &[100, 200, 250];
     {
-        let mut alloc = Allocator::create_new_pack_file2(&pack).unwrap();
+        let mut alloc = create_new_rw(&pack);
         write_then_read_back(&mut alloc, "keep_a", data_a);
         write_then_read_back(&mut alloc, "keep_b", data_b);
         write_then_read_back(&mut alloc, "delete_c", data_c);
-        assert!(alloc.path_exists("keep_a").unwrap());
-        assert!(alloc.path_exists("keep_b").unwrap());
-        assert!(alloc.path_exists("delete_c").unwrap());
-        alloc.delete_file("delete_c").unwrap();
-        assert!(!alloc.path_exists("delete_c").unwrap());
+        assert!(alloc.path_exists("keep_a").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("keep_b").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("delete_c").expect("检查路径存在失败"));
+        alloc.delete_file("delete_c").expect("删除文件失败");
+        assert!(!alloc.path_exists("delete_c").expect("检查路径存在失败"));
     }
     {
-        let mut alloc = Allocator::open_pack_file(&pack).unwrap();
-        assert!(!alloc.path_exists("delete_c").unwrap());
-        assert!(alloc.path_exists("keep_a").unwrap());
-        assert!(alloc.path_exists("keep_b").unwrap());
+        let mut alloc = Allocator::open(&pack).expect("打开包文件失败");
+        assert!(!alloc.path_exists("delete_c").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("keep_a").expect("检查路径存在失败"));
+        assert!(alloc.path_exists("keep_b").expect("检查路径存在失败"));
         let mut buf = vec![0u8; data_a.len()];
-        let mut r = alloc.open_file("keep_a", false).unwrap();
-        r.seek(SeekFrom::Start(0)).unwrap();
-        r.read_exact(&mut buf).unwrap();
+        let mut r = alloc.open_virtual_file("keep_a", false).expect("打开虚拟文件失败");
+        r.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+        r.read_exact(&mut buf).expect("读取数据失败");
         assert_eq!(buf, data_a);
         drop(r);
         let mut buf = vec![0u8; data_b.len()];
-        let mut r = alloc.open_file("keep_b", false).unwrap();
-        r.seek(SeekFrom::Start(0)).unwrap();
-        r.read_exact(&mut buf).unwrap();
+        let mut r = alloc.open_virtual_file("keep_b", false).expect("打开虚拟文件失败");
+        r.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
+        r.read_exact(&mut buf).expect("读取数据失败");
         assert_eq!(buf, data_b);
     }
     TestTool::remove_test_pack_files(&pack);

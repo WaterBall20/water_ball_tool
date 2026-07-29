@@ -25,5 +25,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run tests
+      # PR / 手动触发：快速测试，跳过长时间测试
+      - name: Run tests (skip long-time)
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
         run: cargo test --verbose
+      # 主分支 push：全量测试（包括长时间测试）
+      - name: Run all tests (include long-time)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cargo test --verbose -- --include-ignored

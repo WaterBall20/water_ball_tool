@@ -1,3 +1,4 @@
+use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::WBFilesPackManifest;
 use std::fs::File;
@@ -47,27 +48,34 @@ impl WBFPManager {
         pack_file: Arc<Mutex<PackIO>>,
         separate_manifest: bool,
         write_lock_file: Option<File>,
-    ) -> Self {
+    ) -> Result<Self> {
         let cow = manifest.attribute().cow();
-        let mut write_lock_path =
-            String::from(pack_path.as_ref().to_str().expect("无法将转换路径成文本"));
+        let pack_path_str = pack_path
+            .as_ref()
+            .to_str()
+            .ok_or(PackFileError::Format("无法将路径转换成文本".into()))?;
+        let mut write_lock_path = String::from(pack_path_str);
         write_lock_path.push_str(".lock");
         let write_lock_path = Path::new(&write_lock_path).to_path_buf();
-        Self {
+        Ok(Self {
             manifest,
             pack_file,
             cow,
             separate_manifest,
             run_data: WBFPManagerRun::new(write_lock_path, write_lock_file),
-        }
+        })
     }
 }
 
 impl Drop for WBFPManager {
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            self.save_all().expect("保存数据错误");
-            self.write_unlock().expect("无法解除写入锁");
+            if let Err(err) = self.save_all() {
+                tracing::error!(?err, "保存数据错误");
+            }
+            if let Err(err) = self.write_unlock() {
+                tracing::error!(?err, "无法解除写入锁");
+            }
         }
     }
 }

@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use crate::wb_files_pack::error::{Result, PackFileError};
 
-/// 虚拟文件读写器模块 / Virtual file reader-writer module
+/// 虚拟文件读写器模块（`PackVirtualFile`）/ Virtual file reader-writer module (`PackVirtualFile`)
 pub mod file;
 pub mod file_handle;
 pub mod file_hash;
@@ -146,60 +146,39 @@ impl PackIO /*核心*/ {
     }
     /// 执行垃圾回收：将暂存的 GC 项排序插入空闲列表，合并相邻块。
     /// Execute garbage collection: sort and insert staged GC items into the free list, merging adjacent blocks.
+    ///
+    /// 算法：先将暂存条目追加到空闲列表，然后整体排序（batch sort），
+    /// 最后单次扫描合并相邻块。整体 O((K+M) log(K+M))，避免原插入排序的 O(K·M)。
     //垃圾回收
-    pub(crate) fn file_gc(&mut self) {
-        //准备：排序
-        let pos_gc_list = self.run_data.gc_data_pos_list.list();
+    pub(crate) fn file_gc(&mut self) -> Result<()> {
+        //第1步：将暂存列表追加到空闲列表，然后整体按位置排序
+        //Step 1: Append staged GC entries to the free list, then sort by position
         let pos_list = &mut self.empty_data_list.list_mut();
-        'gc_for: for (gc_pos, gc_len) in pos_gc_list {
-            let gc_pos = *gc_pos;
-            let gc_len = *gc_len;
-            //排序插入
-            let mut j = 0;
-            while j < pos_list.len() {
-                let (pos, _) = *pos_list.get(j).unwrap();
-                //插入判断
-                if gc_pos < pos {
-                    //如果位置在前
-                    pos_list.insert(j, (gc_pos, gc_len));
-                    continue 'gc_for;
-                }
-                j += 1;
-            }
-            pos_list.push((gc_pos, gc_len));
-        }
-        //清空缓存
+        pos_list.extend(self.run_data.gc_data_pos_list.list_mut().drain(..));
+        pos_list.sort_unstable_by_key(|(pos, _)| *pos);
+        //清空暂存缓存（drain 已清空）
         self.run_data.gc_data_pos_list.list_mut().clear();
 
-        //合并功能
-        //当前索引
-        let mut index = 0;
-        //如果有下一个则循环
-        while let Some(v) = pos_list.get(index + 1) {
-            let (next_pos, next_len) = *v;
-
-            //当前索引内容
-            if let Some((this_pos, this_len)) = pos_list.get_mut(index) {
-                let this_end_pos = *this_pos + *this_len;
-                //检查，判断当前位置加当前长度是否等于下一个位置
-                if this_end_pos == next_pos {
-                    //合并，将下一个占用的大小加到当前大小
-                    *this_len += next_len;
-                    assert!(
-                        this_pos.is_multiple_of(DATA_BLOCK_LEN as u64)
-                            && this_len.is_multiple_of(DATA_BLOCK_LEN as u64)
-                    );
-                    let r = pos_list.remove(index + 1);
-                    assert!(
-                        r.0.is_multiple_of(DATA_BLOCK_LEN as u64)
-                            && r.1.is_multiple_of(DATA_BLOCK_LEN as u64)
-                    );
-                } else {
-                    //否则什么都不做，并附加索引
-                    index += 1;
-                }
+        //第2步：单次扫描合并相邻块
+        //Step 2: Single-pass merge adjacent blocks
+        let mut i = 0;
+        while i + 1 < pos_list.len() {
+            let (cur_pos, cur_len) = pos_list[i];
+            let (next_pos, next_len) = pos_list[i + 1];
+            if cur_pos + cur_len == next_pos {
+                pos_list[i].1 += next_len;
+                pos_list.remove(i + 1);
+                debug_assert!(
+                    pos_list[i].0.is_multiple_of(DATA_BLOCK_LEN as u64)
+                        && pos_list[i].1.is_multiple_of(DATA_BLOCK_LEN as u64),
+                    "GC 合并后块未对齐"
+                );
+                //不移动 i — 继续检查新的下一个是否也相邻
+            } else {
+                i += 1;
             }
         }
+        Ok(())
     }
 
     /// 分配文件空间：优先从空闲列表复用，无可用空间时从文件末尾扩容。
@@ -316,12 +295,17 @@ impl PackIO /*读*/ {
                 block_len
             )))?;
         }
-        let l_len = usize::try_from(block_len).unwrap() - DATA_BLOCK_LEN;
+        let l_len = usize::try_from(block_len)
+            .map_err(|_| PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize")))?
+            - DATA_BLOCK_LEN;
         let block_data = if l_len > 0 {
             let mut l_block_buf = vec![0; l_len];
             file.read_exact(&mut l_block_buf)?;
             //合并
-            let mut block_data = Vec::with_capacity(usize::try_from(block_len).unwrap());
+            let mut block_data = Vec::with_capacity(
+                usize::try_from(block_len)
+                    .map_err(|_| PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize")))?
+            );
             for byte in block_data_buf {
                 block_data.push(byte);
             }

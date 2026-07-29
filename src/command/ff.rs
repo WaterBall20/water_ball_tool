@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::{error, io, thread};
 use tracing::{error, info};
-use water_ball_tool::file_finder::{FileFinder, FilesList};
+use water_ball_tool::file_finder::{FileFinder, FilesList, SearchResult};
 
 /// `ff` 子命令的参数 / Arguments for the `ff` subcommand
 #[derive(Args, Debug)]
@@ -102,9 +102,12 @@ pub(crate) fn search_files(
                 pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
             }
         }
-        rrx.recv().expect("无法获取结果")
+        rrx.recv()
+            .expect("无法获取结果")
+            .map(SearchResult::into_files_list)
     } else {
         let (tx, _) = mpsc::channel();
         ff.search(path.as_ref(), skip_symlink, tx, SEARCH_MAX_THREAD_COUNT)
+            .map(SearchResult::into_files_list)
     }
 }

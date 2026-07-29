@@ -273,6 +273,68 @@ A/B half 最小占用 = 8 + 4 + 8 + data_len + 4  = 24 + data_len 字节
 
 ---
 
+## 附录：Rust API 参考
+
+本规范对应以下 Rust 公共 API（`src/wb_files_pack/`）：
+
+### 包文件打开（std::fs::OpenOptions 风格）
+
+| 方法 | 说明 |
+|------|------|
+| `Allocator::open(path)` | 以只读模式打开已存在的包文件 |
+| `Allocator::create_new(path)` | 创建新包文件（默认分离清单、无 COW）。文件已存在则失败 |
+| `Allocator::options() -> PackOpenOptions` | 返回 `PackOpenOptions` 构造器 |
+
+`PackOpenOptions` 方法链：
+
+| 方法 | 默认值 | 说明 |
+|------|--------|------|
+| `read(true)` | `false` | 读取模式 |
+| `write(true)` | `false` | 写入模式 |
+| `create(true)` | `false` | 创建包文件（不存在时创建） |
+| `create_new(true)` | `false` | 创建新包文件（存在则失败） |
+| `cow(true)` | `false` | 启用写时复制 |
+| `separate_manifest(true)` | `true` | 分离清单到 `.wbm` 文件 |
+| `open(path) -> Result<Allocator>` | — | 根据以上配置打开/创建包文件 |
+
+### 虚拟文件打开（std::fs::File 风格）
+
+`Allocator` 上提供便捷方法：
+
+| 方法 | 说明 |
+|------|------|
+| `Allocator::open_virtual_file(path, end_pos)` | 以只读模式打开已有虚拟文件，类似 `File::open` |
+| `Allocator::create_virtual_file(path)` | 以只写模式创建新虚拟文件，类似 `File::create` |
+| `Allocator::virtual_file_options() -> VirtualFileOpenOptions` | 返回 `VirtualFileOpenOptions` 构造器 |
+
+`VirtualFileOpenOptions` 方法链：
+
+| 方法 | 默认值 | 说明 |
+|------|--------|------|
+| `read(true)` | `false` | 只读模式 |
+| `write(true)` | `false` | 只写模式 |
+| `create_new(true)` | `false` | 创建新文件（存在则失败） |
+| `end_pos(bool)` | `false` | 文件末尾位置标记（用于增量写入恢复） |
+| `open(allocator, path) -> Result<PackVirtualFile>` | — | 在指定 `Allocator` 中打开/创建虚拟文件 |
+
+### 虚拟文件读写（PackVirtualFile）
+
+`PackVirtualFile`（原 `PackFileWR`）实现 `Read`、`Write`、`Seek` trait，并根据打开时的访问模式进行权限检查：
+
+- **Read 模式**：`Write` 操作返回 `PermissionDenied`
+- **Write 模式**：`Read` 操作返回 `PermissionDenied`
+- **ReadWrite 模式**：读写均允许
+
+继承方法：
+
+| 方法 | 说明 |
+|------|------|
+| `set_len(len)` | 设置虚拟文件长度 |
+| `set_modified(ts)` | 设置修改时间戳 |
+| `sync()` | 强制刷出待写入数据 |
+
+---
+
 ## 附录：未来计划
 
 以下字段在初版文档中描述但尚未实现，计划在后续版本中添加：

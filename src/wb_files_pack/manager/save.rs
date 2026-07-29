@@ -45,9 +45,12 @@ impl WBFPManager {
         let old_len = pack_file
             .empty_data_list
             .get_data_block_mut()
-            .unwrap()
+            .ok_or(PackFileError::State("空数据列表未加载".into()))?
             .get_this_block_len_u64();
-        let (block_data, new_block) = pack_file.empty_data_list.get_block_data().unwrap();
+        let (block_data, new_block) = pack_file
+            .empty_data_list
+            .get_block_data()
+            .ok_or(PackFileError::State("空数据列表无法获取数据".into()))?;
         drop(pack_file);
         let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_len)?;
         if new_block {
@@ -64,9 +67,12 @@ impl WBFPManager {
             let old_len = file
                 .empty_data_list
                 .get_data_block_mut()
-                .unwrap()
+                .ok_or(PackFileError::State("分离清单的空数据列表未加载".into()))?
                 .get_this_block_len_u64();
-            let (block_data, new_block) = file.empty_data_list.get_block_data().unwrap();
+            let (block_data, new_block) = file
+                .empty_data_list
+                .get_block_data()
+                .ok_or(PackFileError::State("分离清单的空数据列表无法获取数据".into()))?;
             let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_len)?;
             if new_block {
                 self.manifest
@@ -83,7 +89,7 @@ impl WBFPManager {
             let root_struct = self.manifest.root_struct_mut();
             if root_struct.is_dirty() {
                 let old_block_len = root_struct.data_block_mut().get_this_block_len_u64();
-                let (block_data, new_block) = root_struct.get_block_data();
+                let (block_data, new_block) = root_struct.get_block_data()?;
                 (true, old_block_len, block_data, new_block)
             } else {
                 (false, 0, Vec::new(), false)
@@ -108,7 +114,7 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
-        let data = attribute.get_block_data().0;
+        let data = attribute.get_block_data()?.0;
         pack_file.set_pos_write(FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64)?;
         pack_file.write_all(&data)?;
         attribute.clear_dirty();
@@ -137,7 +143,7 @@ impl WBFPManager {
             return Ok((false, current_pos));
         }
         let old_block_len = pack_struct.data_block_mut().get_this_block_len_u64();
-        let (block_data, new_block) = pack_struct.get_block_data();
+        let (block_data, new_block) = pack_struct.get_block_data()?;
         let pos =
             self.manifest_data_block_write(&block_data, new_block, current_pos, old_block_len)?;
         pack_struct.data_block_mut().set_file_pos(pos);
@@ -154,7 +160,7 @@ impl WBFPManager {
             return Ok((false, current_pos));
         }
         let old_block_len = metadata.data_block_mut().get_this_block_len_u64();
-        let (block_data, new_block) = metadata.get_block_data();
+        let (block_data, new_block) = metadata.get_block_data()?;
         let pos =
             self.manifest_data_block_write(&block_data, new_block, current_pos, old_block_len)?;
         metadata.data_block_mut().set_file_pos(pos);

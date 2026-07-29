@@ -25,9 +25,9 @@ impl WBFPManager {
         }
 
         if path_list.len() == 1 {
-            self._delete_file_root(&path_list)
+            self.delete_file_root(&path_list)
         } else {
-            self._delete_file_nested(&path_list)
+            self.delete_file_nested(&path_list)
         }
     }
 
@@ -43,9 +43,9 @@ impl WBFPManager {
         }
 
         if path_list.len() == 1 {
-            self._delete_dir_all_root(&path_list)
+            self.delete_dir_all_root(&path_list)
         } else {
-            self._delete_dir_all_nested(&path_list)
+            self.delete_dir_all_nested(&path_list)
         }
     }
 
@@ -68,9 +68,9 @@ impl WBFPManager {
         }
 
         if path_list.len() == 1 {
-            self._erase_file_root(&path_list, strategy)
+            self.erase_file_root(&path_list, strategy)
         } else {
-            self._erase_file_nested(&path_list, strategy)
+            self.erase_file_nested(&path_list, strategy)
         }
     }
 
@@ -91,16 +91,16 @@ impl WBFPManager {
         }
 
         if path_list.len() == 1 {
-            self._erase_dir_all_root(&path_list, strategy)
+            self.erase_dir_all_root(&path_list, strategy)
         } else {
-            self._erase_dir_all_nested(&path_list, strategy)
+            self.erase_dir_all_nested(&path_list, strategy)
         }
     }
 
     // ==================== 根级别操作 / Root-Level Operations ====================
 
     /// 删除根目录下的文件 / Delete a file directly under root
-    fn _delete_file_root(&mut self, path_list: &[String]) -> Result<()> {
+    fn delete_file_root(&mut self, path_list: &[String]) -> Result<()> {
         let file_name = &path_list[0];
         let this_path = PathBuf::from(file_name);
 
@@ -157,7 +157,7 @@ impl WBFPManager {
     /// 删除根目录下的目录及其全部内容 / Delete a directory and all contents under root
 
     /// 删除根目录下的目录及其全部内容 / Delete a directory and all contents under root
-    fn _delete_dir_all_root(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
+    fn delete_dir_all_root(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
         let dir_name = &path_list[0];
         let this_path = PathBuf::from(dir_name);
 
@@ -193,7 +193,7 @@ impl WBFPManager {
                 if pack_struct.is_none() {
                     *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                 }
-                let sub_ps = pack_struct.as_mut().unwrap();
+                let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
                 let (r_inner, gc_list) = self._delete_dir_contents(sub_ps, &this_path)?;
                 self._file_gc_add(gc_list)?;
 
@@ -214,7 +214,7 @@ impl WBFPManager {
     }
 
     /// 擦除根目录下的文件 / Erase a file directly under root
-    fn _erase_file_root(
+    fn erase_file_root(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
@@ -281,7 +281,7 @@ impl WBFPManager {
     }
 
     /// 擦除根目录下的目录及其全部内容 / Erase a directory and all contents under root
-    fn _erase_dir_all_root(
+    fn erase_dir_all_root(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
@@ -321,7 +321,7 @@ impl WBFPManager {
                 if pack_struct.is_none() {
                     *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
                 }
-                let sub_ps = pack_struct.as_mut().unwrap();
+                let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
                 let (r_inner, gc_list) =
                     self._erase_dir_contents(sub_ps, &this_path, strategy)?;
 
@@ -349,7 +349,7 @@ impl WBFPManager {
     // ==================== 嵌套路径操作 / Nested Path Operations ====================
 
     /// 在嵌套路径中删除文件 / Delete a file at a nested path
-    fn _delete_file_nested(&mut self, path_list: &[String]) -> Result<()> {
+    fn delete_file_nested(&mut self, path_list: &[String]) -> Result<()> {
         let first_name = &path_list[0];
         let s_path = PathBuf::from(first_name);
         let mut first_item = self
@@ -385,7 +385,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result = self._delete_file_inner(sub_ps, &path_list[1..], &s_path);
             let (r, gc_list) = match result {
@@ -432,7 +432,7 @@ impl WBFPManager {
     }
 
     /// 在嵌套路径中删除目录 / Delete a directory at a nested path
-    fn _delete_dir_all_nested(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
+    fn delete_dir_all_nested(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
         let first_name = &path_list[0];
         let s_path = PathBuf::from(first_name);
         let mut first_item = self
@@ -467,7 +467,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result = self._delete_dir_inner(sub_ps, &path_list[1..], &s_path);
             let (r, gc_list) = match result {
@@ -513,7 +513,7 @@ impl WBFPManager {
     }
 
     /// 在嵌套路径中擦除文件 / Erase a file at a nested path
-    fn _erase_file_nested(
+    fn erase_file_nested(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
@@ -552,7 +552,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result =
                 self._erase_file_inner(sub_ps, &path_list[1..], &s_path, strategy);
@@ -598,7 +598,7 @@ impl WBFPManager {
     }
 
     /// 在嵌套路径中擦除目录 / Erase a directory at a nested path
-    fn _erase_dir_all_nested(
+    fn erase_dir_all_nested(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
@@ -637,7 +637,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result =
                 self._erase_dir_inner(sub_ps, &path_list[1..], &s_path, strategy);
@@ -769,7 +769,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result = self._delete_file_inner(sub_ps, &path_list[1..], &this_path);
             let (r, gc_list) = match result {
@@ -845,7 +845,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let (mut r, gc_list) = self._delete_dir_contents(sub_ps, &this_path)?;
             r.dir_count += 1;
@@ -882,7 +882,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result = self._delete_dir_inner(sub_ps, &path_list[1..], &this_path);
             let (r, gc_list) = match result {
@@ -933,7 +933,7 @@ impl WBFPManager {
         let names: Vec<String> = dir_ps.items().keys().cloned().collect();
         for name in names {
             let this_path = s_path.join(&name);
-            let mut item = dir_ps.remove_item(&name).unwrap();
+            let mut item = dir_ps.remove_item(&name).ok_or(PackFileError::NotFound(format!("结构项\"{name}\"不存在")))?;
 
             match item.item_type() {
                 PackStructItemType::File { .. } => {
@@ -1068,7 +1068,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result =
                 self._erase_file_inner(sub_ps, &path_list[1..], &this_path, strategy);
@@ -1146,7 +1146,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let (mut r, gc_list) =
                 self._erase_dir_contents(sub_ps, &this_path, strategy)?;
@@ -1188,7 +1188,7 @@ impl WBFPManager {
             if pack_struct.is_none() {
                 *pack_struct = Some(self.load_pack_struct(*struct_file_pos)?);
             }
-            let sub_ps = pack_struct.as_mut().unwrap();
+            let sub_ps = pack_struct.as_mut().ok_or(PackFileError::State("子目录结构未加载".into()))?;
 
             let result =
                 self._erase_dir_inner(sub_ps, &path_list[1..], &this_path, strategy);
@@ -1242,7 +1242,7 @@ impl WBFPManager {
         let names: Vec<String> = dir_ps.items().keys().cloned().collect();
         for name in names {
             let this_path = s_path.join(&name);
-            let mut item = dir_ps.remove_item(&name).unwrap();
+            let mut item = dir_ps.remove_item(&name).ok_or(PackFileError::NotFound(format!("结构项\"{name}\"不存在")))?;
 
             match item.item_type() {
                 PackStructItemType::File { .. } => {
