@@ -28,7 +28,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测
 - **Non-fatal errors (warnings)** that should not abort execution:
   - Synchronous API (`FileFinder::search`): collected in `SearchResult.warnings: Vec<SearchWarning>`.
   - Streaming API (`FileFinder::search_stream`): emitted as `SearchEvent::Warning(SearchWarning)` on the receiver channel.
-- **Mutex poisoning**: use `.lock().unwrap_or_else(|e| e.into_inner())` to recover the lock — avoid panicking on poison.
+- **Mutex poisoning**: use `.lock().unwrap_or_else(std::sync::PoisonError::into_inner)` to recover the lock — avoid panicking on poison.
 - **Thread join**: use `handle.join().map_err(|_| ...)?` to propagate panics as errors rather than calling `.unwrap()`.
 - **Test code** for library modules (e.g. `file_finder::test`) may use `#![allow(clippy::unwrap_used)]` at the module level, but only where the `.unwrap()` is in a test setup/assertion context, never in production logic.
 
@@ -36,7 +36,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测
 
 ### Module graph
 - `src/main.rs` declares `mod command;` — **not** `lib.rs`. `command.rs` is private to the binary.
-- `src/lib.rs` exports the library crates: `file_finder`, `wb_files_pack`, `tools`, `gakumasu`.
+- `src/lib.rs` exports the library crates: `file_finder`, `wb_files_pack`, `tools`, `gakumasu` (gated under `#[cfg(debug_assertions)]` — only compiled in debug builds).
 - `command.rs` uses `water_ball_tool::file_finder` and `water_ball_tool::wb_files_pack` (crate-name-qualified paths), not `crate::` — because command is in the binary crate.
 - `command/ff.rs` — `ff` subcommand handler: argument parsing, progress bar setup, and file search orchestration. Calls `FileFinder::search()` from the library.
 - `command/wbfp.rs` — `wbfp` subcommand handler: pack/unpack/hash-verify with multi-threaded file I/O, progress bars per worker thread, and streaming file discovery via `FileFinder::search_stream()`.
@@ -68,6 +68,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测
 - `Allocator::create_virtual_file(path)` — creates a new virtual file in write-only mode.
 - `Allocator::virtual_file_options() -> VirtualFileOpenOptions` — builder for virtual file access: `read()`, `write()`, `create_new()`, `end_pos()`.
 - `PackVirtualFile` (renamed from `PackFileWR`) — virtual file handle implementing `Read`/`Write`/`Seek` with access mode enforcement.
+  - `get_len()` returns `u64` (not `Result<u64>`); `get_modified()` returns `u128` (not `Result<u128>`).
 - Delete/erase API: `delete_file`, `delete_dir_all`, `erase_file(strategy)`, `erase_dir_all(strategy)`.
   - Delete: removes metadata + structure, submits data blocks to GC (no overwrite).
   - Erase: overwrites data blocks + manifest blocks to storage, then GC + remove.

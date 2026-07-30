@@ -53,14 +53,14 @@ impl PackVirtualFile {
     pub(crate) fn check_allocator_compat(allocator: &Allocator, desired: AccessMode) -> Result<()> {
         let allowed = allocator.access_mode;
         match (allowed, desired) {
-            (PackAccessMode::ReadWrite, _) => Ok(()),
-            (PackAccessMode::Write, AccessMode::Write) => Ok(()),
+            (PackAccessMode::ReadWrite, _)
+            | (PackAccessMode::Write, AccessMode::Write)
+            | (PackAccessMode::Read, AccessMode::Read) => Ok(()),
             (PackAccessMode::Write, _) => Err(
                 crate::wb_files_pack::error::PackFileError::PermissionDenied(
                     "Allocator 为只写模式，无法以读取方式打开虚拟文件".into(),
                 ),
             ),
-            (PackAccessMode::Read, AccessMode::Read) => Ok(()),
             (PackAccessMode::Read, _) => Err(
                 crate::wb_files_pack::error::PackFileError::PermissionDenied(
                     "Allocator 为只读模式，无法以写入方式打开虚拟文件".into(),
@@ -72,12 +72,20 @@ impl PackVirtualFile {
     /// 返回虚拟文件的总长度（字节）。
     /// Returns the total length of this virtual file in bytes.
     //获取大小
-    pub fn get_len(&self) -> Result<u64> {
-        Ok(self.handle.lock().unwrap_or_else(|e| e.into_inner()).get_len())
+    pub fn get_len(&self) -> u64 {
+        self.handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_len()
     }
 
-    pub fn get_modified(&self) -> Result<u128> {
-        Ok(self.handle.lock().unwrap_or_else(|e| e.into_inner()).get_modified())
+    /// 返回虚拟文件的最后修改时间（毫秒时间戳）。
+    /// Returns the last modified time of this virtual file (millisecond timestamp).
+    pub fn get_modified(&self) -> u128 {
+        self.handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_modified()
     }
 
     /// 设置虚拟文件的大小。
@@ -96,6 +104,8 @@ impl PackVirtualFile {
         Ok(())
     }
 
+    /// 设置虚拟文件的最后修改时间（毫秒时间戳）。
+    /// Set the last modified time of this virtual file (millisecond timestamp).
     pub fn set_modified(&mut self, modified: u128) -> Result<()> {
         let mut handle = self.handle.lock().unwrap_or_else(|e| e.into_inner());
         handle.set_modified(modified);
@@ -153,7 +163,7 @@ impl Seek for PackVirtualFile {
                 self.add_pos_i64(pos);
             }
             SeekFrom::End(pos) => {
-                let end = self.get_len().map_err(io::Error::other)?;
+                let end = self.get_len();
                 self.set_pos(end);
                 self.add_pos_i64(pos);
             }
@@ -171,7 +181,7 @@ impl Read for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let len = handle.read(self.pos, buf).map_err(io::Error::other)?;
         self.add_pos(len as u64);
         Ok(len)
@@ -187,7 +197,7 @@ impl Write for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let len = handle.write(self.pos, buf).map_err(io::Error::other)?;
         self.add_pos(len as u64);
         Ok(len)
@@ -201,7 +211,7 @@ impl Write for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.flush().map_err(io::Error::other)
     }
 
@@ -273,15 +283,21 @@ impl VirtualFileOpenOptions {
     /// Determines the access mode from `read`/`write` flags and checks allocator
     /// access mode compatibility. If `create_new` is `true`, creates a new file;
     /// otherwise opens an existing one.
-    pub fn open<P: AsRef<Path>>(&self, allocator: &mut Allocator, path: P) -> Result<PackVirtualFile> {
+    pub fn open<P: AsRef<Path>>(
+        &self,
+        allocator: &mut Allocator,
+        path: P,
+    ) -> Result<PackVirtualFile> {
         let access_mode = match (self.read, self.write) {
             (true, false) => AccessMode::Read,
             (false, true) => AccessMode::Write,
             (true, true) => AccessMode::ReadWrite,
             (false, false) => {
-                return Err(crate::wb_files_pack::error::PackFileError::PermissionDenied(
-                    "必须启用读取或写入标志".into()
-                ))
+                return Err(
+                    crate::wb_files_pack::error::PackFileError::PermissionDenied(
+                        "必须启用读取或写入标志".into(),
+                    ),
+                );
             }
         };
 

@@ -1,6 +1,6 @@
 use crate::wb_files_pack::allocator::Allocator;
+use crate::wb_files_pack::error::{PackFileError, Result};
 use std::collections::HashMap;
-use crate::wb_files_pack::error::{Result, PackFileError};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 

@@ -22,46 +22,56 @@ static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/command/err";
 // =========================================================================
 /// ff：输出文件 + 跳过符号链接 / ff: output file with skip symlinks
 #[test]
-fn ff_out_file_skip_symlink() {
+fn ff_out_file_skip_symlink() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let out_dir_path = FF_TEST_TEMP_OK_DIR_PATH;
     _ = fs::create_dir_all(out_dir_path);
+
+    let fixture = create_small_fixture("ff_out_file_skip_symlink");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
     let mut out_file_path = out_dir_path.to_string();
     out_file_path.push_str("/test_ff_skip_symlink.json");
     _ = fs::remove_file(&out_file_path);
-    //命令行参数处理
-    ff(
-        FileFinderArgs::new(String::from("."), Some(out_file_path.clone()), true),
+    let r = ff(
+        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), true),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 /// ff：输出文件 / ff: output file
 #[test]
-fn ff_out_file() {
+fn ff_out_file() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
     let out_dir_path = FF_TEST_TEMP_OK_DIR_PATH;
     _ = fs::create_dir_all(out_dir_path);
+
+    let fixture = create_small_fixture("ff_out_file");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
     let mut out_file_path = out_dir_path.to_string();
     out_file_path.push_str("/test_ff.json");
     _ = fs::remove_file(&out_file_path);
-    //命令行参数处理
-    ff(
-        FileFinderArgs::new(String::from("."), Some(out_file_path.clone()), false),
+    let r = ff(
+        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 /// ff：大规模随机文件搜索测试 / ff: large-scale random file search test
 #[test]
 #[ignore = "longtime"]
-fn ff_out_file_longtime() {
+fn ff_out_file_longtime() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
 
-    let fixture = create_large_fixture();
+    let fixture = create_large_fixture("ff_out_file_longtime");
     let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
 
     let out_dir_path = FF_TEST_TEMP_OK_DIR_PATH;
@@ -70,20 +80,24 @@ fn ff_out_file_longtime() {
     out_file_path.push_str("/test_ff_long_time.json");
     _ = fs::remove_file(&out_file_path);
 
-    ff(
+    let r = ff(
         FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
     _ = fs::remove_dir_all(&fixture);
+    r
 }
 /// ff：不输出文件（仅打印日志）/ ff: no output file (log only)
 #[test]
-fn ff_no_out_file() {
+fn ff_no_out_file() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
-    //命令行参数处理
-    ff(FileFinderArgs::new(".".to_string(), None, false), Some(&mp));
+    let fixture = create_small_fixture("ff_no_out_file");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+    let r = ff(FileFinderArgs::new(fixture_str, None, false), Some(&mp));
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 
 // =========================================================================
@@ -92,20 +106,22 @@ fn ff_no_out_file() {
 
 /// 打包目录（分离清单）/ Pack directory (separate manifest)
 #[test]
-fn wbfp_create_new_pack_m() {
+fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
+    let fixture = create_small_fixture("wbfp_create_new_pack_m");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
     out_dir_path.push_str("/create_new_pack_m");
     _ = fs::remove_dir_all(&out_dir_path);
     _ = fs::create_dir_all(&out_dir_path);
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
-    //命令行参数处理
-    wbfp(
+    let r = wbfp(
         WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
-                "./src".to_string(),
+                fixture_str,
                 Some(out_file_path.clone()),
                 false,
                 None,
@@ -114,15 +130,17 @@ fn wbfp_create_new_pack_m() {
         )),
         Some(&mp),
     );
-    _ = fs::remove_dir_all(&out_file_path);
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 /// wbfp：大规模随机文件打包+校验+解包 / wbfp: large-scale random file pack+verify+unpack
 #[test]
 #[ignore = "longtime"]
-fn wbfp_pack_verify_unpack_longtime() {
+fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
-    let fixture = create_large_fixture();
+    let fixture = create_large_fixture("wbfp_pack_verify_unpack_longtime");
 
     let out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH) + "/pack_verify_unpack_longtime";
     _ = fs::remove_dir_all(&out_dir_path);
@@ -130,68 +148,81 @@ fn wbfp_pack_verify_unpack_longtime() {
     let pack_path = out_dir_path.clone() + "/pack";
 
     // Step 1: 打包 / Pack
-    wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
-            WaterBallFilePackCommandsPack::new(
-                fixture.to_str().expect("转换夹具路径失败").to_string(),
-                Some(pack_path.clone()),
-                false,
-                None,
-                true,
-            ),
-        )),
-        Some(&mp),
-    );
+    let r = || -> Result<(), Box<dyn std::error::Error>> {
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+                WaterBallFilePackCommandsPack::new(
+                    fixture.to_str().expect("转换夹具路径失败").to_string(),
+                    Some(pack_path.clone()),
+                    false,
+                    None,
+                    true,
+                ),
+            )),
+            Some(&mp),
+        )?;
 
-    // Step 2: 哈希校验 / Hash verify
-    let wbfp_path = pack_path.clone() + ".wbfp";
-    wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
-            WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone()),
-        )),
-        Some(&mp),
-    );
+        // Step 2: 哈希校验 / Hash verify
+        let wbfp_path = pack_path.clone() + ".wbfp";
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+                WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone()),
+            )),
+            Some(&mp),
+        )?;
 
-    // Step 3: 解包 / Unpack
-    let unpack_dir = out_dir_path.clone() + "/unpacked";
-    _ = fs::create_dir_all(&unpack_dir);
-    wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
-            WaterBallFilePackCommandsUnpack::new(wbfp_path.clone(), Some(unpack_dir), false, None),
-        )),
-        Some(&mp),
-    );
+        // Step 3: 解包 / Unpack
+        let unpack_dir = out_dir_path.clone() + "/unpacked";
+        _ = fs::create_dir_all(&unpack_dir);
+        wbfp(
+            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+                WaterBallFilePackCommandsUnpack::new(
+                    wbfp_path.clone(),
+                    Some(unpack_dir),
+                    false,
+                    None,
+                ),
+            )),
+            Some(&mp),
+        )?;
+        Ok(())
+    }();
 
     // 清理 / Cleanup
     _ = fs::remove_dir_all(&out_dir_path);
     _ = fs::remove_dir_all(&fixture);
+    r
 }
 
 /// 打包目录 — 不分离数据文件 / Pack directory — no separate data file
 #[test]
-fn wbfp_create_new_pack_m_no_s_data_file() {
+fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
+    let fixture = create_small_fixture("wbfp_create_new_pack_m_no_s_data_file");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
     out_dir_path.push_str("/create_new_pack_m_no_s_data_file");
     _ = fs::remove_dir_all(&out_dir_path);
     _ = fs::create_dir_all(&out_dir_path);
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
-    //命令行参数处理
-    wbfp(
+    let r = wbfp(
         WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
-                "./src".to_string(),
+                fixture_str,
                 Some(out_file_path.clone()),
                 true,
                 None,
-                true
+                true,
             ),
         )),
         Some(&mp),
     );
-    _ = fs::remove_dir_all(&out_file_path);
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 
 // =========================================================================
@@ -200,53 +231,65 @@ fn wbfp_create_new_pack_m_no_s_data_file() {
 
 /// 打包 + 哈希校验 + 解包 完整流程 / Pack + hash verify + unpack full flow
 #[test]
-fn wbfp_create_new_pack_m_no_s_data_file_s() {
+fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
+    let fixture = create_small_fixture("wbfp_create_new_pack_m_no_s_data_file_s");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
     let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
     out_dir_path.push_str("/create_new_pack_m_no_s_data_file_s");
     _ = fs::remove_dir_all(&out_dir_path);
     _ = fs::create_dir_all(&out_dir_path);
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
-    //前提：打包
-    {
-        //命令行参数处理
-        wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
-                WaterBallFilePackCommandsPack::new(
-                    "./src".to_string(),
-                    Some(out_file_path.clone()),
-                    true,
-                    None,
-                    true
-                ),
-            )),
-            Some(&mp),
-        );
-    }
-    out_file_path.push_str(".wbfp");
-    //哈希校验（仅需包路径）
-    {
-        wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
-                WaterBallFilePackCommandsHashVerify::new(out_file_path.clone()),
-            )),
-            Some(&mp),
-        );
-    }
-    //解包
-    {
-        let mut s_out_path = out_dir_path.clone();
-        s_out_path.push_str("/s");
-        wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
-                WaterBallFilePackCommandsUnpack::new(out_file_path.clone(), Some(s_out_path), false, None),
-            )),
-            Some(&mp),
-        );
-    }
-    _ = fs::remove_dir_all(&out_file_path);
+    let r = || -> Result<(), Box<dyn std::error::Error>> {
+        //前提：打包
+        {
+            wbfp(
+                WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+                    WaterBallFilePackCommandsPack::new(
+                        fixture_str,
+                        Some(out_file_path.clone()),
+                        true,
+                        None,
+                        true,
+                    ),
+                )),
+                Some(&mp),
+            )?;
+        }
+        out_file_path.push_str(".wbfp");
+        //哈希校验（仅需包路径）
+        {
+            wbfp(
+                WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+                    WaterBallFilePackCommandsHashVerify::new(out_file_path.clone()),
+                )),
+                Some(&mp),
+            )?;
+        }
+        //解包
+        {
+            let mut s_out_path = out_dir_path.clone();
+            s_out_path.push_str("/s");
+            wbfp(
+                WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+                    WaterBallFilePackCommandsUnpack::new(
+                        out_file_path.clone(),
+                        Some(s_out_path),
+                        false,
+                        None,
+                    ),
+                )),
+                Some(&mp),
+            )?;
+        }
+        Ok(())
+    }();
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
 }
 
 // =========================================================================
@@ -272,7 +315,8 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     ff(
         FileFinderArgs::new("/~".to_string(), Some(out_file_path.clone()), true),
         Some(&mp),
-    );
+    )
+    .expect("执行命令行操作时错误");
     _ = fs::remove_file(&out_file_path);
 }
 /// wbfp：打包不存在的目录应记录错误而非 panic / wbfp: pack nonexistent dir should log error, not panic
@@ -294,14 +338,14 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
                 Some(out_file_path.clone()),
                 false,
                 None,
-                true
+                true,
             ),
         )),
         Some(&mp),
     );
     // 不 panic，而是返回 Ok（搜索错误已记录）
     assert!(result.is_ok());
-    _ = fs::remove_dir_all(&out_file_path);
+    _ = fs::remove_dir_all(&out_dir_path);
 }
 
 // === 符号链接循环检测 / Symlink cycle detection ===
@@ -360,16 +404,20 @@ fn create_file_cmd(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// 小型稳定测试夹具目录 / Small stable test fixture directory
+const SMALL_FIXTURE_DIR: &str = "./temp/test/small_fixture";
+
 /// 大型随机文件测试夹具目录 / Large random file test fixture directory
 const LARGE_FIXTURE_DIR: &str = "./temp/test/large_fixture";
 
 /// 创建 1000 个随机文件的测试夹具 / Create a test fixture with 1000 random files
 ///
+/// `name` 用于拼接子目录，避免并行测试间冲突。
 /// 生成 25 个子目录 × 40 个文件 = 1000 个文件
 /// 每个文件内容和大小均随机（50~2048 字节）
 /// 用于大规模文件搜索和打包的压力测试
-fn create_large_fixture() -> PathBuf {
-    let dir = PathBuf::from(LARGE_FIXTURE_DIR);
+fn create_large_fixture(name: &str) -> PathBuf {
+    let dir = PathBuf::from(LARGE_FIXTURE_DIR).join(name);
     _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("创建大型测试夹具目录失败");
 
@@ -377,14 +425,34 @@ fn create_large_fixture() -> PathBuf {
     let dir_count = 25;
 
     for i in 0..dir_count {
-        let sub = dir.join(format!("batch_{:02}", i));
+        let sub = dir.join(format!("batch_{i:02}"));
         fs::create_dir_all(&sub).expect("创建夹具子目录失败");
 
         for j in 0..files_per_dir {
             let size = rand::random_range(50..=2048);
             let content: Vec<u8> = (0..size).map(|_| rand::random()).collect();
-            let fpath = sub.join(format!("data_{:03}.bin", j));
+            let fpath = sub.join(format!("data_{j:03}.bin"));
             fs::write(&fpath, &content).expect("写入夹具文件失败");
+        }
+    }
+    dir
+}
+
+/// 创建小型稳定测试夹具（15 文件，3 子目录）
+///
+/// Create a small stable test fixture (15 files, 3 subdirectories).
+/// 用于替代搜索 `.` 或打包 `./src`，避免并行测试间干扰。
+/// Used to replace searching `.` or packing `./src` to avoid parallel test interference.
+fn create_small_fixture(name: &str) -> PathBuf {
+    let dir = PathBuf::from(SMALL_FIXTURE_DIR).join(name);
+    _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("创建小型测试夹具目录失败");
+    for i in 0..3 {
+        let sub = dir.join(format!("sub_{i}"));
+        fs::create_dir_all(&sub).expect("创建夹具子目录失败");
+        for j in 0..5 {
+            let path = sub.join(format!("file_{j}.txt"));
+            fs::write(&path, format!("content_{i}_{j}\n")).expect("写入夹具文件失败");
         }
     }
     dir
@@ -392,13 +460,13 @@ fn create_large_fixture() -> PathBuf {
 
 /// ff 命令：搜索含符号链接的目录，符号链接应出现在 JSON 输出中
 #[test]
-fn ff_with_symlinks_in_output() {
+fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
     let root = setup_symlink_dir("output_json");
     create_file_cmd(&root, "real.txt");
     let link = root.join("link.txt");
     if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
         _ = fs::remove_dir_all(&root);
-        return;
+        panic!("[测试]创建符号链接测试失败");
     }
 
     let mp = MultiProgress::new();
@@ -406,10 +474,17 @@ fn ff_with_symlinks_in_output() {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    ff(
+    let r = ff(
         FileFinderArgs::new(
-            root.to_str().expect("转换根目录路径为字符串失败").to_string(),
-            Some(json_path.to_str().expect("转换 JSON 文件路径为字符串失败").to_string()),
+            root.to_str()
+                .expect("转换根目录路径为字符串失败")
+                .to_string(),
+            Some(
+                json_path
+                    .to_str()
+                    .expect("转换 JSON 文件路径为字符串失败")
+                    .to_string(),
+            ),
             false,
         ),
         Some(&mp),
@@ -421,17 +496,18 @@ fn ff_with_symlinks_in_output() {
     assert!(file_count >= 1, "JSON 输出应包含文件");
 
     _ = fs::remove_dir_all(&root);
+    r
 }
 
 /// ff -s：跳过符号链接，输出中不应包含符号链接
 #[test]
-fn ff_skip_symlinks_excludes_them() {
+fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
     let root = setup_symlink_dir("skip_in_output");
     create_file_cmd(&root, "real.txt");
     let link = root.join("link.txt");
     if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
         _ = fs::remove_dir_all(&root);
-        return;
+        panic!("[测试]创建符号链接测试失败");
     }
 
     let mp = MultiProgress::new();
@@ -439,10 +515,17 @@ fn ff_skip_symlinks_excludes_them() {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    ff(
+    let r = ff(
         FileFinderArgs::new(
-            root.to_str().expect("转换根目录路径为字符串失败").to_string(),
-            Some(json_path.to_str().expect("转换 JSON 文件路径为字符串失败").to_string()),
+            root.to_str()
+                .expect("转换根目录路径为字符串失败")
+                .to_string(),
+            Some(
+                json_path
+                    .to_str()
+                    .expect("转换 JSON 文件路径为字符串失败")
+                    .to_string(),
+            ),
             true,
         ),
         Some(&mp),
@@ -454,11 +537,12 @@ fn ff_skip_symlinks_excludes_them() {
     assert_eq!(file_count, 1, "跳过符号链接后应只有 1 个真实文件");
 
     _ = fs::remove_dir_all(&root);
+    r
 }
 
 /// ff：搜索含祖先符号链接循环的目录，不应崩溃
 #[test]
-fn ff_ancestor_symlink_does_not_crash() {
+fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
     let root = setup_symlink_dir("ancestor_crash_test");
     let sub = root.join("sub");
     fs::create_dir_all(&sub).expect("创建子目录失败");
@@ -466,16 +550,23 @@ fn ff_ancestor_symlink_does_not_crash() {
     let link_back = sub.join("back_to_root");
     if try_create_symlink_cmd(&root, &link_back).is_none() {
         _ = fs::remove_dir_all(&root);
-        return;
+        panic!("[测试]创建符号链接测试失败");
     }
 
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
 
-    ff(
-        FileFinderArgs::new(root.to_str().expect("转换根目录路径为字符串失败").to_string(), None, false),
+    let r = ff(
+        FileFinderArgs::new(
+            root.to_str()
+                .expect("转换根目录路径为字符串失败")
+                .to_string(),
+            None,
+            false,
+        ),
         Some(&mp),
     );
 
     _ = fs::remove_dir_all(&root);
+    r
 }

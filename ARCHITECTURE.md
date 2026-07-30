@@ -119,8 +119,8 @@ src/lib.rs        → library crate  "water_ball_tool"
   > `command.rs` 是二进制 crate 私有的
 - `command.rs` references library code via crate-name-qualified paths — `water_ball_tool::file_finder`, `water_ball_tool::wb_files_pack` — **not** `crate::file_finder`
   > `command.rs` 使用 crate 名限定路径引用库代码，而非 `crate::`
-- `lib.rs` exports public modules: `file_finder`, `wb_files_pack`, `tools`, `gakumasu`
-  > `lib.rs` 导出四个公共模块
+- `lib.rs` exports public modules: `file_finder`, `wb_files_pack`, `tools`, `gakumasu` (gated under `#[cfg(debug_assertions)]` — only compiled in debug builds)
+  > `lib.rs` 导出四个公共模块，其中 `gakumasu` 仅在 debug 编译时包含
 
 **Dependency Flow** / 依赖流向:
 
@@ -131,7 +131,7 @@ Library Crate (lib.rs)
     ├── pub mod file_finder
     ├── pub mod wb_files_pack
     ├── pub mod tools
-    └── pub mod gakumasu
+    └── pub mod gakumasu  [cfg(debug_assertions)]
 ```
 
 ---
@@ -590,7 +590,7 @@ if all_write_len - last_all_write_len > 128 * 1024     // 128KB written / 每写
 
 **Dirty flag chain** / 脏标记链: `PackFileMetadata.dirty` / `PackStruct.dirty` / `Attribute.dirty` → checked on write → `ManifestDataBlock.update()` returns `new_block` flag → new block size means write to new position + GC old position / 块大小变化 → 新位置写入 + 旧位置回收.
 
-`save_all()` is also invoked in `WBFPManager.drop()` — data is always persisted on process exit (unless panicking).
+`save_all()` (visibility: `pub(crate)`) is also invoked in `WBFPManager.drop()` — data is always persisted on process exit (unless panicking).
 
 > `save_all()` 在 `WBFPManager.drop()` 中也会被调用，确保进程退出时数据持久化（除非 panic）。
 
@@ -629,6 +629,7 @@ Flow / 流程:
 ```rust
 #[derive(Clone)]
 pub struct Allocator {
+    access_mode: PackAccessMode,  // Enforces read/write/read-write at open time
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
 }
@@ -678,6 +679,8 @@ pub struct Allocator {
 - Tracks `pos` (current read/write position) + `AccessMode` (Read/Write/ReadWrite)
 - All operations delegated to `PackFileHandle` / 所有操作委托给 PackFileHandle
 - Opened via `VirtualFileOpenOptions` builder pattern (std::fs::File-compatible) / 通过 VirtualFileOpenOptions 构造器打开
+- `get_len()` returns `u64` (not `Result<u64>`); `get_modified()` returns `u128` (not `Result<u128>`) — internal lock acquisition no longer produces a recoverable error / 内部锁获取不产生可恢复错误
+- Mutex poison recovery uses `std::sync::PoisonError::into_inner` throughout / 锁毒性恢复统一使用 `PoisonError::into_inner`
 
 **PackFileHandle** (`pack_io/file_handle.rs`, 493 lines — the most complex single file / 最复杂单文件):
 
@@ -750,7 +753,7 @@ pub enum PackFileError {
 
 - `From<std::io::Error>` → enables `?` operator / 支持 `?` 操作符
 - `From<PackFileError> for std::io::Error` → enables Read/Write/Seek trait impls
-- Bilingual `Display` messages (Chinese + English) / 中英双语显示信息
+- Bilingual `Display` messages (Chinese + English) using inline format variables `{e}`, `{msg}` — no redundant `format!` calls / 中英双语显示信息，使用内联格式变量
 
 ### 7.12 Pack Flow
 
@@ -974,6 +977,7 @@ tracing subscriber
 
 **Files**: `src/gakumasu/data.rs` (116 lines), `src/gakumasu/simulator.rs` (10 lines)
 
+- Gated behind `#[cfg(debug_assertions)]` — only compiled in debug builds / 仅在 debug 编译时包含
 - Not wired into CLI / 未接入 CLI
 - Defines card system types (skill cards, field effect cards), attribute system, effect conditions
 - Chinese naming conventions (Gakuen Idolmaster Japanese terminology) / 中文命名
@@ -983,6 +987,7 @@ tracing subscriber
 
 **File**: `src/wb_files_pack/net_server.rs` (27 lines)
 
+- Gated behind `#[cfg(debug_assertions)]` — only compiled in debug builds / 仅在 debug 编译时包含
 - `WBFPServer` skeleton: manages `HashMap<String, Allocator>` for multiple packs
 - `WBFPServerClient` skeleton: single client connection
 - No network listener logic yet / 尚未有网络监听逻辑

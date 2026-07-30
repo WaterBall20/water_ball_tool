@@ -1,10 +1,10 @@
 use crate::tools;
+use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    DataPosList, ManifestDataBlock, DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN,
+    DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
 };
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use crate::wb_files_pack::error::{Result, PackFileError};
 
 /// 虚拟文件读写器模块（`PackVirtualFile`）/ Virtual file reader-writer module (`PackVirtualFile`)
 pub mod file;
@@ -38,8 +38,7 @@ pub(in crate::wb_files_pack) const FILE_HEADER_DATA_LENGTH: usize = FILE_HEADER_
     + FILE_HEADER_DATA_LENGTH_LENGTH;
 
 //文件头清单属性
-pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: usize =
-    DATA_BLOCK_LEN;
+pub(in crate::wb_files_pack) const FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX: usize = DATA_BLOCK_LEN;
 
 //文件头块长度
 pub(in crate::wb_files_pack) const FILE_HEADER_BLOCK_LEN: usize =
@@ -168,6 +167,7 @@ impl PackIO /*核心*/ {
             if cur_pos + cur_len == next_pos {
                 pos_list[i].1 += next_len;
                 pos_list.remove(i + 1);
+                #[cfg(test)]
                 debug_assert!(
                     pos_list[i].0.is_multiple_of(DATA_BLOCK_LEN as u64)
                         && pos_list[i].1.is_multiple_of(DATA_BLOCK_LEN as u64),
@@ -268,7 +268,7 @@ impl PackIO /*核心*/ {
 
     /// 同步底层文件数据到磁盘。
     /// Sync the underlying file data to disk.
-    pub(crate) fn _sync_data(&mut self) -> Result<()> {
+    pub(crate) fn sync_data(&mut self) -> Result<()> {
         self.file.sync_data()?;
         Ok(())
     }
@@ -286,8 +286,9 @@ impl PackIO /*读*/ {
         //读取
         file.read_exact(&mut block_data_buf)?;
         //分析是否需要再加载
-        let block_len = ManifestDataBlock::get_block_len(&block_data_buf)
-            .map_err(|err| PackFileError::Format(format!("包文件IO属性数据块读取错误，err:{err:?}")))?;
+        let block_len = ManifestDataBlock::get_block_len(&block_data_buf).map_err(|err| {
+            PackFileError::Format(format!("包文件IO属性数据块读取错误，err:{err:?}"))
+        })?;
         if block_len > u64::from(u32::MAX) {
             Err(PackFileError::Format(format!(
                 "解析的数据大小过大，可能是错误的:{}[{}]",
@@ -295,17 +296,16 @@ impl PackIO /*读*/ {
                 block_len
             )))?;
         }
-        let l_len = usize::try_from(block_len)
-            .map_err(|_| PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize")))?
-            - DATA_BLOCK_LEN;
+        let l_len = usize::try_from(block_len).map_err(|_| {
+            PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize"))
+        })? - DATA_BLOCK_LEN;
         let block_data = if l_len > 0 {
             let mut l_block_buf = vec![0; l_len];
             file.read_exact(&mut l_block_buf)?;
             //合并
-            let mut block_data = Vec::with_capacity(
-                usize::try_from(block_len)
-                    .map_err(|_| PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize")))?
-            );
+            let mut block_data = Vec::with_capacity(usize::try_from(block_len).map_err(|_| {
+                PackFileError::Format(format!("数据块长度 {block_len} 无法转换为 usize"))
+            })?);
             for byte in block_data_buf {
                 block_data.push(byte);
             }
@@ -383,4 +383,3 @@ impl PackIO /*写*/ {
         })
     }
 }
-

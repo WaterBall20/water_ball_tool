@@ -11,13 +11,17 @@ const TEST_DIR: &str = "./temp/test/ff/symlink";
 /// 创建前将目标路径规格化以避免平台路径分隔符问题
 #[cfg(unix)]
 fn create_symlink(original: &Path, link: &Path) -> io::Result<()> {
-    let original = original.canonicalize().unwrap_or_else(|_| original.to_path_buf());
+    let original = original
+        .canonicalize()
+        .unwrap_or_else(|_| original.to_path_buf());
     std::os::unix::fs::symlink(original, link)
 }
 
 #[cfg(windows)]
 fn create_symlink(original: &Path, link: &Path) -> io::Result<()> {
-    let original = original.canonicalize().unwrap_or_else(|_| original.to_path_buf());
+    let original = original
+        .canonicalize()
+        .unwrap_or_else(|_| original.to_path_buf());
     if original.is_dir() {
         std::os::windows::fs::symlink_dir(&original, link)
     } else {
@@ -45,7 +49,10 @@ fn search_dir(path: &Path, skip_symlink: bool) -> FilesList {
         _ = rtx.send(FileFinder.search(&t_path, skip_symlink, tx, 4));
     });
     for _ in rx {}
-    rrx.recv().expect("接收搜索结果失败").expect("搜索返回错误").into_files_list()
+    rrx.recv()
+        .expect("接收搜索结果失败")
+        .expect("搜索返回错误")
+        .into_files_list()
 }
 
 /// 准备测试目录：清理并创建 / Prepare test dir: clean and create
@@ -79,7 +86,11 @@ fn symlink_to_file_is_found() {
 
     let result = search_dir(&root, false);
 
-    assert_eq!(result.file_count(), 2, "应发现 2 个文件（真实文件 + 符号链接）");
+    assert_eq!(
+        result.file_count(),
+        2,
+        "应发现 2 个文件（真实文件 + 符号链接）"
+    );
     assert!(result.files_list().contains_key("real.txt"));
     assert!(result.files_list().contains_key("link_to_real.txt"));
     _ = fs::remove_dir_all(&root);
@@ -137,8 +148,7 @@ fn multi_level_symlinks_work() {
     fs::create_dir_all(&dir_c).expect("创建子目录 c 失败");
     create_test_file(&dir_c, "target.txt");
 
-    if try_create_symlink(&dir_c, &dir_b).is_none()
-        || try_create_symlink(&dir_b, &dir_a).is_none()
+    if try_create_symlink(&dir_c, &dir_b).is_none() || try_create_symlink(&dir_b, &dir_a).is_none()
     {
         _ = fs::remove_dir_all(&root);
         return;
@@ -163,8 +173,14 @@ fn skip_symlinks_flag_works() {
 
     let result = search_dir(&root, true);
 
-    assert!(result.files_list().contains_key("real.txt"), "真实文件应存在");
-    assert!(!result.files_list().contains_key("link.txt"), "符号链接应被跳过");
+    assert!(
+        result.files_list().contains_key("real.txt"),
+        "真实文件应存在"
+    );
+    assert!(
+        !result.files_list().contains_key("link.txt"),
+        "符号链接应被跳过"
+    );
     assert_eq!(result.file_count(), 1, "只应发现 1 个真实文件");
     _ = fs::remove_dir_all(&root);
 }
@@ -182,8 +198,10 @@ fn broken_symlink_does_not_crash() {
     }
 
     let result = search_dir(&root, false);
-    assert!(!result.files_list().contains_key("broken_link"),
-            "断开的符号链接不应出现在结果中");
+    assert!(
+        !result.files_list().contains_key("broken_link"),
+        "断开的符号链接不应出现在结果中"
+    );
     _ = fs::remove_dir_all(&root);
 }
 
@@ -212,7 +230,10 @@ fn mixed_real_and_symlinks() {
     assert!(result.files_list().contains_key("real_dir"));
     assert!(result.files_list().contains_key("link_file.txt"));
     assert!(result.files_list().contains_key("link_dir"));
-    assert!(result.file_count() >= 2, "至少应发现 2 个文件（real_file + nested）");
+    assert!(
+        result.file_count() >= 2,
+        "至少应发现 2 个文件（real_file + nested）"
+    );
     _ = fs::remove_dir_all(&root);
 }
 
@@ -274,20 +295,31 @@ fn search_stream_receives_all_entries() {
 
     // search_stream 返回 SearchEvent 接收器
     let (tx, rx) = mpsc::channel();
-    let (handle, stream_rx) =
-        FileFinder.search_stream(&root, false, tx, 4).expect("启动流式搜索失败");
+    let (handle, stream_rx) = FileFinder
+        .search_stream(&root, false, tx, 4)
+        .expect("启动流式搜索失败");
     // 从 SearchEvent 中提取 Entry 条目
-    let entries: Vec<_> = stream_rx.into_iter().filter_map(|event| match event {
-        SearchEvent::Entry(p, i) => Some((p, i)),
-        SearchEvent::Warning(_) => None,
-    }).collect();
+    let entries: Vec<_> = stream_rx
+        .into_iter()
+        .filter_map(|event| match event {
+            SearchEvent::Entry(p, i) => Some((p, i)),
+            SearchEvent::Warning(_) => None,
+        })
+        .collect();
     // 消费进度 / consume progress
     for _ in rx {}
     // 等待搜索完成 / wait for search completion
-    handle.join().expect("搜索线程异常终止").expect("搜索过程返回错误");
+    handle
+        .join()
+        .expect("搜索线程异常终止")
+        .expect("搜索过程返回错误");
 
     // 验证：sub 目录 + 3 个文件 = 至少 4 条流式条目（根目录不会被流式输出）
-    assert!(entries.len() >= 4, "应至少收到 4 条流式条目，实际: {}", entries.len());
+    assert!(
+        entries.len() >= 4,
+        "应至少收到 4 条流式条目，实际: {}",
+        entries.len()
+    );
 
     let file_entry_count = entries
         .iter()
@@ -311,11 +343,15 @@ fn search_stream_empty_dir() {
     let root = setup_test_dir("streaming_empty");
 
     let (tx, rx) = mpsc::channel();
-    let (handle, stream_rx) =
-        FileFinder.search_stream(&root, false, tx, 4).expect("启动空目录流式搜索失败");
+    let (handle, stream_rx) = FileFinder
+        .search_stream(&root, false, tx, 4)
+        .expect("启动空目录流式搜索失败");
     let entries: Vec<_> = stream_rx.into_iter().collect();
     for _ in rx {}
-    handle.join().expect("搜索线程异常终止").expect("搜索过程返回错误");
+    handle
+        .join()
+        .expect("搜索线程异常终止")
+        .expect("搜索过程返回错误");
 
     assert_eq!(entries.len(), 0, "空目录应无流式条目");
 

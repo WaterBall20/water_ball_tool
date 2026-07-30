@@ -1,12 +1,14 @@
 use crate::tools::PathTool;
+use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::{DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST, WBFPManager};
+use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file::{PackVirtualFile, VirtualFileOpenOptions};
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
-use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::{Attribute, OverwriteStrategy, PackStruct, PackStructItem, PackStructItemType};
+use crate::wb_files_pack::{
+    Attribute, OverwriteStrategy, PackStruct, PackStructItem, PackStructItemType,
+};
 use std::collections::HashMap;
 use std::fs::File;
-use crate::wb_files_pack::error::{Result, PackFileError};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
@@ -58,10 +60,7 @@ impl Allocator {
     ///
     /// Returns an error if the file already exists.
     pub fn create_new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::options()
-            .write(true)
-            .create_new(true)
-            .open(path)
+        Self::options().write(true).create_new(true).open(path)
     }
 
     /// 获取 `PackOpenOptions` 构建器，用于自定义打开/创建参数。
@@ -74,7 +73,11 @@ impl Allocator {
     /// 以只读模式打开已存在的虚拟文件。
     ///
     /// Open an existing virtual file in read-only mode.
-    pub fn open_virtual_file<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackVirtualFile> {
+    pub fn open_virtual_file<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        end_pos: bool,
+    ) -> Result<PackVirtualFile> {
         Self::virtual_file_options()
             .read(true)
             .end_pos(end_pos)
@@ -183,13 +186,8 @@ impl PackOpenOptions {
 
         if self.create_new {
             // 创建新文件，如果已存在则报错 / Create new, fail if exists
-            match path.try_exists() {
-                Ok(true) => {
-                    return Err(PackFileError::Other(
-                        "文件可能已存在，无法创建！".into(),
-                    ));
-                }
-                Ok(false) | Err(_) => {}
+            if let Ok(true) = path.try_exists() {
+                return Err(PackFileError::Other("文件可能已存在，无法创建！".into()));
             }
             let pack_file = File::options()
                 .read(true)
@@ -210,9 +208,9 @@ impl PackOpenOptions {
             manager.init_new_pack()?;
             let manager = Arc::new(Mutex::new(manager));
             Ok(Allocator {
+                access_mode,
                 manager,
                 pack_io,
-                access_mode,
             })
         } else if self.create {
             // 打开已存在的文件，不存在则创建新文件 / Open existing or create new
@@ -237,17 +235,17 @@ impl PackOpenOptions {
                 manager.init_new_pack()?;
                 let manager = Arc::new(Mutex::new(manager));
                 Ok(Allocator {
+                    access_mode,
                     manager,
                     pack_io,
-                    access_mode,
                 })
             } else {
                 let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
                 let manager = Arc::new(Mutex::new(manager));
                 Ok(Allocator {
+                    access_mode,
                     manager,
                     pack_io,
-                    access_mode,
                 })
             }
         } else {
@@ -258,9 +256,9 @@ impl PackOpenOptions {
             let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
             let manager = Arc::new(Mutex::new(manager));
             Ok(Allocator {
+                access_mode,
                 manager,
                 pack_io,
-                access_mode,
             })
         }
     }
@@ -284,19 +282,19 @@ impl Allocator /*读*/ {
     /// Open an existing virtual file — returns a PackVirtualFile (internal use).
     ///
     /// Looks up the virtual file handle via the manager and wraps it in a PackVirtualFile.
-    pub(crate) fn open_virtual_file_impl<P: AsRef<Path>>(&mut self, path: P, end_pos: bool) -> Result<PackVirtualFile> {
+    pub(crate) fn open_virtual_file_impl<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        end_pos: bool,
+    ) -> Result<PackVirtualFile> {
         let mgr = self.manager.clone();
         let mut mgr = mgr
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         mgr.this_write_lock()?;
         let path_list = PathTool::path_to_string_vec(path);
-        let handle = mgr.get_or_create_file_handle(
-            &path_list,
-            end_pos,
-            &self.manager,
-            &self.pack_io,
-        )?;
+        let handle =
+            mgr.get_or_create_file_handle(&path_list, end_pos, &self.manager, &self.pack_io)?;
         Ok(PackVirtualFile::new(0, handle))
     }
 
@@ -307,7 +305,10 @@ impl Allocator /*读*/ {
     /// Create a new virtual file — returns a PackVirtualFile (internal use).
     ///
     /// Creates the virtual file via the manager with auto-sized allocation.
-    pub(crate) fn create_virtual_file_impl<P: AsRef<Path>>(&mut self, path: P) -> Result<PackVirtualFile> {
+    pub(crate) fn create_virtual_file_impl<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<PackVirtualFile> {
         let mgr = self.manager.clone();
         let mut mgr = mgr
             .lock()
@@ -357,10 +358,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定目录的子项名称列表。
     /// Get the list of child item names for the given directory.
-    pub fn get_struct_item_name_list<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-    ) -> Result<Vec<String>> {
+    pub fn get_struct_item_name_list<P: AsRef<Path>>(&mut self, path: P) -> Result<Vec<String>> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -383,10 +381,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定路径的目录结构项（限定为目录类型）。
     /// Get the struct item for the given path, asserting it is a directory.
-    pub fn get_pack_struct_item_dir<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-    ) -> Result<PackStructItem> {
+    pub fn get_pack_struct_item_dir<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -462,7 +457,7 @@ impl Allocator /*删除*/ {
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
-        manager.delete_file(path_list)
+        manager.delete_file(&path_list)
     }
 
     /// 删除虚拟目录及其所有子项（仅移除元数据和结构，数据块提交GC不覆写）。
@@ -473,30 +468,38 @@ impl Allocator /*删除*/ {
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
-        manager.delete_dir_all(path_list)?;
+        manager.delete_dir_all(&path_list)?;
         Ok(())
     }
 
     /// 擦除虚拟文件（覆写所有数据块和元数据后提交GC并删除结构）。
     /// Erase a virtual file (overwrite all data blocks and metadata, then submit to GC and remove structure).
-    pub fn erase_file<P: AsRef<Path>>(&mut self, path: P, strategy: OverwriteStrategy) -> Result<()> {
+    pub fn erase_file<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        strategy: OverwriteStrategy,
+    ) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
-        manager.erase_file(path_list, strategy)
+        manager.erase_file(&path_list, strategy)
     }
 
     /// 擦除虚拟目录及其所有子项（覆写所有数据块和元数据后提交GC并删除结构）。
     /// Erase a virtual directory and all its descendants (overwrite all data and metadata, then submit to GC and remove structure).
-    pub fn erase_dir_all<P: AsRef<Path>>(&mut self, path: P, strategy: OverwriteStrategy) -> Result<()> {
+    pub fn erase_dir_all<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        strategy: OverwriteStrategy,
+    ) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         let path_list = PathTool::path_to_string_vec(path);
-        manager.erase_dir_all(path_list, strategy)?;
+        manager.erase_dir_all(&path_list, strategy)?;
         Ok(())
     }
 }
@@ -553,13 +556,8 @@ impl Allocator /*工具方法*/ {
                     .to_string();
                 match file.verify_hash(None) {
                     Ok(true) => verify_hash_r.ok_path.push(path_str),
-                    Ok(false) =>
-                        verify_hash_r.err_path.push((path_str, None)),
-                    Err(err) =>
-                        verify_hash_r.err_path.push((
-                            path_str,
-                            Some(err),
-                        )),
+                    Ok(false) => verify_hash_r.err_path.push((path_str, None)),
+                    Err(err) => verify_hash_r.err_path.push((path_str, Some(err))),
                 }
                 Ok(())
             }

@@ -108,11 +108,13 @@ impl PackFileHandle {
             && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type()
             && pos_index < data_pos_list.list().len()
         {
-            let (mut pos, mut len) = *data_pos_list.list().get(pos_index).ok_or(
-                PackFileError::State(format!(
-                    "数据位置列表索引 {} 越界", pos_index
-                ))
-            )?;
+            let (mut pos, mut len) =
+                *data_pos_list
+                    .list()
+                    .get(pos_index)
+                    .ok_or(PackFileError::State(format!(
+                        "数据位置列表索引 {pos_index} 越界"
+                    )))?;
             //当前校准
             if pos_index == start_pos_list_item_index {
                 //位置偏移
@@ -168,7 +170,7 @@ impl PackFileHandle {
     pub(crate) fn set_len(&mut self, len: u64) -> Result<()> {
         const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
         //提前读取len避免借用冲突
-        let metadata_len = self.metadata.as_ref().map(|m| m.len());
+        let metadata_len = self.metadata.as_ref().map(PackFileMetadata::len);
         //大小判断
         if let Some(metadata) = &mut self.metadata
             && let PackFileMetadataType::File { data_pos_list, .. } = metadata.file_type_mut()
@@ -235,11 +237,9 @@ impl PackFileHandle {
             //块索引
             let pos_index = pos_s.len() - 1;
             //块长度
-            let (_, pos_len) = pos_s.get(pos_index).ok_or(
-                PackFileError::State(format!(
-                    "位置列表索引 {} 越界", pos_index
-                ))
-            )?;
+            let (_, pos_len) = pos_s.get(pos_index).ok_or(PackFileError::State(format!(
+                "位置列表索引 {pos_index} 越界",
+            )))?;
             self.temp_pos_index = pos_index;
             self.temp_pos_this_len = *pos_len;
             self.pos = pos;
@@ -257,11 +257,12 @@ impl PackFileHandle {
         //需要添加的索引数
         let add_pos_index = add_pos_s.len() - 1;
         //缓存_当前块添加的大小
-        let (_, add_pos_len) = add_pos_s.get(add_pos_index).ok_or(
-            PackFileError::State(format!(
-                "添加位置列表索引 {} 越界", add_pos_index
-            ))
-        )?;
+        let (_, add_pos_len) =
+            add_pos_s
+                .get(add_pos_index)
+                .ok_or(PackFileError::State(format!(
+                    "添加位置列表索引 {add_pos_index} 越界",
+                )))?;
         //更新位置缓存
         self.temp_pos_index += add_pos_index;
         if add_pos_index == 0 {
@@ -464,7 +465,7 @@ impl PackFileHandle {
             pack_file.set_pos_read(pos)?;
             //读取数据
             pack_file.read_exact(this_buf)?;
-            read_len +=  this_buf.len();
+            read_len += this_buf.len();
         }
         self.add_pos(read_len as u64)?;
         Ok(read_len)
@@ -481,8 +482,9 @@ impl PackFileHandle {
         if pos_s.is_empty() {
             let data_len = buf.len() as u64;
             let add_running_len = (data_len / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN;
-            self.add_running_len(add_running_len)?;//警告：此处调用pack_io，必须提前调用，顺序错误将导致死锁。
+            self.add_running_len(add_running_len)?; //警告：此处调用pack_io，必须提前调用，顺序错误将导致死锁。
             pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
+            #[cfg(test)]
             assert!(!pos_s.is_empty());
         }
         //
@@ -496,9 +498,8 @@ impl PackFileHandle {
         for (pos, len) in pos_s {
             let len = usize::try_from(len)
                 .map_err(|_| PackFileError::Format(format!("文件块长度 {len} 无法转换为 usize")))?;
-            
+
             let this_data = &buf[write_len..write_len + len];
-            
 
             //更改文件位置
             pack_file.set_pos_write(pos)?;

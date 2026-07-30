@@ -185,12 +185,14 @@ impl FileInfo {
         &self.file_kind
     }
 
+    /// 创建一个新的 `FileInfo` 实例（搜索器内部使用）。
+    /// Creates a new `FileInfo` instance (used internally by the search engine).
     pub fn new(name: String, length: u64, modified_time: u128, file_kind: FileKind) -> Self {
         Self {
             name,
             length,
             modified_time,
-            file_kind
+            file_kind,
         }
     }
 }
@@ -317,7 +319,7 @@ impl SearchResult {
         self.files_list
     }
 
-    /// 消耗自身，返回 (FilesList, Vec<SearchWarning>) / Consumes self, returns (FilesList, Vec<SearchWarning>)
+    /// 消耗自身，返回 `(FilesList, Vec<SearchWarning>)` / Consumes self, returns `(FilesList, Vec<SearchWarning>)`
     #[must_use]
     pub fn into_parts(self) -> (FilesList, Vec<SearchWarning>) {
         (self.files_list, self.warnings)
@@ -563,12 +565,13 @@ impl FileFinder {
                     Self::emit_warning(
                         SearchWarning {
                             path: path_buf.to_path_buf(),
-                            warning_type: SearchWarningType::ThreadError(
-                                format!("检测到符号链接循环，已跳过: {}", path_buf.display()),
-                            ),
+                            warning_type: SearchWarningType::ThreadError(format!(
+                                "检测到符号链接循环，已跳过: {}",
+                                path_buf.display()
+                            )),
                         },
-                        stream_tx,
-                        warnings,
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
                     );
                     return;
                 }
@@ -588,11 +591,13 @@ impl FileFinder {
                 };
 
                 if let Some(tx) = stream_tx {
-                    tx.send(SearchEvent::Entry(path_buf.to_path_buf(), info.clone())).ok();
+                    tx.send(SearchEvent::Entry(path_buf.to_path_buf(), info.clone()))
+                        .ok();
                 }
 
                 if let Some(results) = results {
-                    results.lock()
+                    results
+                        .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .insert(path_buf.to_path_buf(), info);
                 }
@@ -601,7 +606,8 @@ impl FileFinder {
                 // Append new inode to chain; subdirectories carry the extended chain
                 let mut new_chain = chain.to_vec();
                 new_chain.push(inode_key);
-                dir_queue.lock()
+                dir_queue
+                    .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push_back(DirEntry {
                         path: path_buf.to_path_buf(),
@@ -613,7 +619,14 @@ impl FileFinder {
         } else if path_buf.is_file() {
             // 符号链接指向文件 / Symlink points to a file
             // 文件不会导致循环（文件不能包含目录），不需要 inode 检测
-            Self::process_file(path_buf, results, pb, stream_tx, warnings, thread_file_count);
+            Self::process_file(
+                path_buf,
+                results,
+                pb,
+                stream_tx,
+                warnings,
+                thread_file_count,
+            );
         } else {
             // 断开的符号链接 / Broken symlink
             Self::emit_warning(
@@ -621,8 +634,8 @@ impl FileFinder {
                     path: path_buf.to_path_buf(),
                     warning_type: SearchWarningType::BrokenSymlink,
                 },
-                stream_tx,
-                warnings,
+                stream_tx.as_ref(),
+                warnings.as_ref(),
             );
         }
     }
@@ -645,8 +658,8 @@ impl FileFinder {
                         path: path_buf.to_path_buf(),
                         warning_type: SearchWarningType::MetadataError,
                     },
-                    stream_tx,
-                    warnings,
+                    stream_tx.as_ref(),
+                    warnings.as_ref(),
                 );
                 return;
             }
@@ -666,11 +679,13 @@ impl FileFinder {
             // 流式发送：先发送再插入结果集，避免在持锁期间发送
             // Stream first: send before inserting into results to avoid holding the lock during send
             if let Some(tx) = stream_tx {
-                tx.send(SearchEvent::Entry(path_buf.to_path_buf(), info.clone())).ok();
+                tx.send(SearchEvent::Entry(path_buf.to_path_buf(), info.clone()))
+                    .ok();
             }
 
             if let Some(results) = results {
-                results.lock()
+                results
+                    .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .insert(path_buf.to_path_buf(), info);
             }
@@ -687,16 +702,14 @@ impl FileFinder {
     /// Sends a warning to the appropriate collector (warnings Vec for sync mode, stream_tx for streaming mode).
     fn emit_warning(
         warning: SearchWarning,
-        stream_tx: &Option<Sender<SearchEvent>>,
-        warnings: &Option<Arc<Mutex<Vec<SearchWarning>>>>,
+        stream_tx: Option<&Sender<SearchEvent>>,
+        warnings: Option<&Arc<Mutex<Vec<SearchWarning>>>>,
     ) {
         if let Some(tx) = stream_tx {
             tx.send(SearchEvent::Warning(warning.clone())).ok();
         }
         if let Some(w) = warnings {
-            w.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(warning);
+            w.lock().unwrap_or_else(|e| e.into_inner()).push(warning);
         }
     }
 
@@ -748,33 +761,28 @@ impl FileFinder {
                 queue.pop_front()
             };
 
-            let entry = match entry {
-                Some(d) => d,
-                None => {
-                    //如果是空的
-                    let mut dir_queue = dir_queue.lock().unwrap_or_else(|e| e.into_inner());
-                    //当前线程计数
-                    let this_running_count = fn_running_count_sub();
-                    if this_running_count == 0 {
-                        //如果没有其他在运行中的线程，则说明搜索结束，唤醒所有线程并退出
-                        condver.notify_all();
-                        break;
-                    }
-                    loop {
-                        dir_queue = condver
-                            .wait(dir_queue)
-                            .unwrap_or_else(|e| e.into_inner());
-                        match dir_queue.pop_front() {
-                            Some(d) => {
-                                //添加线程计数
-                                fn_running_count_add();
-                                break d;
-                            }
-                            None => {
-                                //如果队列是空的，且运行中的线程数为0
-                                if *running_count.lock().unwrap_or_else(|e| e.into_inner()) == 0 {
-                                    break 'worker;
-                                }
+            let entry = if let Some(d) = entry { d } else {
+                //如果是空的
+                let mut dir_queue = dir_queue.lock().unwrap_or_else(|e| e.into_inner());
+                //当前线程计数
+                let this_running_count = fn_running_count_sub();
+                if this_running_count == 0 {
+                    //如果没有其他在运行中的线程，则说明搜索结束，唤醒所有线程并退出
+                    condver.notify_all();
+                    break;
+                }
+                loop {
+                    dir_queue = condver.wait(dir_queue).unwrap_or_else(|e| e.into_inner());
+                    match dir_queue.pop_front() {
+                        Some(d) => {
+                            //添加线程计数
+                            fn_running_count_add();
+                            break d;
+                        }
+                        None => {
+                            //如果队列是空的，且运行中的线程数为0
+                            if *running_count.lock().unwrap_or_else(|e| e.into_inner()) == 0 {
+                                break 'worker;
                             }
                         }
                     }
@@ -790,8 +798,8 @@ impl FileFinder {
                                 path: entry.path.clone(),
                                 warning_type: SearchWarningType::PermissionDenied,
                             },
-                            &stream_tx,
-                            &warnings,
+                            stream_tx.as_ref(),
+                            warnings.as_ref(),
                         );
                         continue;
                     }
@@ -801,8 +809,8 @@ impl FileFinder {
                                 path: entry.path.clone(),
                                 warning_type: SearchWarningType::ReadDirError(err.to_string()),
                             },
-                            &stream_tx,
-                            &warnings,
+                            stream_tx.as_ref(),
+                            warnings.as_ref(),
                         );
                         continue;
                     }
@@ -820,8 +828,8 @@ impl FileFinder {
                                 path: path_buf,
                                 warning_type: SearchWarningType::MetadataError,
                             },
-                            &stream_tx,
-                            &warnings,
+                            stream_tx.as_ref(),
+                            warnings.as_ref(),
                         );
                         continue;
                     }
@@ -866,16 +874,19 @@ impl FileFinder {
                     };
 
                     if let Some(tx) = stream_tx.as_ref() {
-                        tx.send(SearchEvent::Entry(path_buf.clone(), info.clone())).ok();
+                        tx.send(SearchEvent::Entry(path_buf.clone(), info.clone()))
+                            .ok();
                     }
 
                     if let Some(results) = results.as_ref() {
-                        results.lock()
+                        results
+                            .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(path_buf.clone(), info);
                     }
                     //添加队列
-                    dir_queue.lock()
+                    dir_queue
+                        .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push_back(DirEntry {
                             path: path_buf,
@@ -900,8 +911,8 @@ impl FileFinder {
                             path: path_buf,
                             warning_type: SearchWarningType::InaccessibleEntry,
                         },
-                        &stream_tx,
-                        &warnings,
+                    stream_tx.as_ref(),
+                        warnings.as_ref(),
                     );
                 }
             }
@@ -974,7 +985,8 @@ impl FileFinder {
         // 工作队列：存放待扫描的目录任务（路径 + inode 链）
         // Work queue: holds directory tasks to scan (path + inode chain)
         let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
-        dir_queue.lock()
+        dir_queue
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(DirEntry {
                 path: path.to_path_buf(),
@@ -1121,7 +1133,8 @@ impl FileFinder {
         // 后台线程执行搜索 / Background thread executes the search
         let handle = thread::spawn(move || -> io::Result<()> {
             let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
-            dir_queue.lock()
+            dir_queue
+                .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push_back(DirEntry {
                     path: path.clone(),

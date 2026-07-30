@@ -4,35 +4,26 @@
 /// Provides container file format creation, read/write, and management functionality.
 pub mod manager;
 
+/// 线程安全分配器模块 / Thread-safe allocator module
+pub mod allocator;
 mod data;
+pub mod error;
+///网络服务
+#[cfg(debug_assertions)]
+mod net_server;
 mod pack_io;
 #[cfg(test)]
 mod test;
-/// 线程安全分配器模块 / Thread-safe allocator module
-pub mod allocator;
-mod net_server;
-pub mod error;
 
-pub use error::{ PackFileError, Result };
+pub use error::{PackFileError, Result};
 
 // 重导出公共数据类型 / Re-export public data types
 pub use data::{
-    Attribute,
-    DataPosList,
-    OverwriteStrategy,
-    PackFileMetadata,
-    PackFileMetadataRun,
-    PackFileMetadataType,
-    PackStruct,
-    PackStructItem,
-    PackStructItemType,
-    WBFilesPackManifest,
+    Attribute, DataPosList, OverwriteStrategy, PackFileMetadata, PackFileMetadataRun,
+    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest,
 };
 pub(crate) use data::{
-    ManifestDataBlock,
+    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
     ManifestDataBlockTrait,
-    DATA_BLOCK_LEN,
-    DATA_DATA_BLOCK_LEN,
-    MANIFEST_ATTRIBUTE_BLOCK_LEN,
 };
-pub use data::{ MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE };
+pub use data::{MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE};

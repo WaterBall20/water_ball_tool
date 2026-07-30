@@ -1,3 +1,5 @@
+use crate::wb_files_pack::pack_io::PackIO;
+
 use super::error::{PackFileError, Result};
 use super::manager::DEFAULT_COW;
 use super::pack_io::file_handle::PackFileHandle;
@@ -171,8 +173,7 @@ impl ManifestDataBlock {
         let old_len = self.get_this_block_len_us();
         let block_len = Self::get_block_len_us(data.len());
         if block_len == old_len {
-            self.is_a_data =
-                Self::save_data_to_block_data(data, &mut self.block_data, block_len)?;
+            self.is_a_data = Self::save_data_to_block_data(data, &mut self.block_data, block_len)?;
             self.data_len = data.len() as u64;
             self.hash_value = Self::get_hash(&self.block_data)?.to_vec();
             Ok(false)
@@ -187,6 +188,8 @@ impl ManifestDataBlock {
         }
     }
 
+    /// 从字节切片中读取 `data_len`，并计算完整块长度。
+    /// Reads `data_len` from the byte slice and computes the full block length.
     pub(crate) fn get_block_len(data: &[u8]) -> Result<u64> {
         if data.len() < MANIFEST_DATA_BLOCK_DATA_LEN_LEN {
             Err(PackFileError::Format("提供的数据块数据不完整".into()))
@@ -197,6 +200,8 @@ impl ManifestDataBlock {
         }
     }
 
+    /// 计算 A/B 双块 + 对齐后的完整块长度（编译期可用）。
+    /// Computes the full block length after A/B dual-block + alignment (const-compatible).
     pub(crate) const fn get_block_len_us(data_len: usize) -> usize {
         let block_ab_len = data_len
             + MANIFEST_DATA_BLOCK_DATA_LEN_LEN
@@ -205,18 +210,27 @@ impl ManifestDataBlock {
         let block_len = block_ab_len * 2;
         let block_ab_len = block_len.div_ceil(DATA_BLOCK_LEN);
         let block_len = block_ab_len * DATA_BLOCK_LEN;
+        #[cfg(test)]
         assert!(block_len.is_multiple_of(DATA_BLOCK_LEN));
         block_len
     }
 
+    /// 生成下一个版本号，`u32::MAX` 回绕到 1。
+    /// Generates the next version number; wraps from `u32::MAX` to 1.
     pub(crate) fn next_ver(ver: u32) -> u32 {
         if ver == u32::MAX { 1 } else { ver + 1 }
     }
 
+    /// 比较两个版本号，若 `a` 比 `b` 旧则返回 true。
+    /// 使用 `wrapping_sub` 处理 u32 回绕，适用于 A/B 双块版本轮换。
+    /// Returns true if `a` is older than `b` — uses `wrapping_sub` to handle u32 wraparound
+    /// for A/B dual-block version rotation.
     pub(crate) fn ver_is_older(a: u32, b: u32) -> bool {
         a != b && b.wrapping_sub(a) < a.wrapping_sub(b)
     }
 
+    /// 从数据块中读取版本号，需头部和尾部版本匹配且不为 0 才返回。
+    /// Reads the version number from a data block; requires head and tail to match and be non-zero.
     pub(crate) fn get_ver(data: &[u8]) -> Result<u32> {
         let ver = u32::from_le_bytes(
             data[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
@@ -269,10 +283,6 @@ impl ManifestDataBlock {
             let b_ver = Self::get_ver(b_data);
             let b_err = b_ver.is_err();
             let mut read_a = true;
-
-            if ab_block_data_len == 0 {
-                std::hint::black_box(());
-            }
 
             if a_err {
                 if b_err {
@@ -608,9 +618,11 @@ impl Attribute {
         let data = data_block
             .get_this_data()
             .map_err(|err| PackFileError::Format(format!(r"无法获取属性数据, err: {err}")))?;
-        let version =
-            u16::from_le_bytes(data[..MANIFEST_ATTRIBUTE_VERSION_LEN].try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?);
+        let version = u16::from_le_bytes(
+            data[..MANIFEST_ATTRIBUTE_VERSION_LEN]
+                .try_into()
+                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
+        );
         let version_compatible = u16::from_le_bytes(
             data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
                 ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
@@ -732,6 +744,7 @@ impl ManifestDataBlockTrait for Attribute {
         for to_le_byte in self.data_len.to_le_bytes() {
             data.push(to_le_byte);
         }
+        #[cfg(test)]
         assert!(!data.is_empty(), "输出数据为空，但不能为空");
         data
     }
@@ -784,10 +797,8 @@ impl DataPosList {
     }
 
     pub(crate) fn load(data: &[u8], data_block: Option<ManifestDataBlock>) -> Self {
-        let count = usize::from_le_bytes(
-            data[..DATA_POS_LIST_COUNT_LEN].try_into()
-                .unwrap_or([0; 8])
-        );
+        let count =
+            usize::from_le_bytes(data[..DATA_POS_LIST_COUNT_LEN].try_into().unwrap_or([0; 8]));
         let data_len = count
             .checked_mul(DATA_POS_LIST_ITEM_LEN)
             .and_then(|v| v.checked_add(DATA_POS_LIST_COUNT_LEN))
@@ -843,6 +854,7 @@ impl DataPosList {
                 data.push(to_le_byte);
             }
         }
+        #[cfg(test)]
         assert!(!data.is_empty(), "输出数据为空，但不能为空");
         data
     }
@@ -850,10 +862,10 @@ impl DataPosList {
     pub(crate) fn get_block_data(&mut self) -> Option<(Vec<u8>, bool)> {
         if self.data_block.is_some() {
             let up_data = self.to_bytes_vec();
-        if let Some(data_block) = &mut self.data_block {
-            let new_block = data_block.update(&up_data).ok()?;
-            Some((data_block.get_block_data().to_vec(), new_block))
-        } else {
+            if let Some(data_block) = &mut self.data_block {
+                let new_block = data_block.update(&up_data).ok()?;
+                Some((data_block.get_block_data().to_vec(), new_block))
+            } else {
                 None
             }
         } else {
@@ -964,9 +976,8 @@ impl PackStructItem {
                 .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
         );
         let name_end_pos = PACK_STRUCT_ITEM_NAME_INDEX + (name_len as usize);
-        let name =
-            String::from_utf8(data[PACK_STRUCT_ITEM_NAME_INDEX..name_end_pos].to_vec())
-                .map_err(|_| PackFileError::Format("文件名UTF-8解码失败".into()))?;
+        let name = String::from_utf8(data[PACK_STRUCT_ITEM_NAME_INDEX..name_end_pos].to_vec())
+            .map_err(|_| PackFileError::Format("文件名UTF-8解码失败".into()))?;
         let metadata_file_pos = u64::from_le_bytes(
             data[name_end_pos..name_end_pos + PACK_STRUCT_ITEM_METADATA_FILE_POS_LEN]
                 .try_into()
@@ -1006,6 +1017,7 @@ impl PackStructItem {
                 for to_le_byte in struct_file_pos.to_le_bytes() {
                     data.push(to_le_byte);
                 }
+                #[cfg(test)]
                 assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
                 data
             }),
@@ -1033,6 +1045,7 @@ impl PackStructItem {
         for type_datum in type_data.1 {
             data.push(type_datum);
         }
+        #[cfg(test)]
         assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
         data
     }
@@ -1301,6 +1314,7 @@ impl ManifestDataBlockTrait for PackStruct {
                 items_data.push(item_data);
             }
         }
+        #[cfg(test)]
         assert_eq!(
             self.items.is_empty(),
             items_data.is_empty(),
@@ -1340,7 +1354,9 @@ impl PackFileMetadataRun {
 
     pub(crate) fn try_lock(&mut self) -> Result<PackFileMetadata> {
         match self {
-            Self::Loaded(_) => Ok(self.take(Self::Locked).ok_or(PackFileError::State("内部状态异常".into()))?),
+            Self::Loaded(_) => Ok(self
+                .take(Self::Locked)
+                .ok_or(PackFileError::State("内部状态异常".into()))?),
             Self::NoLoad => Err(PackFileError::State("实例没有被加载".into())),
             Self::Locked => Err(PackFileError::Lock("无法获得锁，已被锁定".into())),
             Self::None => Err(PackFileError::State("无法对没有元数据的类型获得锁".into())),
@@ -1356,7 +1372,10 @@ impl PackFileMetadataRun {
     fn _try_metadata_drop(&mut self) -> Result<()> {
         match self {
             Self::Loaded(_) => {
-                drop(self.take(PackFileMetadataRun::NoLoad).ok_or(PackFileError::State("内部状态异常".into()))?);
+                drop(
+                    self.take(PackFileMetadataRun::NoLoad)
+                        .ok_or(PackFileError::State("内部状态异常".into()))?,
+                );
                 Ok(())
             }
             Self::Locked => Err(PackFileError::Lock("元数据正在被锁定".into())),
@@ -1706,6 +1725,7 @@ impl ManifestDataBlockTrait for PackFileMetadata {
         for type_datum in type_data {
             data.push(type_datum);
         }
+        #[cfg(test)]
         assert!(!data.is_empty(), "输出的数据为空， 但不能为空");
         data
     }
@@ -1761,7 +1781,7 @@ pub struct WBFilesPackManifest {
     /// 根目录结构 / Root struct
     root_struct: PackStruct,
     /// 清单文件 IO / Manifest file IO
-    file: Option<crate::wb_files_pack::pack_io::PackIO>,
+    file: Option<PackIO>,
     /// 运行数据 / Run data
     _run_data: WBFilesPackManifestRun,
 }
@@ -1787,8 +1807,11 @@ impl WBFilesPackManifest {
         &mut self.root_struct
     }
 
-    pub(crate) fn file(&self) -> &Option<crate::wb_files_pack::pack_io::PackIO> {
-        &self.file
+    pub(crate) fn file(&self) -> Option<&PackIO> {
+        match &self.file {
+            Some(v) => Some(v),
+            None => None,
+        }
     }
 
     pub(crate) fn file_mut(&mut self) -> &mut Option<crate::wb_files_pack::pack_io::PackIO> {

@@ -1,14 +1,15 @@
+use crate::wb_files_pack::error::{PackFileError, Result};
+use crate::wb_files_pack::manager::WBFPManagerRunLock;
 use crate::wb_files_pack::pack_io::{
-    PackIO, FILE_HEADER_BLOCK_LEN, FILE_HEADER_BOOL_DATA_INDEX,
-    FILE_HEADER_DATA_LENGTH, FILE_HEADER_DATA_LENGTH_INDEX,
-    FILE_HEADER_DATA_LENGTH_LENGTH, FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX, FILE_HEADER_TYPE_NAME,
-    FILE_HEADER_VERSION, FILE_HEADER_VERSION_INDEX,
+    FILE_HEADER_BLOCK_LEN, FILE_HEADER_BOOL_DATA_INDEX, FILE_HEADER_DATA_LENGTH,
+    FILE_HEADER_DATA_LENGTH_INDEX, FILE_HEADER_DATA_LENGTH_LENGTH,
+    FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX, FILE_HEADER_TYPE_NAME, FILE_HEADER_VERSION,
+    FILE_HEADER_VERSION_INDEX, PackIO,
 };
 use crate::wb_files_pack::{
     Attribute, DataPosList, ManifestDataBlock, ManifestDataBlockTrait, PackStruct,
     WBFilesPackManifest,
 };
-use crate::wb_files_pack::error::{PackFileError, Result};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -52,10 +53,8 @@ impl WBFPManager {
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
-            pack_file
-                .write_all(&file_header_buf)?;
-            pack_file
-                .set_len(FILE_HEADER_BLOCK_LEN as u64)?;
+            pack_file.write_all(&file_header_buf)?;
+            pack_file.set_len(FILE_HEADER_BLOCK_LEN as u64)?;
         }
         self.save_empty_data_list()?;
         if self.separate_manifest {
@@ -126,9 +125,7 @@ impl WBFPManager {
         } else {
             let empty_pos_data_block =
                 m_pack_file.manifest_data_block_read(attribute.empty_data_pos_list_pos())?;
-            let empty_pos_data = empty_pos_data_block
-                .get_this_data()?
-                .to_vec();
+            let empty_pos_data = empty_pos_data_block.get_this_data()?.to_vec();
             m_pack_file.empty_data_list =
                 DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
             let root_struct_block_data =
@@ -161,16 +158,12 @@ impl WBFPManager {
         let mut manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len());
         let empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos())?;
-        let empty_pos_data = empty_pos_data_block
-            .get_this_data()?
-            .to_vec();
+        let empty_pos_data = empty_pos_data_block.get_this_data()?.to_vec();
         m_pack_file.empty_data_list =
             DataPosList::load(&empty_pos_data, Some(empty_pos_data_block));
         let manifest_empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.manifest_empty_data_pos_list_pos())?;
-        let manifest_empty_pos_data = manifest_empty_pos_data_block
-            .get_this_data()?
-            .to_vec();
+        let manifest_empty_pos_data = manifest_empty_pos_data_block.get_this_data()?.to_vec();
         manifest_file.empty_data_list = DataPosList::load(
             &manifest_empty_pos_data,
             Some(manifest_empty_pos_data_block),
@@ -202,10 +195,17 @@ impl WBFPManager {
             .to_string();
         write_lock_path.push_str(".lock");
         let write_lock_path = PathBuf::from(write_lock_path);
-        let write_lock_file = Self::write_lock(false, &write_lock_path)?;
+        let write_lock_file = Self::write_lock(&WBFPManagerRunLock {
+            lock: false,
+            path: write_lock_path.clone(),
+            file: None,
+        })?;
         let manifest_file = if separate_manifest {
-            let mut manifest_path =
-                String::from(path.as_ref().to_str().ok_or(PackFileError::Format("无法将路径转换成文本".into()))?);
+            let mut manifest_path = String::from(
+                path.as_ref()
+                    .to_str()
+                    .ok_or(PackFileError::Format("无法将路径转换成文本".into()))?,
+            );
             manifest_path.push_str(".wbm");
             let manifest_pack_file = File::options()
                 .read(true)

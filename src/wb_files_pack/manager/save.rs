@@ -1,9 +1,9 @@
+use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::pack_io::{
     FILE_HEADER_DATA_LENGTH_INDEX, FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX,
 };
-use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackStruct, DATA_BLOCK_LEN,
+    DATA_BLOCK_LEN, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackStruct,
 };
 use std::io::Write;
 
@@ -18,7 +18,7 @@ impl WBFPManager {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > (DATA_BLOCK_LEN as u64) * 1024
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-            > 10_000
+                > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;
@@ -28,7 +28,7 @@ impl WBFPManager {
         Ok(())
     }
 
-    pub(super) fn save_all(&mut self) -> Result<()> {
+    pub(crate) fn save_all(&mut self) -> Result<()> {
         self.file_gc()?;
         self.manifest_file_gc()?;
         self.save_root_pack_struct()?;
@@ -69,10 +69,12 @@ impl WBFPManager {
                 .get_data_block_mut()
                 .ok_or(PackFileError::State("分离清单的空数据列表未加载".into()))?
                 .get_this_block_len_u64();
-            let (block_data, new_block) = file
-                .empty_data_list
-                .get_block_data()
-                .ok_or(PackFileError::State("分离清单的空数据列表无法获取数据".into()))?;
+            let (block_data, new_block) =
+                file.empty_data_list
+                    .get_block_data()
+                    .ok_or(PackFileError::State(
+                        "分离清单的空数据列表无法获取数据".into(),
+                    ))?;
             let pos = self.manifest_data_block_write(&block_data, new_block, old_pos, old_len)?;
             if new_block {
                 self.manifest
@@ -178,7 +180,9 @@ impl WBFPManager {
         } else if let Some(manifest_file) = self.manifest.file() {
             manifest_file.manifest_data_block_read(file_pos)
         } else {
-            Err(PackFileError::State("已启用清单分离文件，但清单文件实例不存在".into()))?
+            Err(PackFileError::State(
+                "已启用清单分离文件，但清单文件实例不存在".into(),
+            ))?
         }
     }
 
@@ -193,7 +197,9 @@ impl WBFPManager {
             if let Some(file) = self.manifest.file_mut() {
                 file.manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
             } else {
-                Err(PackFileError::State("已启用清单分离文件，但清单文件实例不存在".into()))
+                Err(PackFileError::State(
+                    "已启用清单分离文件，但清单文件实例不存在".into(),
+                ))
             }
         } else {
             let pack_file = self.pack_file.clone();

@@ -11,12 +11,12 @@
 use crate::command::Cli;
 use clap::Parser;
 use indicatif::MultiProgress;
-use std::{io};
+use std::io;
 use std::io::Write;
+use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
-use tracing::{error};
 
 mod command;
 

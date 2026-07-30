@@ -2,10 +2,10 @@
 use std::sync::Arc;
 
 /*
-* 关于数字类型的说明
-* 为简化计算转换，只要参与最终“数值”的计算，均为f32
-*   其余如次数，可使用usize，用于循环
-*/
+ * 关于数字类型的说明
+ * 为简化计算转换，只要参与最终“数值”的计算，均为f32
+ *   其余如次数，可使用usize，用于循环
+ */
 
 //卡牌类型
 enum CardType {
@@ -28,8 +28,8 @@ enum Attribute {
     //=== 角色属性 ===
     Vocal, //歌唱
     Visual,
-    Dance, //舞蹈
-    Parameter { value: f32, count: usize },//参数
+    Dance,                                             //舞蹈
+    Parameter { value: f32, count: usize },            //参数
     Stamina(f32),                                      //体力
     StaminaConsumptionCut { value: f32 },              //消费体力削减
     StaminaConsumptionReduction { turn_count: usize }, //消费体力减少

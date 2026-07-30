@@ -1,5 +1,5 @@
+use crate::wb_files_pack::error::{PackFileError, Result};
 use blake3::{Hash, Hasher};
-use crate::wb_files_pack::error::{Result, PackFileError};
 
 /// 包文件哈希状态 / Pack file hash state
 #[derive(Debug, Clone)]

@@ -31,18 +31,18 @@ pub type Result<T> = std::result::Result<T, PackFileError>;
 impl fmt::Display for PackFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PackFileError::Io(e) => write!(f, "{}", e),
-            PackFileError::Lock(msg) => write!(f, "锁错误 / Lock error: {}", msg),
-            PackFileError::Integrity(msg) => write!(f, "完整性错误 / Integrity error: {}", msg),
-            PackFileError::Format(msg) => write!(f, "格式错误 / Format error: {}", msg),
-            PackFileError::NotFound(msg) => write!(f, "未找到 / Not found: {}", msg),
-            PackFileError::NotADirectory(msg) => write!(f, "不是目录 / Not a directory: {}", msg),
-            PackFileError::Version(msg) => write!(f, "版本错误 / Version error: {}", msg),
+            PackFileError::Io(e) => write!(f, "{e}"),
+            PackFileError::Lock(msg) => write!(f, "锁错误 / Lock error: {msg}"),
+            PackFileError::Integrity(msg) => write!(f, "完整性错误 / Integrity error: {msg}"),
+            PackFileError::Format(msg) => write!(f, "格式错误 / Format error: {msg}"),
+            PackFileError::NotFound(msg) => write!(f, "未找到 / Not found: {msg}"),
+            PackFileError::NotADirectory(msg) => write!(f, "不是目录 / Not a directory: {msg}"),
+            PackFileError::Version(msg) => write!(f, "版本错误 / Version error: {msg}"),
             PackFileError::PermissionDenied(reason) => {
-                write!(f, "Permission denied: {}", reason)
+                write!(f, "Permission denied: {reason}")
             }
-            PackFileError::State(msg) => write!(f, "状态错误 / State error: {}", msg),
-            PackFileError::Other(msg) => write!(f, "{}", msg),
+            PackFileError::State(msg) => write!(f, "状态错误 / State error: {msg}"),
+            PackFileError::Other(msg) => write!(f, "{msg}"),
         }
     }
 }

@@ -1,30 +1,30 @@
 use crate::wb_files_pack::error::{PackFileError, Result};
+use crate::wb_files_pack::manager::WBFPManagerRunLock;
+use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::fs;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use super::{PackLockInfo, PackLockType, WBFPManager};
 
 impl WBFPManager {
     fn this_write_lock_info(&self) -> PackLockInfo {
-        let run_lock = self.run_data.write_lock;
-        let path = &self.run_data.write_lock_path;
-        Self::write_lock_info(run_lock, path)
+        let run_lock = &self.run_data.write_lock;
+        Self::write_lock_info(run_lock)
     }
 
     pub(crate) fn this_write_lock(&mut self) -> Result<()> {
-        if !self.run_data.write_lock {
+        if !self.run_data.write_lock.lock {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
-            let lock_file = Self::write_lock(true, &self.run_data.write_lock_path)?;
+            self.run_data.write_lock.lock = true;
+            let lock_file = Self::write_lock(&self.run_data.write_lock)?;
             if let Some(lock_file) = lock_file {
-                self.run_data.write_lock_file = Some(lock_file);
+                self.run_data.write_lock.file = Some(lock_file);
             }
-            self.run_data.write_lock = true;
             pack_file.lock()?;
         }
         Ok(())
@@ -35,16 +35,16 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
-        let path = &self.run_data.write_lock_path;
+        let path = &self.run_data.write_lock.path;
         let lock_info = self.this_write_lock_info();
         match lock_info.file_lock_type {
             PackLockType::File => {
-                if let Some(lock_file) = self.run_data.write_lock_file.take() {
+                if let Some(lock_file) = self.run_data.write_lock.file.take() {
                     lock_file.unlock()?;
                     drop(lock_file);
                     fs::remove_file(path)?;
                 }
-                self.run_data.write_lock = false;
+                self.run_data.write_lock.lock = false;
                 pack_file.unlock()?;
                 Ok(())
             }
@@ -58,11 +58,12 @@ impl WBFPManager {
         }
     }
 
-    pub(super) fn write_lock_info(run_lock: bool, path: &PathBuf) -> PackLockInfo {
+    pub(super) fn write_lock_info(run_lock: &WBFPManagerRunLock) -> PackLockInfo {
         fn is_process_running(pid: u32, system: &sysinfo::System) -> bool {
             system.process(sysinfo::Pid::from(pid as usize)).is_some()
         }
         let system = sysinfo::System::new_all();
+        let path = &run_lock.path;
         let is_symlink = path.is_symlink();
         let is_dir;
         let mut file_lock_pid = None;
@@ -70,7 +71,7 @@ impl WBFPManager {
         if path.try_exists().is_ok() {
             is_dir = path.is_dir();
             if path.is_file()
-                && !run_lock
+                && !run_lock.lock
                 && let Ok(mut file) = File::open(path)
             {
                 let mut buf = [0u8; 4];
@@ -91,21 +92,18 @@ impl WBFPManager {
             PackLockType::File
         };
         PackLockInfo {
-            run_lock,
+            run_lock: run_lock.clone(),
             file_lock_type,
             file_lock_pid,
             file_lock_pid_run,
         }
     }
 
-    pub(super) fn write_lock(
-        run_lock: bool,
-        write_lock_path: &PathBuf,
-    ) -> Result<Option<File>> {
-        let lock_info = Self::write_lock_info(run_lock, write_lock_path);
-        if lock_info.run_lock {
+    pub(super) fn write_lock(write_lock: &WBFPManagerRunLock) -> Result<Option<File>> {
+        let lock_info = Self::write_lock_info(write_lock);
+        if lock_info.run_lock.lock {
             if let PackLockType::_None = lock_info.file_lock_type {
-                Ok(Some(Self::write_lock_file(write_lock_path)?))
+                Ok(Some(Self::write_lock_file(&write_lock.path)?))
             } else {
                 Ok(None)
             }
@@ -120,15 +118,15 @@ impl WBFPManager {
                         .ok_or(PackFileError::State("pid参数不存在".into()))?;
                     Err(PackFileError::Lock(format!(
                         r#"包文件未正常解锁，但相关进程(pid:{pid})可能已停止。如果你认为可以继续，可以删除锁文件"{}"强制解锁"#,
-                        write_lock_path.display()
+                        write_lock.path.display()
                     )))
                 }
-                None => Ok(Some(Self::write_lock_file(write_lock_path)?)),
+                None => Ok(Some(Self::write_lock_file(&write_lock.path)?)),
             }
         }
     }
 
-    pub(super) fn write_lock_file(write_lock_path: &PathBuf) -> Result<File> {
+    pub(super) fn write_lock_file(write_lock_path: &Path) -> Result<File> {
         let pid = std::process::id();
         let mut write_lock = File::create(write_lock_path)?;
         write_lock.write_all(pid.to_le_bytes().as_slice())?;

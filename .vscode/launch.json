@@ -1,8 +1,9 @@
 {
   "version": "0.2.0",
   "configurations": [
+
     {
-      "name": "Debug unit tests in library 'water_ball_tool'",
+      "name": "Debug tests library 'water_ball_tool'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -12,17 +13,19 @@
       }
     },
     {
-      "name": "Debug unit tests in library 'water_ball_tool'",
+      "name": "Debug tests all library 'water_ball_tool'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
         "args": [
-          "test"
+          "test",
+          "--",
+          "--include-ignored"
         ]
       }
     },
     {
-      "name": "Debug executable 'water_ball_tool' wbfp h",
+      "name": "Debug bin 'water_ball_tool' wbfp h",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -34,7 +37,7 @@
       "args": ["wbfp", "h", "/home/waterball/BF/Apps.wbfp", "-t", "1"]
     },
     {
-      "name": "Debug executable 'water_ball_tool' wbfp u",
+      "name": "Debug bin 'water_ball_tool' wbfp u",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -46,7 +49,7 @@
       "args": ["wbfp", "u", "/home/waterball/BF/Apps.wbfp", "/home/waterball/BF/Apps", "-t", "1"]
     },
     {
-      "name": "Debug executable 'water_ball_tool' wbfp p",
+      "name": "Debug bin 'water_ball_tool' wbfp p",
       "type": "lldb",
       "request": "launch",
       "cargo": {

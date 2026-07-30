@@ -1,7 +1,8 @@
+use crate::wb_files_pack::WBFilesPackManifest;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::WBFilesPackManifest;
 use std::fs::File;
+use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -26,17 +27,34 @@ pub(crate) struct WBFPManager {
 
 #[derive(Debug)]
 pub(crate) struct WBFPManagerRun {
-    pub(crate) write_lock: bool,
-    pub(crate) write_lock_path: PathBuf,
-    pub(crate) write_lock_file: Option<File>,
+    pub(crate) write_lock: WBFPManagerRunLock,
+}
+
+#[derive(Debug)]
+pub(crate) struct WBFPManagerRunLock {
+    pub(crate) lock: bool,
+    pub(crate) path: PathBuf,
+    pub(crate) file: Option<File>,
+}
+
+impl Clone for WBFPManagerRunLock {
+    fn clone(&self) -> Self {
+        Self {
+            lock: self.lock,
+            path: self.path.clone(),
+            file: None,
+        }
+    }
 }
 
 impl WBFPManagerRun {
     fn new(write_lock_path: PathBuf, write_lock_file: Option<File>) -> Self {
         Self {
-            write_lock: false,
-            write_lock_path,
-            write_lock_file,
+            write_lock: WBFPManagerRunLock {
+                lock: false,
+                path: write_lock_path,
+                file: write_lock_file,
+            },
         }
     }
 }
@@ -96,7 +114,7 @@ pub(crate) enum PackLockType {
 }
 
 pub(crate) struct PackLockInfo {
-    pub(crate) run_lock: bool,
+    pub(crate) run_lock: WBFPManagerRunLock,
     pub(crate) file_lock_type: PackLockType,
     pub(crate) file_lock_pid: Option<u32>,
     pub(crate) file_lock_pid_run: Option<bool>,
