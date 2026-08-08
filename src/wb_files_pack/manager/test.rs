@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
 static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
 
-// === 辅助函数：直接操作内部 API / Helpers bypassing Allocator ===
+// === 辅助函数：直接操作内部 API / Helpers bypassing ManagerSync ===
 
 fn create_manager(
     pack_path: &Path,
@@ -116,7 +116,7 @@ fn create_stress_and_reopen() {
             let (path_list, metadata) = man
                 .lock()
                 .expect("获取管理器锁失败")
-                .create_file_raw(&name, modified, len, false, DEFAULT_HASH_TYPE)
+                .create_file_raw(&name, modified, len, false, DEFAULT_HASH_TYPE, false)
                 .unwrap_or_else(|err| panic!("无法创建虚拟文件: {name}, err: {err}"));
             let handle = Arc::new(Mutex::new(
                 PackFileHandle::create(true, man.clone(), &pack_io, path_list, metadata, false)

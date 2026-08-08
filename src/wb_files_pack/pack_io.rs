@@ -1,10 +1,19 @@
 use crate::tools;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
+    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN,
+    ManifestDataBlock,
 };
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+
+/// 多段拼接结果 / Multi-segment stitching outcome
+enum MultiSegError {
+    /// 碎片不足→扩容兜底 / insufficient → extend-file fallback
+    NotEnough,
+    /// 段数超限→拒绝 / over limit → reject
+    TooManySegments,
+}
 
 /// 虚拟文件读写器模块（`PackVirtualFile`）/ Virtual file reader-writer module (`PackVirtualFile`)
 pub mod file;
@@ -190,15 +199,226 @@ impl PackIO /*核心*/ {
     /// Returns `(start_position, length)`, with length aligned to `DATA_BLOCK_LEN`.
     //获取可用的文件位置
     pub(crate) fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
+        self.get_file_pos_aligned(length, DATA_BLOCK_LEN as u64)
+    }
+
+    /// 虚拟文件数据分配：长度按 `DATA_DATA_BLOCK_LEN`（4MiB）对齐，与清单数据
+    /// 的 `DATA_BLOCK_LEN`（128B）对齐区分。优先单块 first-fit，其次紧贴连续
+    /// 碎片链，再其次从大到小跨块拼接；均不改变 empty_data_list 顺序。
+    /// 拼接段数受 max_seg 约束（虚拟文件数据段数上限），超限返回 Err 拒绝。
+    ///
+    /// Virtual-file data allocation: length aligned to `DATA_DATA_BLOCK_LEN` (4MiB),
+    /// distinct from manifest `DATA_BLOCK_LEN` (128B) alignment. Prefers a single
+    /// first-fit block, then a contiguous chain of adjacent free fragments, then
+    /// biggest-first cross-block stitching; the free-list order is never changed.
+    /// Stitched segment count is bounded by max_seg; exceeding it rejects with Err.
+    pub(crate) fn get_data_file_pos_multi(
+        &mut self,
+        length: u64,
+        current_seg: usize,
+        max_seg: usize,
+    ) -> Result<Vec<(u64, u64)>> {
         //块对齐
-        const DATA_BLOCK_LEN_U64: u64 = DATA_BLOCK_LEN as u64;
-        let length = if length.is_multiple_of(DATA_BLOCK_LEN_U64) {
+        let length = if length.is_multiple_of(DATA_DATA_BLOCK_LEN) {
             length
         } else {
-            let length = length / DATA_BLOCK_LEN_U64 + 1;
-            length * DATA_BLOCK_LEN_U64
+            (length / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN
         };
-        let empty_data_pos = &mut self.empty_data_list.list_mut();
+        let seg_budget = max_seg.saturating_sub(current_seg);
+        if seg_budget == 0 {
+            return Err(PackFileError::State(format!(
+                "数据段数已达上限 {max_seg}，拒绝分配 / segment limit {max_seg} reached, allocation rejected"
+            )));
+        }
+        let empty_data_pos = &mut *self.empty_data_list.list_mut();
+
+        //Pass 1: 单块 first-fit
+        if let Some(value) = Self::get_pos_gc(length, empty_data_pos) {
+            self.update_alloc_len(&[value]);
+            return Ok(vec![value]);
+        }
+        //Pass 2: 紧贴连续碎片链（物理相邻，合并为一段）
+        if let Some(value) = Self::get_pos_contiguous(length, empty_data_pos) {
+            self.update_alloc_len(&[value]);
+            return Ok(vec![value]);
+        }
+        //Pass 3: 从大到小跨块拼接
+        match Self::get_pos_biggest(length, empty_data_pos, seg_budget) {
+            Ok(list) => {
+                self.update_alloc_len(&list);
+                Ok(list)
+            }
+            Err(MultiSegError::TooManySegments) => Err(PackFileError::State(format!(
+                "碎片拼接所需段数超过上限 {max_seg}，拒绝分配 / stitching needs more than {max_seg} segments, allocation rejected"
+            ))),
+            Err(MultiSegError::NotEnough) => {
+                //碎片总量不足：文件尾扩容兜底（单段）
+                let value = (self.len, length);
+                self.update_alloc_len(&[value]);
+                Ok(vec![value])
+            }
+        }
+    }
+
+    /// 更新已记录的文件长度：取分配列表中最大的结束位置。
+    /// Update the tracked file length to the max end of the given segments.
+    fn update_alloc_len(&mut self, list: &[(u64, u64)]) {
+        for &(pos, len) in list {
+            let this_end_pos = pos + len;
+            if this_end_pos > self.len {
+                self.len = this_end_pos;
+            }
+        }
+    }
+
+    /// 紧贴连续链：仅当碎片物理相邻（前段末尾 == 后段起始）时合并为一段，
+    /// 链总长满足请求则消耗链上全部碎片，返回 (链起点, 链长) 单段。
+    /// 不改变列表顺序，仅按索引降序移除已消耗碎片。
+    ///
+    /// Contiguous chain: only physically adjacent free fragments (prev end ==
+    /// next start) merge into one segment; if the chain covers the request,
+    /// consume all fragments in it and return a single segment.
+    fn get_pos_contiguous(
+        length: u64,
+        empty_data_pos: &mut Vec<(u64, u64)>,
+    ) -> Option<(u64, u64)> {
+        use std::collections::HashMap;
+        let mut start_map: HashMap<u64, usize> = HashMap::with_capacity(empty_data_pos.len());
+        let mut end_map: HashMap<u64, usize> = HashMap::with_capacity(empty_data_pos.len());
+        for (i, &(pos, len)) in empty_data_pos.iter().enumerate() {
+            start_map.insert(pos, i);
+            end_map.insert(pos + len, i);
+        }
+        let mut used = vec![false; empty_data_pos.len()];
+        for start in 0..empty_data_pos.len() {
+            if used[start] {
+                continue;
+            }
+            let (s_pos, s_len) = empty_data_pos[start];
+            let mut lo = s_pos;
+            let mut hi = s_pos + s_len;
+            used[start] = true;
+            let mut chain: Vec<usize> = vec![start];
+            //向前延伸：找结束于 lo 的碎片
+            loop {
+                if let Some(&i) = end_map.get(&lo) {
+                    if !used[i] {
+                        lo = empty_data_pos[i].0;
+                        used[i] = true;
+                        chain.push(i);
+                        continue;
+                    }
+                }
+                break;
+            }
+            //向后延伸：找起始于 hi 的碎片
+            loop {
+                if let Some(&i) = start_map.get(&hi) {
+                    if !used[i] {
+                        hi = empty_data_pos[i].0 + empty_data_pos[i].1;
+                        used[i] = true;
+                        chain.push(i);
+                        continue;
+                    }
+                }
+                break;
+            }
+            if hi - lo >= length {
+                chain.sort_unstable_by(|a, b| b.cmp(a));
+                for i in chain {
+                    empty_data_pos.remove(i);
+                }
+                return Some((lo, hi - lo));
+            }
+        }
+        None
+    }
+
+    /// 从大到小跨块拼接：不改变列表顺序，每轮线性扫描选取当前最大碎片，
+    /// 相邻碎片合并为一段；段数（合并后）超过预算立即返回 TooManySegments
+    /// （此时列表未动，安全）。碎片总量不足返回 NotEnough（调用方走扩容）。
+    ///
+    /// Biggest-first stitching: list order never changes; each round linearly
+    /// picks the current largest free fragment, merging adjacent ones; if the
+    /// merged segment count exceeds the budget it returns TooManySegments
+    /// immediately (list untouched, safe). Insufficient total free space
+    /// returns NotEnough (caller falls back to extending the file).
+    fn get_pos_biggest(
+        length: u64,
+        empty_data_pos: &mut Vec<(u64, u64)>,
+        seg_budget: usize,
+    ) -> std::result::Result<Vec<(u64, u64)>, MultiSegError> {
+        use std::collections::HashSet;
+        let total_free: u64 = empty_data_pos.iter().map(|&(_, len)| len).sum();
+        if total_free < length {
+            return Err(MultiSegError::NotEnough);
+        }
+        let mut chosen_idx: HashSet<usize> = HashSet::new();
+        let mut chosen: Vec<(u64, u64)> = Vec::new();
+        let mut acc = 0u64;
+        loop {
+            if acc >= length {
+                break;
+            }
+            //选取当前最大碎片（排除已选）
+            let mut best: Option<usize> = None;
+            for (i, &(_, len)) in empty_data_pos.iter().enumerate() {
+                if len == 0 || chosen_idx.contains(&i) {
+                    continue;
+                }
+                if best.map_or(true, |bi| len > empty_data_pos[bi].1) {
+                    best = Some(i);
+                }
+            }
+            let Some(bi) = best else {
+                break;
+            };
+            let (pos, len) = empty_data_pos[bi];
+            //与已选段相邻则合并
+            let mut merged = false;
+            for c in chosen.iter_mut() {
+                if c.0 + c.1 == pos {
+                    c.1 += len;
+                    merged = true;
+                    break;
+                }
+                if pos + len == c.0 {
+                    c.0 = pos;
+                    c.1 += len;
+                    merged = true;
+                    break;
+                }
+            }
+            if !merged {
+                chosen.push((pos, len));
+            }
+            chosen_idx.insert(bi);
+            acc += len;
+            if chosen.len() > seg_budget {
+                return Err(MultiSegError::TooManySegments);
+            }
+        }
+        if acc < length {
+            return Err(MultiSegError::NotEnough);
+        }
+        //移除已选碎片（索引降序，保持剩余顺序）
+        let mut remove_idx: Vec<usize> = chosen_idx.into_iter().collect();
+        remove_idx.sort_unstable_by(|a, b| b.cmp(a));
+        for i in remove_idx {
+            empty_data_pos.remove(i);
+        }
+        Ok(chosen)
+    }
+
+    fn get_file_pos_aligned(&mut self, length: u64, align: u64) -> (u64, u64) {
+        //块对齐
+        let length = if length.is_multiple_of(align) {
+            length
+        } else {
+            let length = length / align + 1;
+            length * align
+        };
+        let empty_data_pos = &mut *self.empty_data_list.list_mut();
 
         let value = if let Some(value) = Self::get_pos_gc(length, empty_data_pos) {
             value

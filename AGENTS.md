@@ -59,14 +59,14 @@ cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测
 - `TestTool::remove_test_pack_files(path)` — cleanup helper for `.pack`/`.wbm`/`.lock` in tests.
 
 ### WBFP public API
-- The public entry point is `Allocator` (`src/wb_files_pack/allocator.rs`), not `WBFPManager`.
-- `Allocator` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
-- `Allocator::open(path)` — opens an existing pack file in read-only mode.
-- `Allocator::create_new(path)` — creates a new pack file with default config (separate manifest, no COW). Fails if file exists.
-- `Allocator::options() -> PackOpenOptions` — builder pattern for full control: `read()`, `write()`, `create()`, `create_new()`, `cow()`, `separate_manifest()`.
-- `Allocator::open_virtual_file(path, end_pos)` — opens an existing virtual file in read-only mode.
-- `Allocator::create_virtual_file(path)` — creates a new virtual file in write-only mode.
-- `Allocator::virtual_file_options() -> VirtualFileOpenOptions` — builder for virtual file access: `read()`, `write()`, `create_new()`, `end_pos()`.
+- The public entry point is `ManagerSync` (`src/wb_files_pack/manager_sync.rs`), not `WBFPManager`.
+- `ManagerSync` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
+- `ManagerSync::open(path)` — opens an existing pack file in read-only mode.
+- `ManagerSync::create_new(path)` — creates a new pack file with default config (separate manifest, no COW). Fails if file exists.
+- `ManagerSync::options() -> PackOpenOptions` — builder pattern for full control: `read()`, `write()`, `create()`, `create_new()`, `cow()`, `separate_manifest()`.
+- `ManagerSync::open_virtual_file(path, end_pos)` — opens an existing virtual file in read-only mode.
+- `ManagerSync::create_virtual_file(path)` — creates a new virtual file in write-only mode.
+- `ManagerSync::virtual_file_options() -> VirtualFileOpenOptions` — builder for virtual file access: `read()`, `write()`, `create_new()`, `end_pos()`, `alloc_size()`. `alloc_size(Some(len))` pre-allocates a known file size at 128B alignment; `None` (default) allocates unknown-size files as whole 4MiB blocks; ignored when opening an existing file.
 - `PackVirtualFile` (renamed from `PackFileWR`) — virtual file handle implementing `Read`/`Write`/`Seek` with access mode enforcement.
   - `get_len()` returns `u64` (not `Result<u64>`); `get_modified()` returns `u128` (not `Result<u128>`).
 - Delete/erase API: `delete_file`, `delete_dir_all`, `erase_file(strategy)`, `erase_dir_all(strategy)`.
@@ -95,7 +95,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支 CI 全量测
 
 - File extension: `.pack` (pack file), `.wbm` (separate manifest), `.lock` (PID-based write lock).
 - Uses A/B dual-block atomic writes for manifest data blocks, BLAKE3 for integrity.
-- Progressive save: auto-saves every 128KB written or 10,000 files added.
+- Progressive save: auto-saves every 64MiB written or 10,000 files added.
 - Garbage collection: batch sort (`sort_unstable_by_key`) + single-pass merge of adjacent free blocks. O((K+M) log(K+M)).
 - Full spec: `docs/wb_files_pack/manifest-data.md`
 

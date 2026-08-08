@@ -16,8 +16,8 @@ mod test;
 
 /// 包文件访问模式 / Pack file access mode
 ///
-/// 控制分配器级别的读写许可，用于验证虚拟文件工厂方法的权限。
-/// Controls allocator-level read/write permissions, used to validate virtual file factory methods.
+/// 控制同步管理器级别的读写许可，用于验证虚拟文件工厂方法的权限。
+/// Controls synchronized-manager-level read/write permissions, used to validate virtual file factory methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PackAccessMode {
     /// 只读模式 / Read-only mode
@@ -28,27 +28,27 @@ pub(crate) enum PackAccessMode {
     ReadWrite,
 }
 
-/// 水球包文件分配器——公共 API 入口。
+/// 水球包文件同步管理器——公共 API 入口。
 ///
 /// 封装 `WBFPManager` 和 `PackIO`，通过 `Arc<Mutex<>>` 提供线程安全访问。
 /// 所有对外暴露的读取/写入操作均由此结构体代理。
 ///
-/// WaterBall pack file allocator — public API entry point.
+/// WaterBall pack file synchronized manager — public API entry point.
 ///
 /// Wraps `WBFPManager` and `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
 /// All externally-facing read/write operations are proxied through this struct.
 #[derive(Clone, Debug)]
-pub struct Allocator {
-    /// 分配器访问模式（读写许可）/ Allocator access mode (read/write permissions)
+pub struct ManagerSync {
+    /// 同步管理器访问模式（读写许可）/ Synchronized manager access mode (read/write permissions)
     pub(crate) access_mode: PackAccessMode,
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
 }
-impl Allocator {
+impl ManagerSync {
     /// 打开已存在的水球包文件（只读模式）。
     ///
     /// Open an existing WaterBall pack file in Read mode.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: &P) -> Result<Self> {
         Self::options().read(true).open(path)
     }
 
@@ -59,7 +59,7 @@ impl Allocator {
     /// Create a new pack file with default settings in Write mode.
     ///
     /// Returns an error if the file already exists.
-    pub fn create_new<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn create_new<P: AsRef<Path>>(path: &P) -> Result<Self> {
         Self::options().write(true).create_new(true).open(path)
     }
 
@@ -75,30 +75,28 @@ impl Allocator {
     /// Open an existing virtual file in read-only mode.
     pub fn open_virtual_file<P: AsRef<Path>>(
         &mut self,
-        path: P,
-        end_pos: bool,
+        path: &P
     ) -> Result<PackVirtualFile> {
-        Self::virtual_file_options()
+        self.virtual_file_options()
             .read(true)
-            .end_pos(end_pos)
-            .open(self, path)
+            .open(path)
     }
 
     /// 创建新的虚拟文件（写入模式），行为类似于 `File::create`。
     ///
     /// Create a new virtual file in write-only mode, similar to `File::create`.
-    pub fn create_virtual_file<P: AsRef<Path>>(&mut self, path: P) -> Result<PackVirtualFile> {
-        Self::virtual_file_options()
+    pub fn create_virtual_file<P: AsRef<Path>>(&mut self, path: &P) -> Result<PackVirtualFile> {
+        self.virtual_file_options()
             .write(true)
             .create_new(true)
-            .open(self, path)
+            .open(path)
     }
 
     /// 获取 `VirtualFileOpenOptions` 构建器。
     ///
     /// Get a `VirtualFileOpenOptions` builder.
-    pub fn virtual_file_options() -> VirtualFileOpenOptions {
-        VirtualFileOpenOptions::new()
+    pub fn virtual_file_options(&mut self) -> VirtualFileOpenOptions<'_> {
+        VirtualFileOpenOptions::new(self)
     }
 }
 
@@ -163,7 +161,7 @@ impl PackOpenOptions {
     /// 根据配置的选项打开或创建包文件。
     ///
     /// Open or create a pack file according to the configured options.
-    pub fn open<P: AsRef<Path>>(&self, path: P) -> Result<Allocator> {
+    pub fn open<P: AsRef<Path>>(&self, path: &P) -> Result<ManagerSync> {
         let path = path.as_ref();
         let access_mode = match (self.read, self.write) {
             (true, false) => PackAccessMode::Read,
@@ -207,7 +205,7 @@ impl PackOpenOptions {
             )?;
             manager.init_new_pack()?;
             let manager = Arc::new(Mutex::new(manager));
-            Ok(Allocator {
+            Ok(ManagerSync {
                 access_mode,
                 manager,
                 pack_io,
@@ -234,7 +232,7 @@ impl PackOpenOptions {
                 )?;
                 manager.init_new_pack()?;
                 let manager = Arc::new(Mutex::new(manager));
-                Ok(Allocator {
+                Ok(ManagerSync {
                     access_mode,
                     manager,
                     pack_io,
@@ -242,7 +240,7 @@ impl PackOpenOptions {
             } else {
                 let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
                 let manager = Arc::new(Mutex::new(manager));
-                Ok(Allocator {
+                Ok(ManagerSync {
                     access_mode,
                     manager,
                     pack_io,
@@ -255,7 +253,7 @@ impl PackOpenOptions {
             let pack_io = Arc::new(Mutex::new(pack_io));
             let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
             let manager = Arc::new(Mutex::new(manager));
-            Ok(Allocator {
+            Ok(ManagerSync {
                 access_mode,
                 manager,
                 pack_io,
@@ -264,10 +262,10 @@ impl PackOpenOptions {
     }
 }
 
-impl Allocator /*读*/ {
+impl ManagerSync /*读*/ {
     /// 检查指定虚拟路径是否存在。
     /// Check whether the given virtual path exists.
-    pub fn path_exists<P: AsRef<Path>>(&mut self, path: P) -> Result<bool> {
+    pub fn path_exists<P: AsRef<Path>>(&mut self, path: &P) -> Result<bool> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -301,20 +299,23 @@ impl Allocator /*读*/ {
     /// 创建新虚拟文件——返回 PackVirtualFile（内部使用）。
     ///
     /// 通过管理器创建虚拟文件并分配初始大小，包装为 PackVirtualFile 返回。
+    /// `alloc_size`：`Some(len)` 已知大小按 128B 精确分配；`None` 未知大小按 4MiB 分配。
     ///
     /// Create a new virtual file — returns a PackVirtualFile (internal use).
     ///
-    /// Creates the virtual file via the manager with auto-sized allocation.
+    /// Creates the virtual file via the manager with an initial allocation:
+    /// `Some(len)` allocates exactly (128B-aligned); `None` allocates in 4MiB blocks.
     pub(crate) fn create_virtual_file_impl<P: AsRef<Path>>(
         &mut self,
         path: P,
+        alloc_size: Option<u64>,
     ) -> Result<PackVirtualFile> {
         let mgr = self.manager.clone();
         let mut mgr = mgr
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
         mgr.this_write_lock()?;
-        let (path_list, metadata) = mgr.create_file_auto_sized(path)?;
+        let (path_list, metadata) = mgr.create_file_auto_sized(path, alloc_size)?;
         let handle = Arc::new(Mutex::new(PackFileHandle::create(
             true,
             self.manager.clone(),
@@ -358,7 +359,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定目录的子项名称列表。
     /// Get the list of child item names for the given directory.
-    pub fn get_struct_item_name_list<P: AsRef<Path>>(&mut self, path: P) -> Result<Vec<String>> {
+    pub fn get_struct_item_name_list<P: AsRef<Path>>(&mut self, path: &P) -> Result<Vec<String>> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -381,7 +382,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定路径的目录结构项（限定为目录类型）。
     /// Get the struct item for the given path, asserting it is a directory.
-    pub fn get_pack_struct_item_dir<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStructItem> {
+    pub fn get_pack_struct_item_dir<P: AsRef<Path>>(&mut self, path: &P) -> Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -391,7 +392,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定路径的结构项（可接受文件或目录）。
     /// Get the struct item for the given path (accepts file or directory).
-    pub fn get_pack_struct_item<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStructItem> {
+    pub fn get_pack_struct_item<P: AsRef<Path>>(&mut self, path: &P) -> Result<PackStructItem> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -417,7 +418,7 @@ impl Allocator /*读*/ {
 
     /// 按需加载指定路径的结构和元数据。
     /// Lazily load the structure and metadata for the given path.
-    pub fn load_pack_struct_metadata_path<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+    pub fn load_pack_struct_metadata_path<P: AsRef<Path>>(&mut self, path: &P) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -427,7 +428,7 @@ impl Allocator /*读*/ {
 
     /// 获取指定路径的目录结构。
     /// Get the pack structure for the given directory path.
-    pub fn get_dir<P: AsRef<Path>>(&mut self, path: P) -> Result<PackStruct> {
+    pub fn get_dir<P: AsRef<Path>>(&mut self, path: &P) -> Result<PackStruct> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -436,7 +437,7 @@ impl Allocator /*读*/ {
     }
 }
 
-impl Allocator /*写*/ {
+impl ManagerSync /*写*/ {
     /// 在包内创建目录（包括所有不存在的父目录）。
     /// Create a directory in the pack, including any missing parent directories.
     pub fn create_dir_all<P: AsRef<Path>>(&mut self, path: &P) -> Result<()> {
@@ -448,10 +449,10 @@ impl Allocator /*写*/ {
     }
 }
 
-impl Allocator /*删除*/ {
+impl ManagerSync /*删除*/ {
     /// 删除虚拟文件（仅移除元数据和结构，数据块提交GC不覆写）。
     /// Delete a virtual file (remove metadata and structure only, data blocks submitted to GC without overwriting).
-    pub fn delete_file<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+    pub fn delete_file<P: AsRef<Path>>(&mut self, path: &P) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -462,7 +463,7 @@ impl Allocator /*删除*/ {
 
     /// 删除虚拟目录及其所有子项（仅移除元数据和结构，数据块提交GC不覆写）。
     /// Delete a virtual directory and all its descendants (remove metadata and structure only, data blocks submitted to GC without overwriting).
-    pub fn delete_dir_all<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+    pub fn delete_dir_all<P: AsRef<Path>>(&mut self, path: &P) -> Result<()> {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
@@ -504,7 +505,7 @@ impl Allocator /*删除*/ {
     }
 }
 
-impl Allocator /*工具方法*/ {
+impl ManagerSync /*工具方法*/ {
     /// 遍历包内所有文件并验证其哈希值。
     ///
     /// 返回 `VerifyHashR` 包含验证通过和失败的路径列表。
@@ -525,10 +526,10 @@ impl Allocator /*工具方法*/ {
         path: &Path,
         verify_hash_r: &mut VerifyHashR,
     ) -> Result<()> {
-        let item = self.get_pack_struct_item(path)?;
+        let item = self.get_pack_struct_item(&path)?;
         match item.item_type() {
             PackStructItemType::Dir { .. } => {
-                let s_file_name = self.get_struct_item_name_list(path)?;
+                let s_file_name = self.get_struct_item_name_list(&path)?;
                 for name in s_file_name {
                     self.verify_all_file_hash_inner(&path.join(name), verify_hash_r)?;
                 }

@@ -87,7 +87,7 @@ main.rs (binary)
         │   │   ├── gc.rs           ← GC orchestration / 垃圾回收调度
         │   │   ├── delete.rs       ← virtual file/dir delete + erase / 虚拟文件与目录删除/擦除
         │   │   └── test.rs         ← internal API tests / 内部 API 测试
-        │   ├── allocator.rs        ← public API layer (Arc<Mutex<>>) / 公共 API 层
+        │   ├── manager_sync.rs ← public API layer (Arc<Mutex<>>) / 公共 API 层
         │   │   └── test.rs         ← public API tests / 公共 API 测试
         │   ├── pack_io.rs          ← low-level file I/O + space allocation + GC merging
         │   │   │                      / 底层文件 I/O、空间分配与 GC 合并
@@ -338,7 +338,7 @@ WBFP uses a **three-layer architecture** / 三层架构:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Allocator (public API layer) / 公共 API 层    │
+│  ManagerSync (public API layer) / 公共 API 层    │
 │  Arc<Mutex<WBFPManager>> + Arc<Mutex<PackIO>>   │
 │  → Thread-safe; all external access here        │
 │    线程安全，所有外部访问入口                        │
@@ -547,6 +547,37 @@ fn ver_is_older(a: u32, b: u32) -> bool {
 3. No suitable free block → extend file: return (file.len, length) / 无合适块 → 文件末尾扩容
 ```
 
+**Data allocation** / 数据分配（虚拟文件数据）:
+- 已知大小（`VirtualFileOpenOptions::alloc_size(Some(len))`，如搜索时已知文件长度）：
+  走 128B 对齐的 `get_file_pos` 精确分配，与包文件整体对齐规则一致，不浪费空间。
+- 未知大小（`alloc_size(None)`，默认）：走 4MiB 对齐的 `get_data_file_pos_multi`，
+  优先复用空闲碎片，按 `DATA_DATA_BLOCK_LEN` 整块分配（初始 `create_file_raw`），
+  避免数据写入时频繁小块分配，多余空间由 GC 回收。
+- 跨块拼接策略（`get_data_file_pos_multi(length, current_seg, max_seg)`）：
+  Pass 1 单块 first-fit（`get_pos_gc`）→ Pass 2 紧贴连续链（物理相邻碎片合并为一段，
+  `get_pos_contiguous`）→ Pass 3 从大到小（`get_pos_biggest`，每轮取当前最大碎片，
+  相邻合并）；**不改变 empty_data_list 的顺序**；碎片不足时尾部扩容兜底。
+  段数按虚拟文件数据段数计数（`data_pos_list` 现有段数 + 新增段数），上限
+  `MAX_DATA_SEGMENTS`(16)，超限返回错误拒绝分配（不部分写入）。
+  碎片经 `file_gc`（save_all 时）批量排序合并进 `empty_data_list` 后才参与复用。
+- 打开已存在文件时 alloc_size 不生效（不能缩小已有分配）。
+- 清单数据始终走 128B 对齐的 `get_file_pos`。
+- Known size (`alloc_size(Some(len))`, e.g. length known from search) allocates
+  exactly at 128B alignment via `get_file_pos`, matching the pack's global
+  alignment rule with no waste. Unknown size (`alloc_size(None)`, default)
+  allocates via 4MiB-aligned `get_data_file_pos_multi` (initial `create_file_raw`)
+  reusing free fragments first: Pass 1 single-block first-fit (`get_pos_gc`) →
+  Pass 2 contiguous chain of physically adjacent fragments (`get_pos_contiguous`)
+  → Pass 3 largest-first accumulation (`get_pos_biggest`); the `empty_data_list`
+  order is never changed; extend-file fallback when fragments are insufficient.
+  Segments are counted against the virtual file's data segment list
+  (`data_pos_list` existing + new), capped at `MAX_DATA_SEGMENTS` (16); over-limit
+  allocations are rejected with an error (no partial writes). Fragments are
+  batch-sorted and merged into `empty_data_list` by `file_gc` (during `save_all`)
+  before they participate in reuse. `alloc_size` is ignored when opening an
+  existing file (never shrinks an existing allocation). Manifest data always
+  uses 128B-aligned `get_file_pos`.
+
 **Garbage collection** / 垃圾回收:
 
 ```
@@ -576,7 +607,7 @@ Stage 2 — Merging (file_gc): / 合并阶段
 
 ```rust
 // Trigger save_all() when:
-if all_write_len - last_all_write_len > 128 * 1024     // 128KB written / 每写入 128KB
+if all_write_len - last_all_write_len > 64 * 1024 * 1024  // 64MiB written / 每写入 64MiB
    || all_cr_file_count - last_all_cr_file_count > 10_000  // or 10K files added / 或每添加 10000 文件
 ```
 
@@ -616,19 +647,19 @@ Flow / 流程:
   > PID 不存在 → panic 并提示可手动删除
 - `.lock` is a directory / symlink → error (abnormal state) / 异常状态报错
 
-### 7.8 Public API Layer — Allocator
+### 7.8 Public API Layer — ManagerSync
 
 > 公共 API 层
 
-| **File**: `src/wb_files_pack/allocator.rs` (438 lines)
+| **File**: `src/wb_files_pack/manager_sync.rs` (438 lines)
 
-`Allocator` is the thread-safe wrapper around `WBFPManager` + `PackIO`:
+`ManagerSync` is the thread-safe wrapper around `WBFPManager` + `PackIO`:
 
-> `Allocator` 是对 `WBFPManager` + `PackIO` 的线程安全封装：
+> `ManagerSync` 是对 `WBFPManager` + `PackIO` 的线程安全封装：
 
 ```rust
 #[derive(Clone)]
-pub struct Allocator {
+pub struct ManagerSync {
     access_mode: PackAccessMode,  // Enforces read/write/read-write at open time
     manager: Arc<Mutex<WBFPManager>>,
     pack_io: Arc<Mutex<PackIO>>,
@@ -644,7 +675,7 @@ pub struct Allocator {
 | | `options() -> PackOpenOptions` | Full builder: `read()`/`write()`/`create()`/`create_new()`/`cow()`/`separate_manifest()` | 完整构造器模式 |
 | **Virtual** | `open_virtual_file(path, end_pos)` | Read-only open existing virtual file | 只读打开已有虚拟文件 |
 | | `create_virtual_file(path)` | Write-only create new virtual file | 只写创建新虚拟文件 |
-| | `virtual_file_options() -> VirtualFileOpenOptions` | Builder: `read()`/`write()`/`create_new()`/`end_pos()` | 虚拟文件构造器 |
+| | `virtual_file_options() -> VirtualFileOpenOptions` | Builder: `read()`/`write()`/`create_new()`/`end_pos()`/`alloc_size()` | 虚拟文件构造器 |
 | **Read** | `get_manifest_attribute` / `get_root_struct_items` / `get_dir` / `load_all_data` | | 读取各类信息 |
 | **Write** | `create_dir_all` / `delete_file` / `delete_dir_all` | | 目录与删除操作 |
 | **Delete** | `delete_file` / `delete_dir_all` | Remove metadata + structure, GC data blocks (no overwrite) | 删除元数据和结构，数据块回收不覆写 |
@@ -666,7 +697,7 @@ pub struct Allocator {
 
 - `Arc<Mutex<>>` for thread safety — multiple `PackVirtualFile` instances can operate concurrently / 多个 PackVirtualFile 可并发操作
 - Every method acquires the manager lock → serialized access / 每次方法调用获取锁 → 序列化
-- `Allocator` is `Clone` — multiple holders share the same pack reference / Clone 语义共享同一包引用
+- `ManagerSync` is `Clone` — multiple holders share the same pack reference / Clone 语义共享同一包引用
 
 ### 7.9 Virtual File I/O — PackVirtualFile + PackFileHandle
 
@@ -770,9 +801,9 @@ wbfp_p (command/wbfp.rs)
   ├─ write_optimization = !args.write_optimization  (inverted CLI flag)
   │
   ├─ Pack open or create / 打开或创建包:
-  │    ├─ If .pack exists → `Allocator::options().read(true).write(true).open(&pack_path)` (modify mode)
+  │    ├─ If .pack exists → `ManagerSync::options().read(true).write(true).open(&pack_path)` (modify mode)
   │    │   / 文件已存在 → 以修改模式打开（ReadWrite）
-  │    └─ If not exists → `Allocator::options().read(true).write(true).create_new(true).cow(false).separate_manifest(separate_manifest).open(&pack_path)` (create mode)
+  │    └─ If not exists → `ManagerSync::options().read(true).write(true).create_new(true).cow(false).separate_manifest(separate_manifest).open(&pack_path)` (create mode)
   │       / 文件不存在 → 创建新包（ReadWrite）
   │
   ├─ Input type check / 输入类型判断:
@@ -791,12 +822,16 @@ wbfp_p (command/wbfp.rs)
   │           rate-limited to every 10 MiB) / 主线程通过 mpsc 聚合总进度（限频每 10 MiB）
   │
   ├─ copy_file_into_pack() reads source file (1 MiB buffer) → creates/opens virtual file
-  │   in pack → loops read/write. On write_optimization enabled and file unchanged
-  │   (same modified time and size), skips re-write entirely. Permission-denied files
-  │   are logged and skipped, not fatal.
+  │   in pack → loops read/write. Writes all bytes read (short writes are retried with the
+  │   remaining buffer; files that grew after search are fully written), EOF ends the file
+  │   (with a warning if fewer bytes than expected were copied). On write_optimization
+  │   enabled and file unchanged (same modified time and size), skips re-write entirely.
+  │   Permission-denied files are logged and skipped, not fatal.
   │   / 读取源文件（1 MiB 缓冲区）→ 在包中创建/打开虚拟文件 → 循环读写。
-  │     启用写入优化且文件未变更（相同修改时间和大小）时完全跳过。
-  │     权限不足的文件记录日志并跳过，不中断流程。
+  │     读多少写多少：短写时续写余量不丢弃，搜索后增长的文件也会完整写入，
+  │     EOF 为正常结束（若实际写入少于预期记录警告）。启用写入优化且文件
+  │     未变更（相同修改时间和大小）时完全跳过。权限不足的文件记录日志并
+  │     跳过，不中断流程。
   │
   └─ Exit: WBFPManager.drop() → save_all() auto-persists / 自动持久化
 ```
@@ -808,7 +843,7 @@ wbfp_p (command/wbfp.rs)
 ```
 wbfp_u (command/wbfp.rs)
   │
-  ├─ Allocator::open() → open existing pack in read-only mode (Read)
+  ├─ ManagerSync::open() → open existing pack in read-only mode (Read)
   │
   ├─ Smart output dir deduction / 智能推导输出路径:
   │    └─ If not specified → strip .wbfp suffix from filename, use in CWD
@@ -835,12 +870,21 @@ wbfp_u (command/wbfp.rs)
   │    │    │    ├─ pending.fetch_add(n) + condvar.notify_all() / 递增计数+唤醒
   │    │    │    └─ pending.fetch_sub(1) → if reaches 1 → all_done = true
   │    │    │       / 递减计数，归零时设置完成标志
-  │    │    └─ PackStructItemType::File:
-  │    │         ├─ PackVirtualFile::read → File::write (1 MiB buffer) / 读取虚拟文件写入磁盘
-  │    │         ├─ Large file (>512 MiB) logged with info / 大文件独立 info 日志
-  │    │         ├─ Progress reported via closure (per-chunk) + mpsc channel (total bytes)
-  │    │         │   / 逐块进度闭包 + mpsc 通道发送总字节
-  │    │         └─ pending.fetch_sub(1) → completion check / 递减并检查完成
+   │    │    └─ PackStructItemType::File:
+   │    │         ├─ Optional hash verify (only with -H/--hash-verify) /
+   │    │         │   哈希校验可选（仅指定 -H/--hash-verify 时）:
+   │    │         │    ├─ open_virtual_file() + verify_hash() → BLAKE3 recompute vs stored
+   │    │         │    │   / 打开虚拟文件重算 BLAKE3 与存储值对比
+   │    │         │    ├─ Progress bar message: "正在哈希校验: {path}" / 进度条消息标明阶段
+   │    │         │    ├─ FAIL → warn "哈希校验未通过/验证发生错误，将跳过解包" + skip disk write
+   │    │         │    │   / 校验失败报警告并跳过（不写磁盘，进度按 0 字节上报）
+   │    │         │    └─ PASS → continue to extract / 通过才进入解包
+   │    │         ├─ Extract / 解包（默认直接执行，消息"正在解包: {path}"）:
+   │    │         │    ├─ PackVirtualFile::read → File::write (1 MiB buffer) / 读取虚拟文件写入磁盘
+   │    │         │    └─ Large file (>512 MiB) logged with info / 大文件独立 info 日志
+   │    │         ├─ Progress reported via closure (per-chunk) + mpsc channel (total bytes)
+   │    │         │   / 逐块进度闭包 + mpsc 通道发送总字节
+   │    │         └─ pending.fetch_sub(1) → completion check / 递减并检查完成
   │    └─ Repeat until all_done && queue drained / 重复直至全部完成
   │
   └─ Main thread: aggregate bytes via mpsc rx channel + main determinate progress bar
@@ -855,7 +899,7 @@ wbfp_u (command/wbfp.rs)
 ```
 wbfp_h (command/wbfp.rs)
   │
-  ├─ Allocator::open() → open existing pack in read-only mode (Read)
+  ├─ ManagerSync::open() → open existing pack in read-only mode (Read)
   │
   ├─ Thread count: from -t flag or CPU count / 线程数：-t 参数或 CPU 数
   │
@@ -988,7 +1032,7 @@ tracing subscriber
 **File**: `src/wb_files_pack/net_server.rs` (27 lines)
 
 - Gated behind `#[cfg(debug_assertions)]` — only compiled in debug builds / 仅在 debug 编译时包含
-- `WBFPServer` skeleton: manages `HashMap<String, Allocator>` for multiple packs
+- `WBFPServer` skeleton: manages `HashMap<String, ManagerSync>` for multiple packs
 - `WBFPServerClient` skeleton: single client connection
 - No network listener logic yet / 尚未有网络监听逻辑
 
@@ -1004,7 +1048,7 @@ tracing subscriber
 | `file_finder/test.rs` | Unit | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream | 符号链接各场景 |
 | `wb_files_pack/test.rs` | Module | Pack file create, read/write, verify | 包文件创建与校验 |
 | `wb_files_pack/manager/test.rs` | Internal API | Manager internal logic | 管理器内部逻辑 |
-| `wb_files_pack/allocator/test.rs` | Public API | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access | 删除/擦除（11 项测试）、文件创建读写、COW、哈希校验、多线程访问 |
+| `wb_files_pack/manager_sync/test.rs` | Public API | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access | 删除/擦除（11 项测试）、文件创建读写、COW、哈希校验、多线程访问 |
 
 **Testing conventions** / 测试约定:
 

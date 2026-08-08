@@ -3,7 +3,7 @@ use crate::wb_files_pack::manager::WBFPManagerRunLock;
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::info;
 
 use super::{PackLockInfo, PackLockType, WBFPManager};

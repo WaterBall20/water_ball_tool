@@ -1,4 +1,4 @@
-use crate::wb_files_pack::allocator::Allocator;
+use crate::wb_files_pack::manager_sync::ManagerSync;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -9,19 +9,19 @@ struct WBFPServer {
 }
 
 struct WBFPServerRun {
-    pack_list: Arc<Mutex<HashMap<String, Allocator>>>,
+    pack_list: Arc<Mutex<HashMap<String, ManagerSync>>>,
 }
 impl WBFPServerRun {
-    fn add_pack(&mut self, path: &Path, allocator: Allocator) -> Result<()> {
+    fn add_pack(&mut self, path: &Path, sync: ManagerSync) -> Result<()> {
         let pack_list = self.pack_list.clone();
         let mut pack_list = pack_list
             .lock()
             .map_err(|e| PackFileError::Lock(format!("无法获得包文件实例列表对象锁, err:{e}")))?;
-        pack_list.insert(path.display().to_string(), allocator);
+        pack_list.insert(path.display().to_string(), sync);
         Ok(())
     }
 }
 
 struct WBFPServerClient {
-    pack: Allocator,
+    pack: ManagerSync,
 }

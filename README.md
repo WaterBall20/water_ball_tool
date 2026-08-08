@@ -63,6 +63,8 @@ water_ball_tool wbfp p ./src my.pack -n
 
 ```bash
 water_ball_tool wbfp u my.pack ./output_dir
+# 解包前逐个文件进行 BLAKE3 哈希校验，校验失败的文件跳过并报警告：
+water_ball_tool wbfp u -H my.pack ./output_dir
 ```
 
 ### 哈希校验 `wbfp h`
@@ -114,8 +116,8 @@ src/
 │   ├── manager/
 │   │   ├── delete.rs    # 虚拟文件/目录删除与擦除实现
 │   │   └── test.rs      # 内部 API 测试
-│   ├── allocator.rs    # 线程安全封装层（Arc<Mutex<>>）
-│   ├── allocator/test.rs # 外部 API 测试
+│   ├── manager_sync.rs # 线程安全同步管理器（Arc<Mutex<>>）
+│   ├── manager_sync/test.rs # 外部 API 测试
 │   ├── pack_io.rs      # 底层文件 I/O + 空间分配 + GC
 │   ├── pack_io/file.rs # 虚拟文件读写器（PackVirtualFile，含访问模式强制）
 │   └── net_server.rs   # 网络服务（开发中）

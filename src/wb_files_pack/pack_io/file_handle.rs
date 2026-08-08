@@ -6,7 +6,7 @@ use crate::wb_files_pack::manager::WBFPManager;
 use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file_hash::PackFileHash;
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, PackFileMetadata, PackFileMetadataType,
+    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, MAX_DATA_SEGMENTS, PackFileMetadata, PackFileMetadataType,
 };
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
@@ -47,16 +47,25 @@ impl PackFileHandle {
         metadata: PackFileMetadata,
         end_pos: bool,
     ) -> Result<Self> {
-        Ok(Self {
+        let pos = if end_pos { metadata.len() } else { 0 };
+        let mut handle = Self {
             manager,
             pack_io: pack_io.clone(),
-            pos: if end_pos { metadata.len() } else { 0 },
+            pos: 0,
             temp_pos_index: 0,
             temp_pos_this_len: 0,
             path_list: Some(path_list),
             metadata: Some(metadata),
             is_write: new,
-        })
+        };
+        // 同步位置缓存：end_pos=true 时 pos 指向文件末尾，但缓存 temp_pos_this_len
+        // 仍表示"块内偏移 0"。若不同步，随后在当前位置写入（seek(End(0)) 后追加）会因
+        // set_pos 短路而用脏缓存解析出错误的物理偏移（写到文件开头）。
+        // Sync the position cache: keep temp_pos_index/temp_pos_this_len consistent
+        // with pos, otherwise writes at the current position resolve a wrong
+        // physical offset from the stale cache (see seek(End(0)) append case).
+        handle.set_pos(pos)?;
+        Ok(handle)
     }
 
     /// 返回虚拟文件的总长度（字节）。
@@ -66,7 +75,7 @@ impl PackFileHandle {
         if let Some(metadata) = &self.metadata {
             metadata.len()
         } else {
-            panic!("逻辑错误");
+            unreachable!("逻辑错误，文件句柄实例存在时必须持有元数据");
         }
     }
 
@@ -74,7 +83,7 @@ impl PackFileHandle {
         if let Some(metadata) = &self.metadata {
             metadata.modified()
         } else {
-            panic!("逻辑错误")
+            unreachable!("逻辑错误，文件句柄实例存在时必须持有元数据")
         }
     }
 
@@ -98,7 +107,7 @@ impl PackFileHandle {
         start_pos_list_item_index: usize,
         start_pos_list_item_len: u64,
         start_pos: u64,
-        add_pos: u64,
+        mut add_pos: u64,
         is_read: bool,
     ) -> Result<Vec<(u64, u64)>> {
         let mut pos_index = start_pos_list_item_index;
@@ -122,6 +131,17 @@ impl PackFileHandle {
                 //减去已偏移的长度
                 len -= start_pos_list_item_len;
             }
+            //读取模式：请求量不能超过文件逻辑长度。
+            //物理块可能只写了 metadata.len 字节（增长/预分配），读超界会 UnexpectedEof。
+            //Read mode: never request beyond the logical file length; physical
+            //blocks may hold only metadata.len bytes (grown/preallocated).
+            if is_read {
+                let remain = metadata.len().saturating_sub(start_pos + m_add_len);
+                let want = add_pos - m_add_len;
+                if want > remain {
+                    add_pos = m_add_len + remain;
+                }
+            }
             //计算
             if add_pos - m_add_len <= len {
                 //小于等于直接添加并直接返回
@@ -129,10 +149,6 @@ impl PackFileHandle {
                 return Ok(r_pos);
             }
             //大于就添加完所有空闲块
-            //读取额外判断
-            if is_read && start_pos + len + m_add_len > metadata.len() {
-                len = metadata.len() - (start_pos + m_add_len);
-            }
             r_pos.push((pos, len));
             //增值
             m_add_len += len;
@@ -151,9 +167,11 @@ impl PackFileHandle {
             let mut pack_file = pack_file
                 .lock()
                 .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
-            data_pos_list
-                .list_mut()
-                .push(pack_file.get_file_pos(add_len));
+            //多段拼接分配：以现有段数为基数，新增段数受 MAX_DATA_SEGMENTS 限制
+            //Stitch fragments: budget new segments against MAX_DATA_SEGMENTS
+            let cur_seg = data_pos_list.list().len();
+            let new_pos = pack_file.get_data_file_pos_multi(add_len, cur_seg, MAX_DATA_SEGMENTS)?;
+            data_pos_list.list_mut().extend(new_pos);
         }
         Ok(())
     }
@@ -186,9 +204,14 @@ impl PackFileHandle {
             if block_len > old_metadata_block_len {
                 //增加大小
                 let add_block_len = block_len - old_metadata_block_len;
-                //获取分配
-                let add_pos = pack_file.get_file_pos(add_block_len);
-                data_pos_list.list_mut().push(add_pos);
+                //获取分配（数据分配按 4MiB 对齐，避免频繁小块扩容；
+                //多段拼接受 MAX_DATA_SEGMENTS 段数上限约束）
+                //Allocate data with 4MiB alignment to avoid frequent small grows;
+                //segment stitching is bounded by MAX_DATA_SEGMENTS
+                let cur_seg = data_pos_list.list().len();
+                let new_pos =
+                    pack_file.get_data_file_pos_multi(add_block_len, cur_seg, MAX_DATA_SEGMENTS)?;
+                data_pos_list.list_mut().extend(new_pos);
             } else if block_len < old_metadata_block_len {
                 //减少大小
                 //更新数据块列表和垃圾回收提交
@@ -205,9 +228,10 @@ impl PackFileHandle {
                     if back_len_c > this_back_len_c {
                         let s_len = (back_len_c - this_back_len_c) * DATA_BLOCK_LEN_U64;
                         if item_len > s_len {
-                            //删除的大小小于快大小
+                            //删除的大小小于块大小：保留头部，释放尾部 s_len 字节
+                            //Keep the head, release the tail s_len bytes.
                             new_pos_list.push((pos, item_len - s_len));
-                            gc_list.push((pos + s_len, s_len));
+                            gc_list.push((pos + (item_len - s_len), s_len));
                         } else {
                             gc_list.push((pos, item_len));
                         }
@@ -478,8 +502,10 @@ impl PackFileHandle {
         self.set_pos(pos)?;
         //当前大小所需的位置列表
         let mut pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
-        //如果没有空间就尝试分配
-        if pos_s.is_empty() {
+        //总容量不足也补分配：块写满时校准段为 0 长度，is_empty() 判断会漏掉
+        //Also allocate when total capacity is short: full blocks yield 0-len segments
+        let total_cap: u64 = pos_s.iter().map(|&(_, len)| len).sum();
+        if total_cap < buf.len() as u64 {
             let data_len = buf.len() as u64;
             let add_running_len = (data_len / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN;
             self.add_running_len(add_running_len)?; //警告：此处调用pack_io，必须提前调用，顺序错误将导致死锁。

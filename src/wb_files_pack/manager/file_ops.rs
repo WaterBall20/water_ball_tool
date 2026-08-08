@@ -2,8 +2,8 @@ use crate::tools::PathTool;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::DEFAULT_HASH_TYPE;
 use crate::wb_files_pack::{
-    DATA_DATA_BLOCK_LEN, DataPosList, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType,
-    PackStruct, PackStructItem, PackStructItemType,
+    DATA_DATA_BLOCK_LEN, DataPosList, MAX_DATA_SEGMENTS, PackFileMetadata, PackFileMetadataRun,
+    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
 };
 use std::path::Path;
 use std::time::SystemTime;
@@ -11,10 +11,19 @@ use std::time::SystemTime;
 use super::{DirFileAddReturn, WBFPManager};
 
 impl WBFPManager {
+    /// 创建虚拟文件（未知大小用 4MiB 分配，已知大小按 128B 精确分配）。
+    ///
+    /// `alloc_size`：`Some(len)` 已知大小 → 128B 精确对齐分配，不浪费空间；
+    /// `None` 未知大小 → 按 4MiB 整块分配，多余空间由 GC 回收。
+    ///
+    /// Create a virtual file (`Some(len)` known size → exact 128B-aligned allocation;
+    /// `None` unknown size → whole 4MiB blocks, excess reclaimed by GC).
     pub(crate) fn create_file_auto_sized<P: AsRef<Path>>(
         &mut self,
         path: P,
+        alloc_size: Option<u64>,
     ) -> Result<(Vec<String>, PackFileMetadata)> {
+        let alloc_len = alloc_size.unwrap_or(DATA_DATA_BLOCK_LEN);
         self.create_file_raw(
             path,
             if let Ok(d) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
@@ -22,19 +31,22 @@ impl WBFPManager {
             } else {
                 0
             },
-            DATA_DATA_BLOCK_LEN,
+            alloc_len,
             self.cow,
             DEFAULT_HASH_TYPE,
+            alloc_size.is_none(),
         )
     }
 
+    /// 创建虚拟文件（已知大小，按 128B 精确分配）。
+    /// Create a virtual file with a known size (exact 128B-aligned allocation).
     pub(crate) fn create_file<P: AsRef<Path>>(
         &mut self,
         path: P,
         modified: u128,
         len: u64,
     ) -> Result<(Vec<String>, PackFileMetadata)> {
-        self.create_file_raw(path, modified, len, self.cow, DEFAULT_HASH_TYPE)
+        self.create_file_raw(path, modified, len, self.cow, DEFAULT_HASH_TYPE, false)
     }
 
     pub(crate) fn create_file_raw<P: AsRef<Path>>(
@@ -44,6 +56,7 @@ impl WBFPManager {
         len: u64,
         cow: bool,
         hash_type: u8,
+        data_alloc_4mib: bool,
     ) -> Result<(Vec<String>, PackFileMetadata)> {
         let path_list = PathTool::path_to_string_vec(&path);
         if self.path_exists(&path) {
@@ -55,6 +68,13 @@ impl WBFPManager {
         if path_list.len() > 1 {
             self.create_dir_all2(&path_list[..path_list.len() - 1])?;
         }
+        //已知大小：128B 精确分配；未知大小：4MiB 碎片拼接分配
+        //Known size: exact 128B allocation; unknown size: 4MiB fragment stitching
+        let data_pos = if data_alloc_4mib {
+            self.get_data_file_pos(len, 0, MAX_DATA_SEGMENTS)?
+        } else {
+            vec![self.get_file_pos(len)?]
+        };
         let metadata = PackFileMetadata::new(
             cow,
             len,
@@ -62,7 +82,7 @@ impl WBFPManager {
             PackFileMetadataType::File {
                 hash_type,
                 hash_value: Vec::new(),
-                data_pos_list: DataPosList::new(vec![self.get_file_pos(len)?]),
+                data_pos_list: DataPosList::new(data_pos),
             },
         );
         Ok((path_list, metadata))
@@ -114,6 +134,11 @@ impl WBFPManager {
                 },
             )
         };
+        //重开（从 .wbm 加载）后已存在目录的元数据处于 NoLoad 状态，
+        //必须先加载再更新统计，否则下面的 Loaded 分支会 panic
+        //After reopening, metadata of an existing dir is NoLoad; load it first
+        //before updating stats, otherwise the Loaded branch below panics.
+        self.load_metadata_to_item(Path::new(two_name.as_str()), &mut two_item)?;
         match two_item.item_type_mut() {
             PackStructItemType::Dir {
                 struct_file_pos,
@@ -142,7 +167,7 @@ impl WBFPManager {
                             two_item.set_metadata_file_pos(pos);
                         }
                     } else {
-                        panic!("逻辑错误");
+                        panic!("逻辑错误， 元数据运行应为已加载");
                     }
                     self.manifest
                         .root_struct_mut()

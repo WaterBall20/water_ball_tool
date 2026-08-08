@@ -4,8 +4,8 @@
 /// Provides container file format creation, read/write, and management functionality.
 pub mod manager;
 
-/// 线程安全分配器模块 / Thread-safe allocator module
-pub mod allocator;
+/// 线程安全同步管理器模块 / Thread-safe synchronized manager module
+pub mod manager_sync;
 mod data;
 pub mod error;
 ///网络服务
@@ -23,7 +23,7 @@ pub use data::{
     PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType, WBFilesPackManifest,
 };
 pub(crate) use data::{
-    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
-    ManifestDataBlockTrait,
+    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, MANIFEST_ATTRIBUTE_BLOCK_LEN, MAX_DATA_SEGMENTS,
+    ManifestDataBlock, ManifestDataBlockTrait,
 };
 pub use data::{MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE};

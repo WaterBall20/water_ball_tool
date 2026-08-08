@@ -25,18 +25,18 @@ use std::{fs, io};
 use tracing::{error, info, warn};
 use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, SearchEvent};
 use water_ball_tool::tools::PathTool;
-use water_ball_tool::wb_files_pack::PackStructItemType;
-use water_ball_tool::wb_files_pack::allocator::Allocator;
+use water_ball_tool::wb_files_pack::manager_sync::ManagerSync;
+use water_ball_tool::wb_files_pack::{PackFileError, PackStructItemType};
 type ArcMutex<T> = Arc<Mutex<T>>;
 
 /// wbfp 命令参数 / wbfp command arguments
 #[derive(Args, Debug)]
-pub(crate) struct WaterBallFilePackArgs {
+pub(crate) struct WaterBallFilePackCommand {
     #[command(subcommand)]
     commands: WaterBallFilePackCommands,
 }
 
-impl WaterBallFilePackArgs {
+impl WaterBallFilePackCommand {
     #[cfg(test)]
     pub(crate) fn new(commands: WaterBallFilePackCommands) -> Self {
         Self { commands }
@@ -97,9 +97,10 @@ pub(crate) struct WaterBallFilePackCommandsPack {
     /// 不分离清单到 .wbm 文件 / Do not separate manifest to .wbm file
     #[arg(short, long)]
     no_separation: bool,
-    #[arg(short, long)]
     /// 复制时所用的线程数，缺省使用CPU线程数量
+    #[arg(short, long)]
     thread_count: Option<usize>,
+    /// 不启用写入优化
     #[arg(short = 'w', long)]
     no_write_optimization: bool,
 }
@@ -146,7 +147,7 @@ impl WaterBallFilePackCommandsHashVerify {
 /// based on the subcommand. Each function handles its own progress bars
 /// and multi-threading logic independently.
 pub fn wbfp(
-    args: WaterBallFilePackArgs,
+    args: &WaterBallFilePackCommand,
     mp: Option<&MultiProgress>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let args2 = &args.commands;
@@ -184,7 +185,6 @@ impl WaterBallFilePackArgsRuning {
         args: &WaterBallFilePackCommandsPack,
         mp: Option<&MultiProgress>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use std::thread;
         //源目录路径
         let in_path = PathBuf::from(&args.in_path);
         //输出的包文件路径
@@ -236,29 +236,53 @@ impl WaterBallFilePackArgsRuning {
 
         let data_len = Arc::new(Mutex::new(0));
 
-        let mut pack = {
+        let pack = {
             if pack_path.exists() {
                 info!("包文件已存在，将打开并修改");
                 if write_optimization {
                     info!("已启用写入优化，未更改的文件将跳过");
                 }
-                Allocator::options()
+                ManagerSync::options()
                     .read(true)
                     .write(true)
                     .open(&pack_path)
                     .expect("打开包文件错误")
             } else {
                 info!("创建新包文件并初始化");
-                Allocator::options()
-                    .read(true)
+                ManagerSync::options()
                     .write(true)
                     .create_new(true)
-                    .cow(false)
                     .separate_manifest(separate_manifest)
                     .open(&pack_path)
                     .expect("创建包文件错误")
             }
         };
+        //复制操作===
+        Self::wbfp_p_run(
+            wb_pb,
+            data_len,
+            &in_path,
+            ff_pb,
+            pack,
+            write_optimization,
+            args,
+            mp,
+            &pack_path,
+        )
+    }
+
+    fn wbfp_p_run(
+        wb_pb: Option<ArcMutex<ProgressBar>>,
+        data_len: ArcMutex<u64>,
+        in_path: &Path,
+        ff_pb: Option<ProgressBar>,
+        mut pack: ManagerSync,
+        write_optimization: bool,
+        args: &WaterBallFilePackCommandsPack,
+        mp: Option<&MultiProgress>,
+        pack_path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::thread;
         //复制操作===
         info!("开始复制数据");
         //设置为包文件具体进度条
@@ -302,8 +326,7 @@ impl WaterBallFilePackArgsRuning {
                         pb.set_length(info.length());
                         pb.set_position(write_len);
                         pb.set_message(format!(
-                            "File path: {}\
-                    \nPack path: {}",
+                            "\tFile path: {}\n\tPack path: {}",
                             this_in_path.display(),
                             this_pack_path.display()
                         ));
@@ -315,7 +338,7 @@ impl WaterBallFilePackArgsRuning {
                 &mut pack,
                 &mut run_buf,
                 &file_info,
-                &in_path,
+                in_path,
                 file_name.as_ref(),
                 None,
                 &mut update_pb,
@@ -347,7 +370,7 @@ impl WaterBallFilePackArgsRuning {
 
             //创建专门的线程搜索
             let ff_thread = Self::wbfp_p_search(
-                &in_path,
+                in_path,
                 &results,
                 &ff_end,
                 &condver,
@@ -360,7 +383,7 @@ impl WaterBallFilePackArgsRuning {
             let wp_thread = Self::wbfp_p_copy(
                 &pack,
                 &results,
-                &in_path,
+                in_path,
                 &condver,
                 &ff_end,
                 thread_count,
@@ -410,7 +433,7 @@ impl WaterBallFilePackArgsRuning {
                 //搜索进度
                 let (tx, rx) = mpsc::channel();
                 let (search_stream_handle, stream_results) =
-                    ff.search_stream(in_dir_path.as_ref(), true, tx, 2)?;
+                    ff.search_stream(&in_dir_path, true, tx, 2)?;
                 //更新进度线程
 
                 if let Some(ff_pb) = ff_pb {
@@ -469,7 +492,7 @@ impl WaterBallFilePackArgsRuning {
     }
 
     fn wbfp_p_copy(
-        pack: &Allocator,
+        pack: &ManagerSync,
         results: &ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
         in_path: &Path,
         condver: &Arc<Condvar>,
@@ -546,7 +569,12 @@ impl WaterBallFilePackArgsRuning {
                     && let Some(pb) = &wb_pb
                 {
                     let pb = pb.lock().unwrap();
-                    pb.set_length(*data_len.lock().unwrap());
+                    //总大小与实际写入量对齐（源文件可能在复制期间增长）
+                    let mut total = data_len.lock().unwrap();
+                    if write_len > *total {
+                        *total = write_len;
+                    }
+                    pb.set_length(*total);
                     pb.set_position(write_len);
                     pb.set_message(format!(
                         "[{write_file_count}/{}个文件]",
@@ -579,7 +607,7 @@ impl WaterBallFilePackArgsRuning {
     /// Updates the per-thread progress bar every 5MiB written, and sends
     /// byte counts to the main thread via main_pb_tx for total aggregation.
     fn wbfp_p_work(
-        mut pack_man: Allocator,
+        mut pack_man: ManagerSync,
         pb: Option<ProgressBar>,
         files_list: ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
         in_dir_path: &Path,
@@ -603,7 +631,7 @@ impl WaterBallFilePackArgsRuning {
                 pb.set_length(info.length());
                 pb.set_position(write_len);
                 pb.set_message(format!(
-                    "File path: {}\nPack path: {}",
+                    "\tFile path: {}\n\tPack path: {}",
                     this_in_path.display(),
                     this_pack_path.display()
                 ));
@@ -684,7 +712,7 @@ impl WaterBallFilePackArgsRuning {
     /// progress updates, and sends byte deltas to the main thread via
     /// `main_pb_tx` for total progress bar aggregation.
     fn copy_file_into_pack(
-        pack_man: &mut Allocator,
+        pack_man: &mut ManagerSync,
         run_buf: &mut [u8],
         info: &FileInfo,
         this_in_path: &Path,
@@ -713,8 +741,15 @@ impl WaterBallFilePackArgsRuning {
                 return;
             }
         };
-        //尝试创建虚拟文件
-        let mut out_file = match pack_man.create_virtual_file(this_pack_path) {
+        //尝试创建虚拟文件（已知大小：按 128B 精确分配，避免 4MiB 整块浪费）
+        //Try creating the virtual file (known size: exact 128B-aligned allocation)
+        let mut out_file = match pack_man
+            .virtual_file_options()
+            .write(true)
+            .create_new(true)
+            .alloc_size(Some(info.length()))
+            .open(&this_pack_path)
+        {
             Ok(mut v) => {
                 if let Err(err) = v.set_len(info.length()) {
                     warn!(
@@ -732,7 +767,11 @@ impl WaterBallFilePackArgsRuning {
             }
             Err(err) => {
                 //尝试打开文件
-                match pack_man.open_virtual_file(this_pack_path, false) {
+                match pack_man
+                    .virtual_file_options()
+                    .write(true)
+                    .open(this_pack_path)
+                {
                     Ok(mut v) => {
                         //基于检查修改时间和大小，简单的写入优化判断
                         if write_optimization
@@ -777,48 +816,63 @@ impl WaterBallFilePackArgsRuning {
             }
         };
         //写入操作
+        //读多少写多少：短写时续写余量不丢弃；源文件搜索后增长也全部写入，
+        //虚拟文件实际大小由写入自动同步；EOF（read 返回 0）为正常结束条件。
         let mut write_len = 0;
-        while write_len < info.length() {
+        loop {
             //读
             match in_file.read(run_buf) {
+                Ok(0) => {
+                    //EOF 防御：未达到记录长度时警告而不是进入无限循环
+                    if write_len < info.length() {
+                        warn!(
+                            r#"文件"{}"提前结束（EOF），已写入{write_len}B，搜索时记录长度{}B"#,
+                            this_in_path.display(),
+                            info.length()
+                        );
+                    }
+                    break;
+                }
                 Ok(this_read_len) => {
-                    #[cfg(test)]
-                    assert_ne!(
-                        this_read_len,
-                        0,
-                        r#"从文件"{}"读取的大小为0，但于预期不符，文件大小可能不是0"#,
-                        this_pack_path.display()
-                    );
-                    match out_file.write(&run_buf[..this_read_len]) {
-                        Ok(this_write_len) => {
-                            if this_write_len < this_read_len {
+                    let mut buf_offset = 0;
+                    let mut write_err = false;
+                    while buf_offset < this_read_len && !write_err {
+                        match out_file.write(&run_buf[buf_offset..this_read_len]) {
+                            Ok(0) => {
+                                //防御：写入无进展，避免无限循环
                                 warn!(
-                                    r#"从文件"{}"写入虚拟文件"{}"大小不一致，读：{this_read_len}B，写：{this_write_len}B"#,
-                                    this_in_path.display(),
+                                    r#"写入虚拟文件"{}"返回0字节，将跳过剩余数据，err: 写入无进展"#,
                                     this_pack_path.display()
                                 );
+                                write_err = true;
                             }
-                            write_len += this_write_len as u64;
-                            //更新进度
-                            update_pb(
-                                write_len,
-                                this_write_len as u64,
-                                info,
-                                this_in_path,
-                                this_pack_path,
-                            );
-                            //更新总进度条
-                            if let Some(main_pb_tx) = main_pb_tx {
-                                let _ = main_pb_tx.send((0, this_write_len as u64));
+                            Ok(this_write_len) => {
+                                buf_offset += this_write_len;
+                                write_len += this_write_len as u64;
+                                //更新进度
+                                update_pb(
+                                    write_len,
+                                    this_write_len as u64,
+                                    info,
+                                    this_in_path,
+                                    this_pack_path,
+                                );
+                                if let Some(main_pb_tx) = main_pb_tx {
+                                    let _ = main_pb_tx.send((0, this_write_len as u64));
+                                }
+                            }
+                            Err(err) => {
+                                error!(
+                                    r#"写入虚拟文件"{}"错误, 将跳过，err:{err}"#,
+                                    this_pack_path.display()
+                                );
+                                write_err = true;
                             }
                         }
-                        Err(err) => {
-                            error!(
-                                r#"写入虚拟文件"{}"错误, 将跳过，err:{err}"#,
-                                this_pack_path.display()
-                            );
-                            break;
-                        }
+                    }
+                    //写入出错或无进展时结束本文件
+                    if write_err {
+                        break;
                     }
                 }
                 Err(err) => {
@@ -882,7 +936,7 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备解包");
         info!("打开包文件");
-        let mut pack = Allocator::open(pack_path).expect("打开包文件错误");
+        let mut pack = ManagerSync::open(pack_path).expect("打开包文件错误");
         info!("开始复制数据");
         fs::create_dir_all(&out_dir_path).expect("无法创建数据路径");
 
@@ -947,6 +1001,7 @@ impl WaterBallFilePackArgsRuning {
                 &mut worker_pbs,
                 &out_dir_path,
                 &mut handles,
+                args.hash_verify,
             );
         }
         drop(tx);
@@ -978,7 +1033,7 @@ impl WaterBallFilePackArgsRuning {
     }
 
     fn wpfp_u_work(
-        pack: &Allocator,
+        pack: &ManagerSync,
         queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
@@ -986,6 +1041,7 @@ impl WaterBallFilePackArgsRuning {
         worker_pbs: &mut Vec<Option<ProgressBar>>,
         out_dir_path: &Arc<PathBuf>,
         handles: &mut Vec<JoinHandle<Result<(), Error>>>,
+        hash_verify: bool,
     ) {
         use std::thread;
         let mut pack = pack.clone();
@@ -1083,21 +1139,78 @@ impl WaterBallFilePackArgsRuning {
                     PackStructItemType::File { .. } => {
                         let out_path = out_dir_path.join(&path);
                         let out_path_str = out_path.display().to_string();
-                        let bytes_written = Self::extract_pack_file_to_disk(
-                            &mut pack,
-                            &path,
-                            &out_path,
-                            &mut run_buf,
-                            Some(
-                                &(|done, total| {
-                                    if let Some(pb) = &w_pb {
-                                        pb.set_length(total);
-                                        pb.set_position(done);
-                                        pb.set_message(format!("File path: {}", out_path_str));
+
+                        //解包进度闭包（两分支共用）：消息标明正在解包
+                        //Shared extract progress closure: message marks the extract stage
+                        let extract_progress = |done: u64, total: u64| {
+                            if let Some(pb) = &w_pb {
+                                pb.set_length(total);
+                                pb.set_position(done);
+                                pb.set_message(format!("正在解包: {out_path_str}"));
+                            }
+                        };
+                        let bytes_written = if hash_verify {
+                            //哈希校验可选（-H/--hash-verify）：指定时先校验再解包，
+                            //校验失败/错误则警告并跳过（不写磁盘）
+                            //Optional hash verify (-H/--hash-verify): verify first, then
+                            //extract; warn and skip on mismatch/error.
+                            let mut rw = match pack.open_virtual_file(&path) {
+                                Ok(rw) => rw,
+                                Err(err) => {
+                                    error!(
+                                        "无法打开虚拟文件\"{}\", err: {err:?}",
+                                        path.display()
+                                    );
+                                    let _ = tx.send(0u64);
+                                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
+                                        all_done.store(true, Ordering::SeqCst);
+                                        queue.1.notify_all();
                                     }
-                                }),
-                            ),
-                        );
+                                    continue;
+                                }
+                            };
+                            let hash_ok = match rw.verify_hash(Some(&(|done, total| {
+                                if let Some(pb) = &w_pb {
+                                    pb.set_length(total);
+                                    pb.set_position(done);
+                                    pb.set_message(format!("正在哈希校验: {out_path_str}"));
+                                }
+                            }))) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    warn!(
+                                        "虚拟文件\"{}\"哈希验证发生错误, err: {err:?}, 将跳过解包",
+                                        path.display()
+                                    );
+                                    false
+                                }
+                            };
+                            if hash_ok {
+                                Self::extract_pack_file_to_disk(
+                                    &mut pack,
+                                    &path,
+                                    &out_path,
+                                    &mut run_buf,
+                                    Some(&extract_progress),
+                                )
+                            } else {
+                                warn!(
+                                    "虚拟文件\"{}\"哈希校验未通过，将跳过解包",
+                                    path.display()
+                                );
+                                Ok(0)
+                            }
+                        } else {
+                            //未指定哈希校验：直接解包
+                            //Without hash verify: extract directly
+                            Self::extract_pack_file_to_disk(
+                                &mut pack,
+                                &path,
+                                &out_path,
+                                &mut run_buf,
+                                Some(&extract_progress),
+                            )
+                        };
 
                         let _ = tx.send(bytes_written.unwrap_or(0));
 
@@ -1122,13 +1235,13 @@ impl WaterBallFilePackArgsRuning {
     /// virtual file → creates the disk file → pre-allocates space → loops
     /// read/write. Reports progress after each chunk via the `progress` closure.
     fn extract_pack_file_to_disk(
-        pack: &mut Allocator,
+        pack: &mut ManagerSync,
         pack_path: &Path,
         out_path: &Path,
         run_buf: &mut [u8],
         progress: Option<&dyn Fn(u64, u64)>,
     ) -> io::Result<u64> {
-        let mut in_file = match pack.open_virtual_file(pack_path, false) {
+        let mut in_file = match pack.open_virtual_file(&pack_path) {
             Ok(v) => v,
             Err(err) => {
                 error!("无法打开虚拟文件{:?}，将跳过，err:{err}", pack_path);
@@ -1237,7 +1350,8 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备哈希校验");
         info!("打开包文件");
-        let mut pack = Allocator::open(pack_path).expect("打开包文件错误");
+        let mut pack = ManagerSync::open(pack_path)
+            .map_err(|e| PackFileError::Other(format!("打开包文件错误: {e}")))?;
         info!("开始哈希校验");
         Self::verify_hash(&mut pack, mp, thread_count).unwrap();
         info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");
@@ -1274,12 +1388,11 @@ impl WaterBallFilePackArgsRuning {
     /// No `load_all_data` — all structures and metadata are loaded on demand,
     /// achieving true discover-as-you-verify concurrency.
     fn verify_hash(
-        pack: &mut Allocator,
+        pack: &mut ManagerSync,
         mp: Option<&MultiProgress>,
         thread_count: usize,
     ) -> io::Result<()> {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::thread;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
 
         let root_name_list = pack.get_root_struct_item_name_list()?;
         let attribute = pack.get_manifest_attribute()?;
@@ -1381,7 +1494,7 @@ impl WaterBallFilePackArgsRuning {
     }
 
     fn wpfp_h_work(
-        pack: &Allocator,
+        pack: &ManagerSync,
         queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
@@ -1482,7 +1595,7 @@ impl WaterBallFilePackArgsRuning {
                         }
                     }
                     PackStructItemType::File { .. } => {
-                        let mut rw = match pack.open_virtual_file(&path, false) {
+                        let mut rw = match pack.open_virtual_file(&path) {
                             Ok(v) => v,
                             Err(err) => {
                                 error!("无法获取包文件读写器，err: {err}");
@@ -1503,7 +1616,7 @@ impl WaterBallFilePackArgsRuning {
                                 if let Some(pb) = &w_pb {
                                     pb.set_length(total);
                                     pb.set_position(done);
-                                    pb.set_message(format!("File path: {path_str}"));
+                                    pb.set_message(format!("\tFile path: {path_str}"));
                                 }
                             }),
                         )) {

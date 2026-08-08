@@ -208,8 +208,8 @@ fn pack_file_metadata_data_block_save_and_load() {
 /// Prepare a ManifestDataBlock with two updates (A=ver1, B=ver2)
 fn prepare_ab_block(data_v1: &[u8], data_v2: &[u8]) -> ManifestDataBlock {
     let mut md = ManifestDataBlock::default();
-    md.update(data_v1); // A=ver1
-    md.update(data_v2); // B=ver2
+    md.update(data_v1).expect("更新数据块失败"); // A=ver1
+    md.update(data_v2).expect("更新数据块失败"); // B=ver2
     md
 }
 
@@ -278,9 +278,9 @@ fn ab_a_corrupted_higher_ver_reads_b() {
     let data2 = b"second_update_data";
     let data3 = b"third_update_data";
     let mut md = ManifestDataBlock::default();
-    md.update(data1); // A=1
-    md.update(data2); // B=2
-    md.update(data3); // A=3 (higher)
+    md.update(data1).expect("更新数据块失败"); // A=1
+    md.update(data2).expect("更新数据块失败"); // B=2
+    md.update(data3).expect("更新数据块失败"); // A=3 (higher)
 
     assert_eq!(md.get_this_data().expect("获取当前数据失败"), data3);
 
@@ -318,7 +318,7 @@ fn ab_both_valid_selects_higher_ver() {
     assert_eq!(md.get_this_data().expect("获取当前数据失败"), data2);
 
     let data3 = b"even_higher_version_data";
-    md.update(data3); // A=3
+    md.update(data3).expect("更新数据块失败"); // A=3
 
     // A 更新，应读到 data3
     assert_eq!(md.get_this_data().expect("获取当前数据失败"), data3);
@@ -439,7 +439,7 @@ fn update_wraps_version_near_max() {
     let data2 = b"data_at_wrapped_version";
 
     let mut md = ManifestDataBlock::default();
-    md.update(data1); // A=ver=1
+    md.update(data1).expect("更新数据块失败"); // A=ver=1
 
     // 手动将 B 块的版本设置为 u32::MAX-1，A 设置为 u32::MAX
     // 这样下次 update 会选中 A (ver较低.. 其实是 ver=u32::MAX，B 是 ver=u32::MAX-1)
@@ -464,7 +464,7 @@ fn update_wraps_version_near_max() {
         .copy_from_slice(&ver_max_minus_1);
 
     // B(MAX-1) 比 A(MAX) 更旧 → 更新 B 为 next_ver(MAX) = 1
-    md.update(data2);
+    md.update(data2).expect("更新数据块失败");
 
     // 现在 B 应该 ver=1，应读取 data2
     let recovered = md.get_this_data().expect("获取当前数据失败");
@@ -472,7 +472,7 @@ fn update_wraps_version_near_max() {
 
     // 再次 update 验证能继续正常交替
     let data3 = b"data_after_wrap";
-    md.update(data3);
+    md.update(data3).expect("更新数据块失败");
     let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, data3);
 }
@@ -482,7 +482,7 @@ fn update_wraps_at_boundary_then_continues() {
     // 直接在回环边界连续更新: MAX→1→2→3 验证正常交替
     // Update across wrap boundary: MAX→1→2→3, verify normal alternation
     let mut md = ManifestDataBlock::default();
-    md.update(b"step0");
+    md.update(b"step0").expect("更新数据块失败");
 
     let half = md.block_data().len() / 2;
 
@@ -497,7 +497,7 @@ fn update_wraps_at_boundary_then_continues() {
     // 手动读取 B 当前版本以确认
     // 实际上经过 default → update(step0): A=1; update(step1=B here? No, only 1 update)
     // 我们需要两次 update 才有 A=1, B=2
-    md.update(b"step1"); // 这次 update 实际上是在 step0 之后: A=1, 然后 update step1 → B=2
+    md.update(b"step1").expect("更新数据块失败"); // 这次 update 实际上是在 step0 之后: A=1, 然后 update step1 → B=2
 
     // 重新设置 A 版本为 u32::MAX
     md.block_data_mut()[MANIFEST_DATA_BLOCK_DATA_VER_INDEX
@@ -510,16 +510,16 @@ fn update_wraps_at_boundary_then_continues() {
     // 2.wrapping_sub(MAX) = 3
     // MAX.wrapping_sub(2) = MAX-2 ≈ 4 billion
     // 3 < 4 billion → MAX is older! Correct.
-    md.update(b"step2_wrap");
+    md.update(b"step2_wrap").expect("更新数据块失败");
 
     let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, b"step2_wrap");
 
     // 继续正常更新 / Continue normal updates
-    md.update(b"step3");
+    md.update(b"step3").expect("更新数据块失败");
     assert_eq!(md.get_this_data().expect("获取当前数据失败"), b"step3");
 
-    md.update(b"step4");
+    md.update(b"step4").expect("更新数据块失败");
     assert_eq!(md.get_this_data().expect("获取当前数据失败"), b"step4");
 }
 
@@ -531,7 +531,7 @@ fn ab_fallback_works_after_wrap_around() {
     let data_b = b"after_wrap_data_b";
 
     let mut md = ManifestDataBlock::default();
-    md.update(data_a);
+    md.update(data_a).expect("更新数据块失败");
 
     let half = md.block_data().len() / 2;
     // 设置 A 版本为 MAX-1
@@ -543,11 +543,11 @@ fn ab_fallback_works_after_wrap_around() {
 
     // B 初始为空 (ver=0, 会被拒绝)
     // 所以 update 会选中 B: next_ver(MAX-1) = MAX
-    md.update(data_b); // B=ver=MAX-1+1=MAX, 或 next_ver(MAX-1)=MAX
+    md.update(data_b).expect("更新数据块失败"); // B=ver=MAX-1+1=MAX, 或 next_ver(MAX-1)=MAX
 
     // 现在 A=MAX-1, B=MAX
     // 再次 update: ver_is_older(MAX-1, MAX)=true → 更新 A: next_ver(MAX)=1
-    md.update(b"newest_data");
+    md.update(b"newest_data").expect("更新数据块失败");
 
     let recovered = md.get_this_data().expect("获取当前数据失败");
     assert_eq!(recovered, b"newest_data");

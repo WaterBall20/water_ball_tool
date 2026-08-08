@@ -35,7 +35,7 @@ fn ff_out_file_skip_symlink() -> Result<(), Box<dyn std::error::Error>> {
     out_file_path.push_str("/test_ff_skip_symlink.json");
     _ = fs::remove_file(&out_file_path);
     let r = ff(
-        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), true),
+        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), true, None),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
@@ -57,7 +57,7 @@ fn ff_out_file() -> Result<(), Box<dyn std::error::Error>> {
     out_file_path.push_str("/test_ff.json");
     _ = fs::remove_file(&out_file_path);
     let r = ff(
-        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false),
+        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false, None),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
@@ -81,7 +81,7 @@ fn ff_out_file_longtime() -> Result<(), Box<dyn std::error::Error>> {
     _ = fs::remove_file(&out_file_path);
 
     let r = ff(
-        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false),
+        FileFinderArgs::new(fixture_str, Some(out_file_path.clone()), false, None),
         Some(&mp),
     );
     _ = fs::remove_file(&out_file_path);
@@ -95,7 +95,10 @@ fn ff_no_out_file() -> Result<(), Box<dyn std::error::Error>> {
     crate::init_global_logging(&mp);
     let fixture = create_small_fixture("ff_no_out_file");
     let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
-    let r = ff(FileFinderArgs::new(fixture_str, None, false), Some(&mp));
+    let r = ff(
+        FileFinderArgs::new(fixture_str, None, false, None),
+        Some(&mp),
+    );
     _ = fs::remove_dir_all(&fixture);
     r
 }
@@ -119,7 +122,7 @@ fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     let r = wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 fixture_str,
                 Some(out_file_path.clone()),
@@ -150,7 +153,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
     // Step 1: 打包 / Pack
     let r = || -> Result<(), Box<dyn std::error::Error>> {
         wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                 WaterBallFilePackCommandsPack::new(
                     fixture.to_str().expect("转换夹具路径失败").to_string(),
                     Some(pack_path.clone()),
@@ -165,7 +168,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
         // Step 2: 哈希校验 / Hash verify
         let wbfp_path = pack_path.clone() + ".wbfp";
         wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
                 WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone()),
             )),
             Some(&mp),
@@ -175,7 +178,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
         let unpack_dir = out_dir_path.clone() + "/unpacked";
         _ = fs::create_dir_all(&unpack_dir);
         wbfp(
-            WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                 WaterBallFilePackCommandsUnpack::new(
                     wbfp_path.clone(),
                     Some(unpack_dir),
@@ -209,7 +212,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Err
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     let r = wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 fixture_str,
                 Some(out_file_path.clone()),
@@ -247,7 +250,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         //前提：打包
         {
             wbfp(
-                WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                     WaterBallFilePackCommandsPack::new(
                         fixture_str,
                         Some(out_file_path.clone()),
@@ -263,7 +266,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         //哈希校验（仅需包路径）
         {
             wbfp(
-                WaterBallFilePackArgs::new(WaterBallFilePackCommands::HashVerify(
+                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
                     WaterBallFilePackCommandsHashVerify::new(out_file_path.clone()),
                 )),
                 Some(&mp),
@@ -274,7 +277,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
             let mut s_out_path = out_dir_path.clone();
             s_out_path.push_str("/s");
             wbfp(
-                WaterBallFilePackArgs::new(WaterBallFilePackCommands::Unpack(
+                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                     WaterBallFilePackCommandsUnpack::new(
                         out_file_path.clone(),
                         Some(s_out_path),
@@ -292,9 +295,189 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
     r
 }
 
-// =========================================================================
-// wbfp 哈希校验测试 / wbfp hash verify tests
-// =========================================================================
+/// 递归收集目录下所有文件的相对路径（排序）/ Recursively collect relative file paths (sorted)
+fn collect_relative_files(root: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk(&p, root, out);
+                } else if let Ok(rel) = p.strip_prefix(root) {
+                    out.push(rel.to_path_buf());
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    walk(root, root, &mut result);
+    result.sort();
+    result
+}
+
+/// 在包数据文件三个分散内容块翻转字节，返回损坏位置。
+/// 128B 对齐块内大部分是填充区，固定偏移翻转会落在填充区而检测不到损坏，
+/// 必须扫描定位"content_" 内容字节。
+/// / Flip bytes in 3 content blocks of the pack data file, returning the
+/// corrupt positions. 128B-aligned blocks are mostly padding, so fixed
+/// offsets may hit padding and go undetected; must locate "content_" bytes.
+fn corrupt_pack_content_bytes(pack_path: &Path) -> io::Result<Vec<u64>> {
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pack_path)?;
+    let flen = f.metadata()?.len();
+    assert!(flen > 1024, "包文件过小，无法可靠构造损坏");
+    let mut all = Vec::new();
+    f.seek(io::SeekFrom::Start(0))?;
+    f.read_to_end(&mut all)?;
+    let corrupt_pos: Vec<u64> = (0..all.len() - 8)
+        .filter(|&i| &all[i..i + 8] == b"content_")
+        .take(3)
+        .map(|i| (i + 2) as u64)
+        .collect();
+    assert_eq!(corrupt_pos.len(), 3, "未找到足够的文件内容块");
+    for pos in &corrupt_pos {
+        let mut byte = [0u8; 1];
+        f.seek(io::SeekFrom::Start(*pos))?;
+        f.read_exact(&mut byte)?;
+        byte[0] ^= 0xFF;
+        f.seek(io::SeekFrom::Start(*pos))?;
+        f.write_all(&byte)?;
+    }
+    Ok(corrupt_pos)
+}
+
+/// 解包内嵌哈希校验：损坏数据字节的文件被跳过（磁盘无输出），其余正常解包
+/// Unpack with built-in hash verify: corrupted files are skipped (no disk
+/// output), the rest are unpacked normally.
+#[test]
+fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+    let fixture = create_small_fixture("wbfp_unpack_skip_corrupted_file");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
+    let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
+    out_dir_path.push_str("/unpack_skip_corrupted_file");
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::create_dir_all(&out_dir_path);
+    let mut out_file_path = out_dir_path.clone();
+    out_file_path.push_str("/pack");
+    let r = || -> Result<(), Box<dyn std::error::Error>> {
+        //打包
+        wbfp(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+                WaterBallFilePackCommandsPack::new(
+                    fixture_str,
+                    Some(out_file_path.clone()),
+                    true,
+                    None,
+                    true,
+                ),
+            )),
+            Some(&mp),
+        )?;
+        out_file_path.push_str(".wbfp");
+        //在数据文件（.wbfp）三个分散位置翻转字节，损坏至少一个文件的数据
+        //（清单在 .wbfp.wbm，数据文件内任意数据字节损坏必导致所属文件哈希不匹配）
+        corrupt_pack_content_bytes(Path::new(&out_file_path))?;
+        //解包（hash_verify = true：校验失败的文件被跳过）
+        let mut s_out_path = out_dir_path.clone();
+        s_out_path.push_str("/s");
+        wbfp(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+                WaterBallFilePackCommandsUnpack::new(
+                    out_file_path.clone(),
+                    Some(s_out_path.clone()),
+                    true,
+                    None,
+                ),
+            )),
+            Some(&mp),
+        )?;
+        //断言：损坏文件被跳过（缺失），其余文件正常解包
+        let fixture_files = collect_relative_files(&fixture);
+        let out_files = collect_relative_files(Path::new(&s_out_path));
+        let missing = fixture_files
+            .iter()
+            .filter(|p| !out_files.contains(p))
+            .count();
+        assert!(missing >= 1, "损坏文件未被跳过，解包输出与源完全一致");
+        assert!(
+            out_files.len() as i64 >= fixture_files.len() as i64 - 3,
+            "跳过文件过多: 输出 {} vs 源 {}",
+            out_files.len(),
+            fixture_files.len()
+        );
+        Ok(())
+    }();
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
+}
+
+/// 解包哈希校验可选：未指定 -H/--hash-verify 时直接解包，损坏文件也照常输出
+/// Optional hash verify: without -H/--hash-verify, unpack extracts directly
+/// and corrupted files are still written to disk
+#[test]
+fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>> {
+    let mp = MultiProgress::new();
+    crate::init_global_logging(&mp);
+    let fixture = create_small_fixture("wbfp_unpack_no_verify_extracts_all");
+    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+
+    let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
+    out_dir_path.push_str("/unpack_no_verify_extracts_all");
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::create_dir_all(&out_dir_path);
+    let mut out_file_path = out_dir_path.clone();
+    out_file_path.push_str("/pack");
+    let r = || -> Result<(), Box<dyn std::error::Error>> {
+        //打包
+        wbfp(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+                WaterBallFilePackCommandsPack::new(
+                    fixture_str,
+                    Some(out_file_path.clone()),
+                    true,
+                    None,
+                    true,
+                ),
+            )),
+            Some(&mp),
+        )?;
+        out_file_path.push_str(".wbfp");
+        //与 skip 测试相同构造损坏，但解包不指定哈希校验
+        corrupt_pack_content_bytes(Path::new(&out_file_path))?;
+        //解包（hash_verify = false）
+        let mut s_out_path = out_dir_path.clone();
+        s_out_path.push_str("/s");
+        wbfp(
+            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+                WaterBallFilePackCommandsUnpack::new(
+                    out_file_path.clone(),
+                    Some(s_out_path.clone()),
+                    false,
+                    None,
+                ),
+            )),
+            Some(&mp),
+        )?;
+        //断言：不校验时损坏文件也全部解包（输出与源完全一致）
+        let fixture_files = collect_relative_files(&fixture);
+        let out_files = collect_relative_files(Path::new(&s_out_path));
+        assert_eq!(
+            out_files.len(),
+            fixture_files.len(),
+            "未指定哈希校验时应解包全部文件（含损坏文件）"
+        );
+        Ok(())
+    }();
+    _ = fs::remove_dir_all(&out_dir_path);
+    _ = fs::remove_dir_all(&fixture);
+    r
+}
 
 // =========================================================================
 // 错误路径测试 / Error path tests
@@ -313,7 +496,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     _ = fs::remove_file(&out_file_path);
     //命令行参数处理
     ff(
-        FileFinderArgs::new("/~".to_string(), Some(out_file_path.clone()), true),
+        FileFinderArgs::new("/~".to_string(), Some(out_file_path.clone()), true, None),
         Some(&mp),
     )
     .expect("执行命令行操作时错误");
@@ -332,7 +515,7 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     out_file_path.push_str("/pack");
     //命令行参数处理
     let result = wbfp(
-        WaterBallFilePackArgs::new(WaterBallFilePackCommands::Pack(
+        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 "/~".to_string(),
                 Some(out_file_path.clone()),
@@ -352,11 +535,11 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
 
 use crate::command::ff::{FileFinderArgs, ff};
 use crate::command::wbfp::{
-    WaterBallFilePackArgs, WaterBallFilePackCommands, WaterBallFilePackCommandsHashVerify,
+    WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsHashVerify,
     WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack, wbfp,
 };
 use std::io;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 const SYMLINK_TEST_DIR: &str = "./temp/test/ff/ok/symlink_cmd";
@@ -430,7 +613,7 @@ fn create_large_fixture(name: &str) -> PathBuf {
 
         for j in 0..files_per_dir {
             let size = rand::random_range(50..=2048);
-            let content: Vec<u8> = (0..size).map(|_| rand::random()).collect();
+            let content: Vec<u8> = (0..size).map(|_| rand::random::<u8>()).collect();
             let fpath = sub.join(format!("data_{j:03}.bin"));
             fs::write(&fpath, &content).expect("写入夹具文件失败");
         }
@@ -486,6 +669,7 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
                     .to_string(),
             ),
             false,
+            None,
         ),
         Some(&mp),
     );
@@ -527,6 +711,7 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
                     .to_string(),
             ),
             true,
+            None,
         ),
         Some(&mp),
     );
@@ -563,6 +748,7 @@ fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>
                 .to_string(),
             None,
             false,
+            None,
         ),
         Some(&mp),
     );

@@ -45,7 +45,7 @@ type InodeKey = PathBuf;
 #[cfg(unix)]
 fn get_inode_key(_path: &Path, metadata: &Metadata) -> InodeKey {
     use std::os::unix::fs::MetadataExt;
-    ((metadata.dev() as u128) << 64) | (metadata.ino() as u128)
+    (u128::from(metadata.dev()) << 64) | u128::from(metadata.ino())
 }
 
 /// 从规范路径获取标识（Windows）/ Get key from canonical path (Windows)
@@ -94,14 +94,14 @@ struct DirEntry {
 /// * `data_length` - 所有文件的总大小（字节）/ Total size of all files (bytes)
 /// * `file_count` - 文件总数（不含目录）/ Total number of files (excluding directories)
 /// * `dir_count` - 目录总数 / Total number of directories
-/// * `files_list` - 根目录下的直接子项 / Direct children of the root directory
+/// * `list` - 根目录下的直接子项 / Direct children of the root directory
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FilesList {
     path: String,
     data_length: u64,
     file_count: u64,
     dir_count: u64,
-    files_list: HashMap<String, FileInfo>,
+    list: HashMap<String, FileInfo>,
 }
 
 impl FilesList {
@@ -135,7 +135,7 @@ impl FilesList {
     /// Key is the file name, value is the file/directory info.
     #[must_use]
     pub fn files_list(&self) -> &HashMap<String, FileInfo> {
-        &self.files_list
+        &self.list
     }
 
     /// 将结果序列化为 JSON 字符串 / Serialize the result to a JSON string
@@ -358,8 +358,7 @@ impl FileFinder {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_millis())
     }
 
     /// 从扁平 Map 重建目录树 / Rebuild directory tree from flat HashMap
@@ -373,17 +372,7 @@ impl FileFinder {
     /// # 步骤 / Steps
     /// 1. 按父路径分组所有条目 / Group all entries by parent path
     /// 2. 用显式栈进行后序遍历（避免递归栈溢出）/ Post-order traversal with explicit stack (avoid recursion stack overflow)
-    fn build_tree(flat: &HashMap<PathBuf, FileInfo>, root: &Path) -> FilesList {
-        let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for path in flat.keys() {
-            if let Some(parent) = path.parent() {
-                by_parent
-                    .entry(parent.to_path_buf())
-                    .or_default()
-                    .push(path.clone());
-            }
-        }
-
+    pub fn build_tree(flat: &HashMap<PathBuf, FileInfo>, root: &Path) -> FilesList {
         // 栈帧状态 / Stack frame state
         enum St {
             Pre,  // 首次访问，需先处理子目录 / First visit, needs to process subdirs first
@@ -399,7 +388,18 @@ impl FileFinder {
             file_count: u64,
             dir_count: u64,
         }
+        
+        let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for path in flat.keys() {
+            if let Some(parent) = path.parent() {
+                by_parent
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(path.clone());
+            }
+        }
 
+    
         // 初始栈：根目录 / Initial stack: root directory
         let mut stack = vec![Fr {
             st: St::Pre,
@@ -453,10 +453,7 @@ impl FileFinder {
                 St::Post => {
                     // 弹出已处理的帧（栈一定非空，因为 last_mut 刚返回了 Some）
                     // Pop the processed frame (stack is guaranteed non-empty)
-                    let fr = match stack.pop() {
-                        Some(f) => f,
-                        None => unreachable!(),
-                    };
+                    let fr = stack.pop().unwrap_or_else(|| unreachable!());
 
                     // 如果是根帧，返回最终结果 / Root frame → return final result
                     if stack.is_empty() {
@@ -465,7 +462,7 @@ impl FileFinder {
                             data_length: fr.total_len,
                             file_count: fr.file_count,
                             dir_count: fr.dir_count,
-                            files_list: fr.files,
+                            list: fr.files,
                         };
                     }
 
@@ -475,10 +472,10 @@ impl FileFinder {
                         Some(p) => p.to_path_buf(),
                         None => unreachable!(),
                     };
-                    let parent_idx = match stack.iter().rposition(|f| f.path == parent_path) {
-                        Some(idx) => idx,
-                        None => unreachable!(),
-                    };
+                    let parent_idx = stack
+                        .iter()
+                        .rposition(|f| f.path == parent_path)
+                        .unwrap_or_else(|| unreachable!());
                     let parent = &mut stack[parent_idx];
 
                     let dir_info = flat.get(&fr.path);
@@ -535,10 +532,10 @@ impl FileFinder {
         skip_symlink: bool,
         chain: &[InodeKey],
         dir_queue: &Arc<Mutex<VecDeque<DirEntry>>>,
-        results: &Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
+        results: Option<&Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: &Sender<(u64, u64)>,
-        stream_tx: &Option<Sender<SearchEvent>>,
-        warnings: &Option<Arc<Mutex<Vec<SearchWarning>>>>,
+        stream_tx: Option<&Sender<SearchEvent>>,
+        warnings: Option<&Arc<Mutex<Vec<SearchWarning>>>>,
         thread_file_count: &mut u64,
         thread_dir_count: &mut u64,
         condver: &Arc<Condvar>,
@@ -570,8 +567,8 @@ impl FileFinder {
                                 path_buf.display()
                             )),
                         },
-                        stream_tx.as_ref(),
-                        warnings.as_ref(),
+                        stream_tx,
+                        warnings,
                     );
                     return;
                 }
@@ -598,7 +595,7 @@ impl FileFinder {
                 if let Some(results) = results {
                     results
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(path_buf.to_path_buf(), info);
                 }
 
@@ -608,7 +605,7 @@ impl FileFinder {
                 new_chain.push(inode_key);
                 dir_queue
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push_back(DirEntry {
                         path: path_buf.to_path_buf(),
                         symlink_chain: new_chain,
@@ -634,8 +631,8 @@ impl FileFinder {
                     path: path_buf.to_path_buf(),
                     warning_type: SearchWarningType::BrokenSymlink,
                 },
-                stream_tx.as_ref(),
-                warnings.as_ref(),
+                stream_tx,
+                warnings,
             );
         }
     }
@@ -644,10 +641,10 @@ impl FileFinder {
     #[allow(clippy::too_many_arguments)]
     fn process_file(
         path_buf: &Path,
-        results: &Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
+        results: Option<&Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: &Sender<(u64, u64)>,
-        stream_tx: &Option<Sender<SearchEvent>>,
-        warnings: &Option<Arc<Mutex<Vec<SearchWarning>>>>,
+        stream_tx: Option<&Sender<SearchEvent>>,
+        warnings: Option<&Arc<Mutex<Vec<SearchWarning>>>>,
         thread_file_count: &mut u64,
     ) {
         let file_metadata = match path_buf.metadata() {
@@ -658,8 +655,8 @@ impl FileFinder {
                         path: path_buf.to_path_buf(),
                         warning_type: SearchWarningType::MetadataError,
                     },
-                    stream_tx.as_ref(),
-                    warnings.as_ref(),
+                    stream_tx,
+                    warnings,
                 );
                 return;
             }
@@ -686,7 +683,7 @@ impl FileFinder {
             if let Some(results) = results {
                 results
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(path_buf.to_path_buf(), info);
             }
 
@@ -709,7 +706,7 @@ impl FileFinder {
             tx.send(SearchEvent::Warning(warning.clone())).ok();
         }
         if let Some(w) = warnings {
-            w.lock().unwrap_or_else(|e| e.into_inner()).push(warning);
+            w.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(warning);
         }
     }
 
@@ -740,13 +737,13 @@ impl FileFinder {
         condver: Arc<Condvar>,
     ) {
         let fn_running_count_add = || -> i32 {
-            let mut lock = running_count.lock().unwrap_or_else(|e| e.into_inner());
+            let mut lock = running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             *lock += 1;
             *lock
         };
 
         let fn_running_count_sub = || -> i32 {
-            let mut lock = running_count.lock().unwrap_or_else(|e| e.into_inner());
+            let mut lock = running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             *lock -= 1;
             *lock
         };
@@ -757,13 +754,15 @@ impl FileFinder {
         fn_running_count_add();
         'worker: loop {
             let entry = {
-                let mut queue = dir_queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut queue = dir_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 queue.pop_front()
             };
 
-            let entry = if let Some(d) = entry { d } else {
+            let entry = if let Some(d) = entry {
+                d
+            } else {
                 //如果是空的
-                let mut dir_queue = dir_queue.lock().unwrap_or_else(|e| e.into_inner());
+                let mut dir_queue = dir_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 //当前线程计数
                 let this_running_count = fn_running_count_sub();
                 if this_running_count == 0 {
@@ -772,7 +771,7 @@ impl FileFinder {
                     break;
                 }
                 loop {
-                    dir_queue = condver.wait(dir_queue).unwrap_or_else(|e| e.into_inner());
+                    dir_queue = condver.wait(dir_queue).unwrap_or_else(std::sync::PoisonError::into_inner);
                     match dir_queue.pop_front() {
                         Some(d) => {
                             //添加线程计数
@@ -781,7 +780,7 @@ impl FileFinder {
                         }
                         None => {
                             //如果队列是空的，且运行中的线程数为0
-                            if *running_count.lock().unwrap_or_else(|e| e.into_inner()) == 0 {
+                            if *running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == 0 {
                                 break 'worker;
                             }
                         }
@@ -791,48 +790,42 @@ impl FileFinder {
 
             let rd = match entry.path.read_dir() {
                 Ok(rd) => rd,
-                Err(err) => match err.kind() {
-                    ErrorKind::PermissionDenied => {
-                        Self::emit_warning(
-                            SearchWarning {
-                                path: entry.path.clone(),
-                                warning_type: SearchWarningType::PermissionDenied,
-                            },
-                            stream_tx.as_ref(),
-                            warnings.as_ref(),
-                        );
-                        continue;
-                    }
-                    _ => {
-                        Self::emit_warning(
-                            SearchWarning {
-                                path: entry.path.clone(),
-                                warning_type: SearchWarningType::ReadDirError(err.to_string()),
-                            },
-                            stream_tx.as_ref(),
-                            warnings.as_ref(),
-                        );
-                        continue;
-                    }
+                Err(err) => if err.kind() == ErrorKind::PermissionDenied {
+                    Self::emit_warning(
+                        SearchWarning {
+                            path: entry.path.clone(),
+                            warning_type: SearchWarningType::PermissionDenied,
+                        },
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
+                    );
+                    continue;
+                } else {
+                    Self::emit_warning(
+                        SearchWarning {
+                            path: entry.path.clone(),
+                            warning_type: SearchWarningType::ReadDirError(err.to_string()),
+                        },
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
+                    );
+                    continue;
                 },
             };
 
             for dir_entry in rd.flatten() {
                 let path_buf = dir_entry.path();
 
-                let metadata = match path_buf.symlink_metadata() {
-                    Ok(m) => m,
-                    Err(_) => {
-                        Self::emit_warning(
-                            SearchWarning {
-                                path: path_buf,
-                                warning_type: SearchWarningType::MetadataError,
-                            },
-                            stream_tx.as_ref(),
-                            warnings.as_ref(),
-                        );
-                        continue;
-                    }
+                let metadata = if let Ok(m) = path_buf.symlink_metadata() { m } else {
+                    Self::emit_warning(
+                        SearchWarning {
+                            path: path_buf,
+                            warning_type: SearchWarningType::MetadataError,
+                        },
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
+                    );
+                    continue;
                 };
 
                 let ft = metadata.file_type();
@@ -843,10 +836,10 @@ impl FileFinder {
                         skip_symlink,
                         &entry.symlink_chain,
                         &dir_queue,
-                        &results,
+                        results.as_ref(),
                         &pb,
-                        &stream_tx,
-                        &warnings,
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
                         &mut thread_file_count,
                         &mut thread_dir_count,
                         &condver,
@@ -881,13 +874,13 @@ impl FileFinder {
                     if let Some(results) = results.as_ref() {
                         results
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .insert(path_buf.clone(), info);
                     }
                     //添加队列
                     dir_queue
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push_back(DirEntry {
                             path: path_buf,
                             symlink_chain: entry.symlink_chain.clone(),
@@ -899,10 +892,10 @@ impl FileFinder {
                     // Regular file: no cycle detection
                     Self::process_file(
                         &path_buf,
-                        &results,
+                        results.as_ref(),
                         &pb,
-                        &stream_tx,
-                        &warnings,
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
                         &mut thread_file_count,
                     );
                 } else {
@@ -911,7 +904,7 @@ impl FileFinder {
                             path: path_buf,
                             warning_type: SearchWarningType::InaccessibleEntry,
                         },
-                    stream_tx.as_ref(),
+                        stream_tx.as_ref(),
                         warnings.as_ref(),
                     );
                 }
@@ -955,13 +948,14 @@ impl FileFinder {
     /// 3. Found = cycle → skip; not found → append to chain, continue scanning
     ///
     /// Regular files and directories do NOT go through any cycle detection.
-    pub fn search(
+    pub fn search<P: AsRef<Path>>(
         &self,
-        path: &Path,
+        path: P,
         skip_symlink: bool,
         pb: Sender<(u64, u64)>,
         max_thread_count: usize,
     ) -> io::Result<SearchResult> {
+        let path = path.as_ref();
         if !path.is_dir() {
             if path.is_file() {
                 return Err(Error::new(
@@ -987,7 +981,7 @@ impl FileFinder {
         let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
         dir_queue
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(DirEntry {
                 path: path.to_path_buf(),
                 symlink_chain: Vec::new(), // 根目录无符号链接链 / root has no symlink chain
@@ -1093,17 +1087,18 @@ impl FileFinder {
     /// }
     /// handle.join().unwrap()?; // 等待搜索完成 / wait for completion
     /// ```
-    pub fn search_stream(
+    pub fn search_stream<P: AsRef<Path>>(
         &self,
-        path: &Path,
+        path: P,
         skip_symlink: bool,
-        pb: Sender<(u64, u64)>,
+        pb_tx: Sender<(u64, u64)>,
         max_thread_count: usize,
     ) -> io::Result<(
         thread::JoinHandle<io::Result<()>>,
         std::sync::mpsc::Receiver<SearchEvent>,
     )> {
         use std::sync::mpsc;
+        let path = path.as_ref();
 
         // 同步验证路径 / Synchronous path validation
         if !path.is_dir() {
@@ -1149,7 +1144,7 @@ impl FileFinder {
                 let dir_queue = Arc::clone(&dir_queue);
                 let condver = condver.clone();
                 let running_count = running_count.clone();
-                let pb = pb.clone();
+                let pb = pb_tx.clone();
                 let stream_tx = stream_tx.clone();
 
                 let handle = thread::spawn(move || {
@@ -1177,7 +1172,7 @@ impl FileFinder {
                 }
             }
 
-            drop(pb);
+            drop(pb_tx);
             drop(stream_tx);
 
             Ok(())

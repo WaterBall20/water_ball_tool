@@ -66,7 +66,7 @@ impl WBFPManager {
     }
 
     pub(crate) fn open_pack_file<P: AsRef<Path>>(
-        pack_path: &P,
+        pack_path: P,
         pack_file: Arc<Mutex<PackIO>>,
     ) -> Result<WBFPManager> {
         const HEADER_TYPE_LEN: usize = FILE_HEADER_TYPE_NAME.len();
@@ -182,7 +182,7 @@ impl WBFPManager {
     }
 
     pub(crate) fn create_pack_file<P: AsRef<Path>>(
-        path: &P,
+        path: P,
         pack_file: Arc<Mutex<PackIO>>,
         cow: bool,
         separate_manifest: bool,
@@ -229,7 +229,7 @@ impl WBFPManager {
     }
 
     pub(super) fn create_pack<P: AsRef<Path>>(
-        pack_path: &P,
+        pack_path: P,
         cow: bool,
         pack_file: Arc<Mutex<PackIO>>,
         separate_manifest: bool,

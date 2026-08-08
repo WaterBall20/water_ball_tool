@@ -3,11 +3,19 @@ use crate::wb_files_pack::pack_io::{
     FILE_HEADER_DATA_LENGTH_INDEX, FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX,
 };
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackStruct,
+    ManifestDataBlock, ManifestDataBlockTrait, PackFileMetadata, PackStruct,
 };
 use std::io::Write;
 
 use super::WBFPManager;
+
+/// 渐进式保存写入量阈值：64MiB。save_all 在 manager 锁内执行全量 GC 与
+/// .wbm 写入，HDD 上单次数秒；阈值过低会形成全局锁风暴，64MiB 则把
+/// 崩溃丢失上限控制在最近 64MiB 写入。
+/// Progressive-save write threshold: 64MiB. save_all does full GC + .wbm writes
+/// under the manager lock; on HDD one pass takes seconds, so a low threshold
+/// causes a global lock storm. 64MiB caps crash loss at recent writes.
+const PROGRESSIVE_SAVE_WRITE_THRESHOLD: u64 = 64 * 1024 * 1024;
 
 impl WBFPManager {
     pub(super) fn throttled_save(&mut self) -> Result<()> {
@@ -15,8 +23,13 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+        //写入量阈值提升至 64MiB：save_all 在 manager 锁内执行全量 GC 与
+        //.wbm 写入，HDD 上单次数秒；4MiB 阈值时每 4MiB 数据就触发一次，
+        //多线程打包会退化为全局锁风暴（见 PROGRESSIVE_SAVE_WRITE_THRESHOLD）。
+        //Raised to 64MiB; at 4MiB every 4MiB of data triggered a save_all,
+        //degrading multi-threaded packing into a global lock storm on HDD.
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
-            > (DATA_BLOCK_LEN as u64) * 1024
+            > PROGRESSIVE_SAVE_WRITE_THRESHOLD
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
                 > 10_000
         {

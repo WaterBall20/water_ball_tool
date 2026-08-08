@@ -1,7 +1,7 @@
 /*
 开始时间：26/02/13 11：31
  */
-use crate::wb_files_pack::allocator::{Allocator, PackAccessMode};
+use crate::wb_files_pack::manager_sync::{PackAccessMode, ManagerSync};
 use crate::wb_files_pack::error::Result;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -44,26 +44,26 @@ impl PackVirtualFile {
         }
     }
 
-    /// 检查分配器访问模式与虚拟文件请求的访问模式是否兼容。
+    /// 检查同步管理器访问模式与虚拟文件请求的访问模式是否兼容。
     ///
-    /// 严格模式：只读分配器不能写，只写分配器不能读。
-    /// Check allocator access mode compatibility with the requested virtual file access mode.
+    /// 严格模式：只读同步管理器不能写，只写同步管理器不能读。
+    /// Check synchronized manager access mode compatibility with the requested virtual file access mode.
     ///
-    /// Strict mode: read-only allocators cannot write, write-only allocators cannot read.
-    pub(crate) fn check_allocator_compat(allocator: &Allocator, desired: AccessMode) -> Result<()> {
-        let allowed = allocator.access_mode;
+    /// Strict mode: read-only synchronized managers cannot write, write-only synchronized managers cannot read.
+    pub(crate) fn check_sync_compat(sync: &ManagerSync, desired: AccessMode) -> Result<()> {
+        let allowed = sync.access_mode;
         match (allowed, desired) {
             (PackAccessMode::ReadWrite, _)
             | (PackAccessMode::Write, AccessMode::Write)
             | (PackAccessMode::Read, AccessMode::Read) => Ok(()),
             (PackAccessMode::Write, _) => Err(
                 crate::wb_files_pack::error::PackFileError::PermissionDenied(
-                    "Allocator 为只写模式，无法以读取方式打开虚拟文件".into(),
+                    "ManagerSync 为只写模式，无法以读取方式打开虚拟文件".into(),
                 ),
             ),
             (PackAccessMode::Read, _) => Err(
                 crate::wb_files_pack::error::PackFileError::PermissionDenied(
-                    "Allocator 为只读模式，无法以写入方式打开虚拟文件".into(),
+                    "ManagerSync 为只读模式，无法以写入方式打开虚拟文件".into(),
                 ),
             ),
         }
@@ -99,7 +99,7 @@ impl PackVirtualFile {
     //设置文件大小
     pub fn set_len(&mut self, len: u64) -> Result<()> {
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.set_len(len)?;
         Ok(())
     }
@@ -107,7 +107,7 @@ impl PackVirtualFile {
     /// 设置虚拟文件的最后修改时间（毫秒时间戳）。
     /// Set the last modified time of this virtual file (millisecond timestamp).
     pub fn set_modified(&mut self, modified: u128) -> Result<()> {
-        let mut handle = self.handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = self.handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.set_modified(modified);
         Ok(())
     }
@@ -136,7 +136,7 @@ impl PackVirtualFile {
     /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
     pub fn verify_hash(&mut self, progress: Option<&dyn Fn(u64, u64)>) -> Result<bool> {
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(|e| e.into_inner());
+        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.verify_hash(progress)
     }
     fn add_pos_i64(&mut self, pos: i64) {
@@ -226,22 +226,32 @@ impl Write for PackVirtualFile {
 /// 提供链式调用方式配置虚拟文件的打开参数，支持只读/只写/读写、新建等模式。
 /// Provides a builder pattern for configuring virtual file open options,
 /// supporting read-only / write-only / read-write and create-new modes.
-pub struct VirtualFileOpenOptions {
+pub struct VirtualFileOpenOptions<'a> {
+    sync: &'a mut ManagerSync, 
     read: bool,
     write: bool,
     create_new: bool,
     end_pos: bool,
+    /// 新建文件时的初始分配大小。
+    /// 已知大小传 `Some(len)`（按 128B 精确对齐分配）；`None` 表示未知大小，按 4MiB 分配。
+    /// 打开已存在的文件时该值不生效（不能缩小已有分配）。
+    /// Initial allocation size when creating a new file: `Some(len)` for known size
+    /// (128B-aligned exact allocation); `None` for unknown size (4MiB allocation).
+    /// Ignored when opening an existing file — an existing allocation never shrinks.
+    alloc_size: Option<u64>,
 }
 
-impl VirtualFileOpenOptions {
+impl <'a>VirtualFileOpenOptions<'a> {
     /// 创建默认选项（所有标志为 false）。
     /// Create default options (all flags false).
-    pub fn new() -> Self {
+    pub fn new(sync: &'a mut ManagerSync) -> Self {
         Self {
+            sync,
             read: false,
             write: false,
             create_new: false,
-            end_pos: false,
+            end_pos: true,
+            alloc_size: None,
         }
     }
 
@@ -273,19 +283,33 @@ impl VirtualFileOpenOptions {
         self
     }
 
+    /// 设置新建文件时的初始分配大小。
+    ///
+    /// 已知大小传 `Some(len)`：按 128B 精确对齐分配，不浪费空间；
+    /// `None` 表示未知大小：按 4MiB 整块分配，多余空间由 GC 回收。
+    /// 仅对 `create_new(true)` 生效；打开已存在的文件时忽略（不能缩小已有分配）。
+    ///
+    /// Set the initial allocation size when creating a new file.
+    /// `Some(len)` (known size): exact 128B-aligned allocation, no waste;
+    /// `None` (unknown size): whole 4MiB blocks, excess reclaimed by GC.
+    /// Only applies with `create_new(true)`; ignored when opening an existing file.
+    pub fn alloc_size(mut self, alloc_size: Option<u64>) -> Self {
+        self.alloc_size = alloc_size;
+        self
+    }
+
     /// 根据配置打开虚拟文件。
     ///
-    /// 根据 `read`/`write` 标志确定访问模式，并检查分配器的访问模式兼容性。
+    /// 根据 `read`/`write` 标志确定访问模式，并检查同步管理器的访问模式兼容性。
     /// 如果 `create_new` 为 `true` 则创建新文件，否则打开已存在的文件。
     ///
     /// Open a virtual file according to the configured options.
     ///
-    /// Determines the access mode from `read`/`write` flags and checks allocator
+    /// Determines the access mode from `read`/`write` flags and checks synchronized manager
     /// access mode compatibility. If `create_new` is `true`, creates a new file;
     /// otherwise opens an existing one.
     pub fn open<P: AsRef<Path>>(
-        &self,
-        allocator: &mut Allocator,
+        &mut self,
         path: P,
     ) -> Result<PackVirtualFile> {
         let access_mode = match (self.read, self.write) {
@@ -301,22 +325,16 @@ impl VirtualFileOpenOptions {
             }
         };
 
-        PackVirtualFile::check_allocator_compat(allocator, access_mode)?;
+        PackVirtualFile::check_sync_compat(self.sync, access_mode)?;
 
         if self.create_new {
-            let mut vf = allocator.create_virtual_file_impl(path)?;
+            let mut vf = self.sync.create_virtual_file_impl(path, self.alloc_size)?;
             vf.access_mode = access_mode;
             Ok(vf)
         } else {
-            let mut vf = allocator.open_virtual_file_impl(path, self.end_pos)?;
+            let mut vf = self.sync.open_virtual_file_impl(path, self.end_pos)?;
             vf.access_mode = access_mode;
             Ok(vf)
         }
-    }
-}
-
-impl Default for VirtualFileOpenOptions {
-    fn default() -> Self {
-        Self::new()
     }
 }

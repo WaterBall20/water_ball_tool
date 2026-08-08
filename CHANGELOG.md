@@ -31,7 +31,7 @@
 
 - `get_len()` / `get_modified()` 移除 `Result` 包装，直接返回 `u64` / `u128` —— 内部锁获取不再产生可恢复错误
 - 锁毒性恢复统一使用 `std::sync::PoisonError::into_inner` 替代闭包 `\|e\| e.into_inner()`
-- `check_allocator_compat()` 使用 `|` 模式合并只读/只写匹配分支，消除冗余代码
+- `check_sync_compat()` 使用 `|` 模式合并只读/只写匹配分支，消除冗余代码
 
 ### 命令层解耦重构 / Command-Layer Extraction
 
@@ -54,5 +54,5 @@
 
 - `.vscode/launch.json`: 调试配置名称简化，增加 `--include-ignored` 测试运行配置
 - `src/tools.rs`: 合并嵌套的 `use std::path` 路径声明
-- `Allocator`: `access_mode` 字段初始化位置提前，与声明顺序一致
-- `Allocator::create_new()`: 增加 `path.try_exists()` 前置检查，使存在性判断逻辑更明确
+- `ManagerSync`: `access_mode` 字段初始化位置提前，与声明顺序一致
+- `ManagerSync::create_new()`: 增加 `path.try_exists()` 前置检查，使存在性判断逻辑更明确

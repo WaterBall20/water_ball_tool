@@ -39,6 +39,12 @@ pub(crate) const DATA_BLOCK_LEN: usize = 128;
 
 pub(crate) const DATA_DATA_BLOCK_LEN: u64 = 4 * 1024 * 1024;
 
+/// 虚拟文件数据段数上限：碎片拼接分配时的最大段数，防止拼接碎片过多
+/// 导致 metadata/.wbm 清单膨胀；超过上限时拒绝分配。
+/// Max data segments per virtual file: caps fragment-stitching so metadata
+/// and .wbm manifests do not bloat; allocation is rejected when over the limit.
+pub(crate) const MAX_DATA_SEGMENTS: usize = 16;
+
 //格式版本
 const MANIFEST_ATTRIBUTE_VERSION_LEN: usize = 2;
 //格式兼容版本

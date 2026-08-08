@@ -281,9 +281,9 @@ A/B half 最小占用 = 8 + 4 + 8 + data_len + 4  = 24 + data_len 字节
 
 | 方法 | 说明 |
 |------|------|
-| `Allocator::open(path)` | 以只读模式打开已存在的包文件 |
-| `Allocator::create_new(path)` | 创建新包文件（默认分离清单、无 COW）。文件已存在则失败 |
-| `Allocator::options() -> PackOpenOptions` | 返回 `PackOpenOptions` 构造器 |
+| `ManagerSync::open(path)` | 以只读模式打开已存在的包文件 |
+| `ManagerSync::create_new(path)` | 创建新包文件（默认分离清单、无 COW）。文件已存在则失败 |
+| `ManagerSync::options() -> PackOpenOptions` | 返回 `PackOpenOptions` 构造器 |
 
 `PackOpenOptions` 方法链：
 
@@ -295,17 +295,17 @@ A/B half 最小占用 = 8 + 4 + 8 + data_len + 4  = 24 + data_len 字节
 | `create_new(true)` | `false` | 创建新包文件（存在则失败） |
 | `cow(true)` | `false` | 启用写时复制 |
 | `separate_manifest(true)` | `true` | 分离清单到 `.wbm` 文件 |
-| `open(path) -> Result<Allocator>` | — | 根据以上配置打开/创建包文件 |
+| `open(path) -> Result<ManagerSync>` | — | 根据以上配置打开/创建包文件 |
 
 ### 虚拟文件打开（std::fs::File 风格）
 
-`Allocator` 上提供便捷方法：
+`ManagerSync` 上提供便捷方法：
 
 | 方法 | 说明 |
 |------|------|
-| `Allocator::open_virtual_file(path, end_pos)` | 以只读模式打开已有虚拟文件，类似 `File::open` |
-| `Allocator::create_virtual_file(path)` | 以只写模式创建新虚拟文件，类似 `File::create` |
-| `Allocator::virtual_file_options() -> VirtualFileOpenOptions` | 返回 `VirtualFileOpenOptions` 构造器 |
+| `ManagerSync::open_virtual_file(path, end_pos)` | 以只读模式打开已有虚拟文件，类似 `File::open` |
+| `ManagerSync::create_virtual_file(path)` | 以只写模式创建新虚拟文件，类似 `File::create` |
+| `ManagerSync::virtual_file_options() -> VirtualFileOpenOptions` | 返回 `VirtualFileOpenOptions` 构造器 |
 
 `VirtualFileOpenOptions` 方法链：
 
@@ -315,7 +315,7 @@ A/B half 最小占用 = 8 + 4 + 8 + data_len + 4  = 24 + data_len 字节
 | `write(true)` | `false` | 只写模式 |
 | `create_new(true)` | `false` | 创建新文件（存在则失败） |
 | `end_pos(bool)` | `false` | 文件末尾位置标记（用于增量写入恢复） |
-| `open(allocator, path) -> Result<PackVirtualFile>` | — | 在指定 `Allocator` 中打开/创建虚拟文件 |
+| `open(sync, path) -> Result<PackVirtualFile>` | — | 在指定 `ManagerSync` 中打开/创建虚拟文件 |
 
 ### 虚拟文件读写（PackVirtualFile）
 
