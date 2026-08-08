@@ -169,7 +169,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
         let wbfp_path = pack_path.clone() + ".wbfp";
         wbfp(
             &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
-                WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone()),
+                WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone(),false),
             )),
             Some(&mp),
         )?;
@@ -267,7 +267,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         {
             wbfp(
                 &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
-                    WaterBallFilePackCommandsHashVerify::new(out_file_path.clone()),
+                    WaterBallFilePackCommandsHashVerify::new(out_file_path.clone(), false),
                 )),
                 Some(&mp),
             )?;

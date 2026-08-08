@@ -130,13 +130,16 @@ pub(crate) struct WaterBallFilePackCommandsHashVerify {
     /// 校验时所用的线程数，缺省使用CPU线程数量 / Thread count for verification, defaults to CPU count
     #[arg(short, long)]
     thread_count: Option<usize>,
+    #[arg(short, long)]
+    verbose: bool,
 }
 impl WaterBallFilePackCommandsHashVerify {
     #[cfg(test)]
-    pub(crate) fn new(pack_path: String) -> Self {
+    pub(crate) fn new(pack_path: String, verbose: bool) -> Self {
         Self {
             pack_path,
             thread_count: None,
+            verbose,
         }
     }
 }
@@ -1157,10 +1160,7 @@ impl WaterBallFilePackArgsRuning {
                             let mut rw = match pack.open_virtual_file(&path) {
                                 Ok(rw) => rw,
                                 Err(err) => {
-                                    error!(
-                                        "无法打开虚拟文件\"{}\", err: {err:?}",
-                                        path.display()
-                                    );
+                                    error!("无法打开虚拟文件\"{}\", err: {err:?}", path.display());
                                     let _ = tx.send(0u64);
                                     if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
                                         all_done.store(true, Ordering::SeqCst);
@@ -1169,13 +1169,15 @@ impl WaterBallFilePackArgsRuning {
                                     continue;
                                 }
                             };
-                            let hash_ok = match rw.verify_hash(Some(&(|done, total| {
-                                if let Some(pb) = &w_pb {
-                                    pb.set_length(total);
-                                    pb.set_position(done);
-                                    pb.set_message(format!("正在哈希校验: {out_path_str}"));
-                                }
-                            }))) {
+                            let hash_ok = match rw.verify_hash(Some(
+                                &(|done, total| {
+                                    if let Some(pb) = &w_pb {
+                                        pb.set_length(total);
+                                        pb.set_position(done);
+                                        pb.set_message(format!("正在哈希校验: {out_path_str}"));
+                                    }
+                                }),
+                            )) {
                                 Ok(ok) => ok,
                                 Err(err) => {
                                     warn!(
@@ -1194,10 +1196,7 @@ impl WaterBallFilePackArgsRuning {
                                     Some(&extract_progress),
                                 )
                             } else {
-                                warn!(
-                                    "虚拟文件\"{}\"哈希校验未通过，将跳过解包",
-                                    path.display()
-                                );
+                                warn!("虚拟文件\"{}\"哈希校验未通过，将跳过解包", path.display());
                                 Ok(0)
                             }
                         } else {
