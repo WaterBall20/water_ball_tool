@@ -1,0 +1,164 @@
+# 水球工具 WaterBall Tool
+
+> **语言**: [English](../README.md) | 简体中文
+
+> **个人专门用于长期学习练习的项目**
+>
+> 部分代码由 AI (deepseek-v4-pro) 生成
+
+---
+
+## 简介
+
+一个多合一命令行工具箱，使用 **Rust** 编写。目前包含两个核心功能：
+
+- **文件搜索器** (`ff`) — 多线程并行扫描目录树，输出 JSON 格式文件清单。支持符号链接循环检测。
+- **水球包文件** (`wbfp`) — 自定义二进制归档格式，支持打包/解包/BLAKE3 哈希校验。
+
+---
+
+## 安装
+
+```bash
+# 克隆仓库
+git clone <repo-url>
+cd water_ball_tool
+
+# 编译（debug）
+cargo build
+
+# 编译（release，推荐）
+cargo build --release
+
+# 运行
+./target/release/water_ball_tool -h
+```
+
+---
+
+## 用法
+
+### 文件搜索 `ff`
+
+```bash
+# 搜索当前目录
+water_ball_tool ff .
+
+# 搜索指定目录并输出 JSON
+water_ball_tool ff ./src result.json
+
+# 跳过符号链接
+water_ball_tool ff /path/to/dir output.json -s
+```
+
+### 打包 `wbfp p`
+
+```bash
+# 将目录打包为水球包文件（默认分离清单为 .wbm）
+water_ball_tool wbfp p ./src my.pack
+
+# 不分离清单（所有数据在单个 .pack 文件中）
+water_ball_tool wbfp p ./src my.pack -n
+```
+
+### 解包 `wbfp u`
+
+```bash
+water_ball_tool wbfp u my.pack ./output_dir
+# 解包前逐个文件进行 BLAKE3 哈希校验，校验失败的文件跳过并报警告：
+water_ball_tool wbfp u -H my.pack ./output_dir
+```
+
+### 哈希校验 `wbfp h`
+
+```bash
+water_ball_tool wbfp h my.pack
+```
+
+---
+
+## 水球包文件格式
+
+自行设计的二进制归档格式，主要特点：
+
+| 特性          | 说明                          |
+|-------------|-----------------------------|
+| **A/B 原子写入** | 清单数据块采用双块交替写入，崩溃后至少保留一个完整版本 |
+| **BLAKE3 哈希** | 文件数据完整性校验                   |
+| **增量保存**    | 跟踪 dirty 标记，仅写入变更部分         |
+| **垃圾回收**    | 自动合并相邻空闲块，复用释放空间            |
+| **虚拟文件增删**  | `create_dir_all`/`create_file` 创建，`delete_file`/`delete_dir_all`/`erase_file`/`erase_dir_all` 删除/擦除：删除仅移除元数据（数据块回收不覆写），擦除先覆写至磁盘再移除（支持 Zero/Random/DoD 5220 策略） |
+| **渐进式保存**   | 每写入一些数据或一些文件后再自动保存一次        |
+| **进程写锁**    | `.lock` 文件 + PID 实现进程级互斥    |
+| **清单分离**    | 可选将索引数据分离为 `.wbm` 文件        |
+
+格式规范：[`wb_files_pack/manifest-data.md`](wb_files_pack/manifest-data.md)
+
+---
+
+## 架构
+
+```
+src/
+├── main.rs             # 入口点、帮助界面、日志初始化
+├── lib.rs              # 模块导出
+├── command.rs          # CLI 命令路由 + 进度条辅助函数
+├── command/
+│   ├── ff.rs           # ff 子命令实现
+│   ├── wbfp.rs         # wbfp 子命令实现（打包/解包/哈希校验）
+│   └── test.rs         # 命令级集成测试（含符号链接循环检测）
+├── tools.rs            # 工具函数（路径转换、字节格式化）
+├── file_finder.rs      # 多线程文件搜索器 + inode 链循环检测
+├── file_finder/
+│   └── test.rs         # 文件搜索器单元测试（符号链接场景）
+├── wb_files_pack.rs    # 水球包文件模块入口
+├── wb_files_pack/
+│   ├── data.rs         # 核心数据结构（Attribute/PackStruct/ManifestDataBlock 等）
+│   ├── manager.rs      # 包文件管理器（创建/打开/保存/GC/锁/删除/擦除）
+│   ├── manager/
+│   │   ├── delete.rs   # 虚拟文件/目录删除与擦除实现
+│   │   └── test.rs     # 内部 API 测试
+│   ├── manager_sync.rs # 线程安全同步管理器（Arc<Mutex<>>）
+│   ├── manager_sync/test.rs # 外部 API 测试
+│   ├── pack_io.rs      # 底层文件 I/O + 空间分配 + GC
+│   ├── pack_io/file.rs # 虚拟文件读写器（PackVirtualFile，含访问模式强制）
+│   └── net_server.rs   # 网络服务（开发中）
+└── gakumasu/           # 学园偶像大师游戏模拟器（开发中）
+    ├── data.rs
+    └── simulator.rs
+```
+
+另见：[`ARCHITECTURE.md`](ARCHITECTURE.md)
+
+---
+
+## 构建与测试
+
+```bash
+# 运行全部测试（跳过长时间测试，#[ignore] 自动处理）
+cargo test
+
+# 运行包括长时间测试（主分支 CI 全量测试）
+cargo test -- --include-ignored
+
+# 仅编译检查
+cargo check
+
+# 代码检查
+cargo clippy
+```
+
+---
+
+## 技术栈
+
+- **语言**: Rust (edition 2024)
+- **序列化**: serde / serde_json
+- **哈希**: BLAKE3
+- **进度条**: indicatif
+- **日志**: tracing / tracing-subscriber
+- **进程检测**: sysinfo
+
+---
+
+部分代码由 AI (deepseek-v4-pro) 生成

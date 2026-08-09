@@ -1312,7 +1312,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let len_us = usize::try_from(len).map_err(|e| {
             PackFileError::Other(format!("无法将len的u64的数字转为usize, err: {e}"))

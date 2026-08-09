@@ -199,7 +199,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pack_file.run_data.all_cr_file_count += two_r.file_count + two_r.dir_count;
         }
         self.save_root_pack_struct()?;

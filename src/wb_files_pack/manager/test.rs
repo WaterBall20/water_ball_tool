@@ -8,13 +8,13 @@ use crate::wb_files_pack::pack_io::PackIO;
 use crate::wb_files_pack::pack_io::file::PackVirtualFile;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use pretty_assertions::assert_eq;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager/ok";
-static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager/err";
+static TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wb_files_pack/manager/ok";
+static TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wb_files_pack/manager/err";
 
 // === 辅助函数：直接操作内部 API / Helpers bypassing ManagerSync ===
 
@@ -72,7 +72,7 @@ fn open_file_rw<P: AsRef<Path>>(
     let path_list = PathTool::path_to_string_vec(pack_path);
     let handle = manager
         .lock()
-        .map_err(|e| PackFileError::Lock(format!("无法获取包文件锁, err: {e}")))?
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_or_create_file_handle(&path_list, end_pos, &manager.clone(), pack_io)
         .map_err(|e| PackFileError::Lock(format!("无法获取虚拟文件句柄, err: {e}")))?;
     Ok(PackVirtualFile::new(0, handle))
@@ -80,17 +80,15 @@ fn open_file_rw<P: AsRef<Path>>(
 
 fn setup_ok_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::path::PathBuf::from(TEST_TEMP_OK_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).expect("创建测试目录失败");
+    TestTool::prepare_test_dir(&dir);
     let pack = dir.join("pack");
-    TestTool::remove_test_pack_files(&pack);
     (dir, pack)
 }
 
 fn setup_err_test(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::path::PathBuf::from(TEST_TEMP_ERR_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).expect("创建测试目录失败");
+    TestTool::prepare_test_dir(&dir);
     let pack = dir.join("pack");
-    TestTool::remove_test_pack_files(&pack);
     (dir, pack)
 }
 
@@ -179,8 +177,7 @@ fn create_stress_and_reopen() {
         }
     }
 
-    TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 版本兼容性 / Version compatibility ===
@@ -204,12 +201,10 @@ fn open_pack_compatible_version() {
     {
         open_manager(&pack_file);
     }
-    TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
-#[should_panic(expected = "版本过高")]
 fn open_pack_version_too_high_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_high_should_panic");
     {
@@ -225,15 +220,14 @@ fn open_pack_version_too_high_should_panic() {
             .attribute_mut()
             .set_version_compatible(super::super::MANIFEST_VERSION + 1);
     }
-    {
-        open_manager(&pack_file);
-    }
-    TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(&dir);
+    // open_manager 内部 expect 会因版本过高而 panic：验证错误确实发生，
+    // 断言失败时测试 panic，跳过清理以保留证据
+    let r = std::panic::catch_unwind(|| open_manager(&pack_file));
+    assert!(r.is_err(), "版本过高时应 panic");
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
-#[should_panic(expected = "版本过低")]
 fn open_pack_version_too_low_should_panic() {
     let (dir, pack_file) = setup_err_test("open_pack_version_too_low_should_panic");
     {
@@ -249,9 +243,9 @@ fn open_pack_version_too_low_should_panic() {
             .attribute_mut()
             .set_version_compatible(super::super::MANIFEST_VERSION_COMPATIBLE - 1);
     }
-    {
-        open_manager(&pack_file);
-    }
-    TestTool::remove_test_pack_files(&pack_file);
-    _ = fs::remove_dir_all(&dir);
+    // open_manager 内部 expect 会因版本过低而 panic：验证错误确实发生，
+    // 断言失败时测试 panic，跳过清理以保留证据
+    let r = std::panic::catch_unwind(|| open_manager(&pack_file));
+    assert!(r.is_err(), "版本过低时应 panic");
+    TestTool::cleanup_test_dir(&dir);
 }

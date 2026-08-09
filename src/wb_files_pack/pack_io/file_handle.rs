@@ -166,7 +166,7 @@ impl PackFileHandle {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             //多段拼接分配：以现有段数为基数，新增段数受 MAX_DATA_SEGMENTS 限制
             //Stitch fragments: budget new segments against MAX_DATA_SEGMENTS
             let cur_seg = data_pos_list.list().len();
@@ -196,7 +196,7 @@ impl PackFileHandle {
             let pack_file = self.pack_io.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let old_metadata_len = metadata_len.unwrap_or(0);
             //对齐计算
             let old_metadata_block_len = old_metadata_len.next_multiple_of(DATA_BLOCK_LEN_U64);
@@ -407,7 +407,7 @@ impl PackFileHandle {
             let manager = self.manager.clone();
             let mut manager = manager
                 .lock()
-                .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             manager.file_metadata_update(path_list, metadata)?;
         }
         Ok(())
@@ -474,7 +474,7 @@ impl PackFileHandle {
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         //当前大小所需的位置列表
         let pos_s = self.get_add_pos_list2(buf.len() as u64, true)?;
         //当前已读取大小
@@ -517,7 +517,7 @@ impl PackFileHandle {
         let pack_file = self.pack_io.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         //当前已写入大小
         let mut write_len = 0;
         //写入
@@ -549,7 +549,7 @@ impl PackFileHandle {
     pub fn flush(&mut self) -> Result<()> {
         self.pack_io
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得包文件锁, err:{e}")))?
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .flush()?;
         Ok(())
     }

@@ -338,3 +338,85 @@ impl <'a>VirtualFileOpenOptions<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::path::PathBuf;
+    use std::thread;
+
+    /// 其他线程持虚拟文件句柄锁时 panic 使锁 poison；PackVirtualFile 通过
+    /// `unwrap_or_else(PoisonError::into_inner)` 恢复后仍可正常读写。
+    ///
+    /// A thread panics while holding the virtual-file handle lock, poisoning it;
+    /// PackVirtualFile recovers via into_inner and stays fully usable.
+    #[test]
+    fn handle_lock_poison_recovered() {
+        let dir = PathBuf::from("./temp/test/wb_files_pack/pack_io/ok/handle_lock_poison_recovered");
+        crate::tools::TestTool::prepare_test_dir(&dir);
+        let pack = dir.join("pack");
+        {
+            let mut alloc = crate::tools::TestTool::expect_ok(
+                ManagerSync::options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .cow(false)
+                    .separate_manifest(true)
+                    .open(&pack),
+                "打开测试包失败",
+            );
+            let mut vf = crate::tools::TestTool::expect_ok(
+                alloc
+                    .virtual_file_options()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open("poison_file"),
+                "打开虚拟文件失败",
+            );
+            crate::tools::TestTool::expect_ok(vf.set_len(4), "设置长度失败");
+            crate::tools::TestTool::expect_ok(vf.write_all(&[1, 2, 3, 4]), "写入初始数据失败");
+            crate::tools::TestTool::expect_ok(vf.seek(SeekFrom::Start(0)), "定位到开头失败");
+
+            // 子线程持句柄锁并故意 panic → 锁 poison
+            let h = vf.handle.clone();
+            let h_thread = h.clone();
+            let handle = thread::spawn(move || {
+                let _guard = h_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                panic!("intentional panic while holding virtual file handle lock");
+            });
+            // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；
+            // 若未 panic 或消息不同（非预期错误）则测试失败
+            let payload = handle.join().expect_err("子线程应 panic 崩溃");
+            assert_eq!(
+                payload.downcast_ref::<&str>(),
+                Some(&"intentional panic while holding virtual file handle lock"),
+                "panic 消息应为预期的 intentional panic"
+            );
+            assert!(h.is_poisoned(), "虚拟文件句柄锁应处于 poison 状态");
+
+            // 预期错误 2（恢复前）：lock() 必须返回预期的 PoisonError；
+            // 若返回 Ok 说明锁未被 poison（panic 未生效）→ 测试立即失败；
+            // 确认为预期错误后再用 into_inner 恢复锁
+            let guard = match h.lock() {
+                Ok(_) => panic!("非预期：句柄锁未被 poison，lock() 返回 Ok"),
+                Err(poison) => poison.into_inner(), // 预期错误：PoisonError → 恢复锁
+            };
+            drop(guard);
+
+            // 恢复验证：句柄锁相关的长度查询/读/写均可用
+            assert_eq!(vf.get_len(), 4);
+            let mut buf = vec![0u8; 4];
+            crate::tools::TestTool::expect_ok(vf.read_exact(&mut buf), "读取初始数据失败");
+            assert_eq!(buf, vec![1, 2, 3, 4]);
+            crate::tools::TestTool::expect_ok(vf.seek(SeekFrom::Start(0)), "重新定位到开头失败");
+            crate::tools::TestTool::expect_ok(vf.write_all(&[9, 9, 9, 9]), "覆写数据失败");
+            crate::tools::TestTool::expect_ok(vf.seek(SeekFrom::Start(0)), "再次定位到开头失败");
+            let mut buf2 = vec![0u8; 4];
+            crate::tools::TestTool::expect_ok(vf.read_exact(&mut buf2), "读取覆写后数据失败");
+            assert_eq!(buf2, vec![9, 9, 9, 9]);
+        }
+        crate::tools::TestTool::cleanup_test_dir(&dir);
+    }
+}

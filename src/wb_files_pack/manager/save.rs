@@ -22,7 +22,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         //写入量阈值提升至 64MiB：save_all 在 manager 锁内执行全量 GC 与
         //.wbm 写入，HDD 上单次数秒；4MiB 阈值时每 4MiB 数据就触发一次，
         //多线程打包会退化为全局锁风暴（见 PROGRESSIVE_SAVE_WRITE_THRESHOLD）。
@@ -53,7 +53,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let old_pos = self.manifest.attribute().empty_data_pos_list_pos();
         let old_len = pack_file
             .empty_data_list
@@ -128,7 +128,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let data = attribute.get_block_data()?.0;
         pack_file.set_pos_write(FILE_HEADER_MANIFEST_ATTRIBUTE_INDEX as u64)?;
         pack_file.write_all(&data)?;
@@ -141,7 +141,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pack_file.sync_file_length();
         pack_file.set_pos_write(FILE_HEADER_DATA_LENGTH_INDEX as u64)?;
         let pack_len = pack_file.len;
@@ -188,7 +188,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let pack_file = pack_file
                 .lock()
-                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pack_file.manifest_data_block_read(file_pos)
         } else if let Some(manifest_file) = self.manifest.file() {
             manifest_file.manifest_data_block_read(file_pos)
@@ -218,7 +218,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pack_file.manifest_data_block_write(block_data, new_block, old_pos, old_block_len)
         }
     }

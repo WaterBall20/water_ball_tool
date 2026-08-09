@@ -19,7 +19,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.run_data.write_lock.lock = true;
             let lock_file = Self::write_lock(&self.run_data.write_lock)?;
             if let Some(lock_file) = lock_file {
@@ -34,7 +34,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = &self.run_data.write_lock.path;
         let lock_info = self.this_write_lock_info();
         match lock_info.file_lock_type {

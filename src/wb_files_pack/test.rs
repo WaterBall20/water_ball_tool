@@ -1,8 +1,8 @@
 use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
 use crate::wb_files_pack::{
     Attribute, DATA_BLOCK_LEN, DataPosList, ManifestDataBlock, ManifestDataBlockTrait,
-    PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct, PackStructItem,
-    PackStructItemType,
+    PackFileError, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct,
+    PackStructItem, PackStructItemType,
 };
 use pretty_assertions::assert_eq;
 
@@ -303,7 +303,11 @@ fn ab_both_corrupted_error() {
     corrupt_b_head_ver(&mut md);
 
     let result = md.get_this_data();
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(PackFileError::Integrity(_))),
+        "双块损坏应返回 Integrity 错误，实际: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -396,7 +400,11 @@ fn get_ver_rejects_zero() {
     let data = vec![0u8; block_size];
     // 头尾 ver 都是 0 → get_ver 返回 Err
     let result = ManifestDataBlock::get_ver(&data);
-    assert!(result.is_err(), "get_ver should reject version 0");
+    assert!(
+        matches!(result, Err(PackFileError::Integrity(_))),
+        "版本 0 应返回 Integrity 错误，实际: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -409,7 +417,11 @@ fn get_ver_rejects_zero_when_head_tail_match() {
     // 尾 ver=0 (already 0)
     // 都匹配，但值为 0 → 应拒绝
     let result = ManifestDataBlock::get_ver(&data);
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(PackFileError::Integrity(_))),
+        "头尾匹配但版本 0 应返回 Integrity 错误，实际: {:?}",
+        result
+    );
 }
 
 #[test]

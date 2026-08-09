@@ -269,7 +269,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.path_exists(path))
     }
 
@@ -288,7 +288,7 @@ impl ManagerSync /*读*/ {
         let mgr = self.manager.clone();
         let mut mgr = mgr
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         mgr.this_write_lock()?;
         let path_list = PathTool::path_to_string_vec(path);
         let handle =
@@ -313,7 +313,7 @@ impl ManagerSync /*读*/ {
         let mgr = self.manager.clone();
         let mut mgr = mgr
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         mgr.this_write_lock()?;
         let (path_list, metadata) = mgr.create_file_auto_sized(path, alloc_size)?;
         let handle = Arc::new(Mutex::new(PackFileHandle::create(
@@ -333,7 +333,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_manifest_attribute().clone())
     }
 
@@ -343,7 +343,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_root_struct_items().clone())
     }
 
@@ -353,7 +353,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_root_struct_item_name_list())
     }
 
@@ -363,7 +363,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         manager.get_struct_item_name_list(path)
     }
 
@@ -376,7 +376,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_dir_pack_struct_items(path)?.clone())
     }
 
@@ -386,7 +386,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_pack_struct_item_dir(path)?.clone())
     }
 
@@ -396,7 +396,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_pack_struct_item(path)?.clone())
     }
 
@@ -412,7 +412,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         manager.load_all_data(no_err)
     }
 
@@ -422,7 +422,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         manager.load_pack_struct_metadata_path(path)
     }
 
@@ -432,7 +432,7 @@ impl ManagerSync /*读*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(manager.get_dir(path)?.clone())
     }
 }
@@ -444,7 +444,7 @@ impl ManagerSync /*写*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         manager.create_dir_all(path)
     }
 }
@@ -456,7 +456,7 @@ impl ManagerSync /*删除*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path_list = PathTool::path_to_string_vec(path);
         manager.delete_file(&path_list)
     }
@@ -467,7 +467,7 @@ impl ManagerSync /*删除*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path_list = PathTool::path_to_string_vec(path);
         manager.delete_dir_all(&path_list)?;
         Ok(())
@@ -483,7 +483,7 @@ impl ManagerSync /*删除*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path_list = PathTool::path_to_string_vec(path);
         manager.erase_file(&path_list, strategy)
     }
@@ -498,7 +498,7 @@ impl ManagerSync /*删除*/ {
         let manager = self.manager.clone();
         let mut manager = manager
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path_list = PathTool::path_to_string_vec(path);
         manager.erase_dir_all(&path_list, strategy)?;
         Ok(())
@@ -540,7 +540,7 @@ impl ManagerSync /*工具方法*/ {
                     let mgr = self.manager.clone();
                     let mut mgr = mgr
                         .lock()
-                        .map_err(|e| PackFileError::Lock(format!("无法获得管理器锁, err:{e}")))?;
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     mgr.this_write_lock()?;
                     let path_list = PathTool::path_to_string_vec(path);
                     let handle = mgr.get_or_create_file_handle(

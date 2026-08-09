@@ -1,4 +1,4 @@
-use crate::wb_files_pack::OverwriteStrategy;
+use crate::wb_files_pack::{OverwriteStrategy, PackFileError};
 use crate::wb_files_pack::pack_io::file::PackVirtualFile;
 use crate::{tools::TestTool, wb_files_pack::manager_sync::ManagerSync};
 use std::fs;
@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wbfp/manager_sync/ok";
-static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wbfp/manager_sync/err";
+static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wb_files_pack/manager_sync/ok";
+static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wb_files_pack/manager_sync/err";
 
 // === 辅助函数 / Helpers ===
 
@@ -27,9 +27,8 @@ fn create_new_rw(path: impl AsRef<std::path::Path>) -> ManagerSync {
 /// 准备测试目录并清理旧文件
 fn setup_ok_test(name: &str) -> (PathBuf, PathBuf) {
     let dir = PathBuf::from(WBFP_TEST_TEMP_OK_DIR_PATH).join(name);
-    fs::create_dir_all(&dir).expect("创建测试目录失败");
+    TestTool::prepare_test_dir(&dir);
     let pack = dir.join("pack");
-    TestTool::remove_test_pack_files(&pack);
     (dir, pack)
 }
 
@@ -98,8 +97,7 @@ fn create_pack() {
     {
         ManagerSync::create_new(&pack).expect("创建包文件失败");
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -112,8 +110,7 @@ fn create_dir_all_and_get() {
             .expect("创建目录失败");
         alloc.get_dir(&"Test/Test2").expect("获取目录失败");
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 文件创建+读写（分离清单） / File create + r/w (separate manifest) ===
@@ -130,8 +127,7 @@ fn file_write_read_back() {
             &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -146,8 +142,7 @@ fn file_write_read_back_no_len() {
             &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 文件创建+读写（不分离清单） / File create + r/w (no separate manifest) ===
@@ -193,8 +188,7 @@ fn file_write_grow_beyond_preallocated() {
         let ok = rw2.verify_hash(None).expect("verify_hash 出错");
         assert!(ok, "哈希校验未通过");
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -229,8 +223,7 @@ fn virtual_file_alloc_size_known() {
             "已知大小分配不应使用 4MiB 整块，包文件大小 {pack_len}"
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -288,8 +281,7 @@ fn virtual_file_alloc_stitch_fragments() {
             after - before
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -328,10 +320,13 @@ fn virtual_file_alloc_segment_limit_rejected() {
             .write(true)
             .create_new(true)
             .open("Test/Rejected");
-        assert!(result.is_err(), "碎片拼接超过段数上限应拒绝分配");
+        assert!(
+            matches!(result, Err(PackFileError::State(_))),
+            "碎片拼接超过段数上限应返回 State 错误，实际: {:?}",
+            result.as_ref().err()
+        );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -353,8 +348,7 @@ fn file_write_read_back_no_separate_manifest() {
             &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -376,8 +370,7 @@ fn file_write_read_back_no_len_no_separate_manifest() {
             &[10, 25, 33, 41, 53, 64, 57, 87, 89, 110],
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 重新打开并修改 / Reopen and modify ===
@@ -416,8 +409,7 @@ fn reopen_and_modify_file() {
         reopen_write_then_read_back(&mut alloc, path_b, &[10, 25, 33, 41, 53, 62, 5, 12, 14, 1]);
     }
 
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 多次重写 + GC 触发 / Multiple rewrites + GC triggering ===
@@ -442,8 +434,7 @@ fn virtual_file_multiple_rewrite_random() {
             reopen_write_then_read_back(&mut alloc, path, &new_data);
         }
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 创建10文件 → 删除5个（暂存GC） → Drop触发GC → 重写剩余5个+新建5个 → 全部验证。
@@ -513,8 +504,7 @@ fn virtual_file_rewrite_trigger_gc() {
         assert!(!alloc.path_exists(&"File_5").expect("无法判断路径是否存在"));
         assert!(!alloc.path_exists(&"File_9").expect("无法判断路径是否存在"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 创建3个大文件(5-10KB) → 全部删除 → Drop触发GC → 新建3个文件(GC后空间复用) → 哈希验证。
@@ -574,8 +564,7 @@ fn virtual_file_gc_reuse_rewrite() {
             vhr.err_path
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === set_len 收缩 / set_len shrink ===
@@ -647,24 +636,23 @@ fn virtual_file_set_len_shrink() {
             shrunk_len
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 错误场景 / Error cases ===
 
 #[test]
-#[should_panic(expected = "文件可能已存在")]
 fn create_pack_twice_should_fail() {
     let (dir, pack) = setup_ok_test("create_pack_twice_should_fail");
     ManagerSync::create_new(&pack).expect("创建包文件失败");
     // 第二次创建应失败（文件已存在或已被锁定）
     let r = ManagerSync::create_new(&pack);
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
-    if let Err(err) = r {
-        panic!("{err}");
-    }
+    assert!(
+        matches!(r, Err(PackFileError::Other(_))),
+        "第二次创建应因文件已存在而失败, 实际: {:?}",
+        r.as_ref().err()
+    );
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // ============================================================
@@ -728,8 +716,7 @@ fn multi_instance_write_non_overlapping() {
             "多实例写入非重叠区域后数据不一致"
         );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 三个实例在多个线程中并发写入同一文件的不同区域。
@@ -796,8 +783,7 @@ fn multi_instance_concurrent_write() {
         let expected: Vec<u8> = (1..=30).collect();
         assert_eq!(buf, expected, "并发多实例写入后数据不一致");
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 三个实例混合读写：实例1写 → 实例2读 → 实例3追加写 → 读回验证。
@@ -859,8 +845,7 @@ fn multi_instance_mixed_read_write() {
         assert_eq!(n, 11);
         assert_eq!(&buf, b"HELLO WORLD", "混合读写后完整数据不一致");
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 三个实例同时对多个不同文件进行读写（跨文件多实例测试）。
@@ -911,8 +896,7 @@ fn multi_instance_cross_file_rw() {
             assert_eq!(&buf[..], expected, "文件 {name} 数据不一致");
         }
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 五个实例并发随机读写压力测试（使用 auto_sized 创建文件）。
@@ -991,8 +975,7 @@ fn multi_instance_stress_three_instances() {
             );
         }
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 /// 三个实例交替 seek + write，验证各实例位置独立性。
@@ -1073,8 +1056,7 @@ fn multi_instance_independent_positions() {
         assert_eq!(&buf[17..19], b"GH");
         assert_eq!(buf[19], 0);
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 // === 删除/擦除功能 / Delete/Erase ===
@@ -1089,8 +1071,7 @@ fn delete_file_root() {
         alloc.delete_file(&"test.txt").expect("删除文件失败");
         assert!(!alloc.path_exists(&"test.txt").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1109,8 +1090,7 @@ fn delete_file_subdir() {
         assert!(alloc.path_exists(&"A/B").expect("检查路径存在失败"));
         assert!(alloc.path_exists(&"A").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1125,8 +1105,7 @@ fn delete_dir_all_empty() {
         alloc.delete_dir_all(&"empty_dir").expect("删除目录失败");
         assert!(!alloc.path_exists(&"empty_dir").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1151,8 +1130,7 @@ fn delete_dir_all_with_files() {
         assert!(!alloc.path_exists(&"A/B").expect("检查路径存在失败"));
         assert!(!alloc.path_exists(&"A/B/3").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1170,10 +1148,16 @@ fn delete_dir_all_nonempty() {
         assert!(!alloc.path_exists(&"data").expect("检查路径存在失败"));
         assert!(!alloc.path_exists(&"data/f1").expect("检查路径存在失败"));
         assert!(!alloc.path_exists(&"data/f2").expect("检查路径存在失败"));
-        assert!(alloc.get_root_struct_item_name_list().is_ok());
+        let root_items = alloc
+            .get_root_struct_item_name_list()
+            .expect("获取根目录项列表失败");
+        assert!(
+            root_items.is_empty(),
+            "删除 data 后根目录应为空，实际: {:?}",
+            root_items
+        );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1198,8 +1182,7 @@ fn erase_file() {
         let mut alloc = ManagerSync::open(&pack).expect("打开包文件失败");
         assert!(!alloc.path_exists(&"secret.txt").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1231,8 +1214,7 @@ fn erase_dir_all() {
         let mut alloc = ManagerSync::open(&pack).expect("打开包文件失败");
         assert!(!alloc.path_exists(&"top").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1251,8 +1233,7 @@ fn erase_file_random() {
             .expect("擦除文件失败");
         assert!(!alloc.path_exists(&"rnd.txt").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1275,8 +1256,7 @@ fn erase_file_dod5220() {
         let mut alloc = ManagerSync::open(&pack).expect("打开包文件失败");
         assert!(!alloc.path_exists(&"dod.txt").expect("检查路径存在失败"));
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1285,12 +1265,137 @@ fn delete_nonexistent() {
     {
         let mut alloc = ManagerSync::create_new(&pack).expect("创建包文件失败");
         let result = alloc.delete_file(&"nonexistent.txt");
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(PackFileError::NotFound(_))),
+            "删除不存在的文件应返回 NotFound，实际: {:?}",
+            result
+        );
         let result = alloc.delete_dir_all(&"nonexistent_dir");
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(PackFileError::NotFound(_))),
+            "删除不存在的目录应返回 NotFound，实际: {:?}",
+            result
+        );
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
+}
+
+// === 锁 poison 恢复 / Mutex poison recovery ===
+
+/// 其他线程持管理器锁时 panic 使锁 poison；ManagerSync 通过
+/// `unwrap_or_else(PoisonError::into_inner)` 恢复后仍可正常读写。
+///
+/// A thread panics while holding the manager lock, poisoning it; ManagerSync
+/// recovers via `unwrap_or_else(PoisonError::into_inner)` and stays fully usable.
+#[test]
+fn manager_lock_poison_recovered() {
+    let (dir, pack) = setup_ok_test("manager_lock_poison_recovered");
+    {
+        let mut alloc = create_new_rw(&pack);
+        // 基准文件：恢复后用于验证既有数据完好
+        write_then_read_back(&mut alloc, "poison_base", &[1, 2, 3]);
+
+        // 子线程持管理器锁并故意 panic → 锁 poison
+        let mgr = alloc.manager.clone();
+        let mgr_thread = mgr.clone();
+        let handle = thread::spawn(move || {
+            let _guard = mgr_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("intentional panic while holding manager lock");
+        });
+        // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；
+        // 若未 panic 或消息不同（非预期错误）则测试失败
+        let payload = handle.join().expect_err("子线程应 panic 崩溃");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"intentional panic while holding manager lock"),
+            "panic 消息应为预期的 intentional panic"
+        );
+        assert!(mgr.is_poisoned(), "管理器锁应处于 poison 状态");
+
+        // 预期错误 2（恢复前）：lock() 必须返回预期的 PoisonError；
+        // 若返回 Ok 说明锁未被 poison（panic 未生效）→ 测试立即失败；
+        // 确认为预期错误后再用 into_inner 恢复锁
+        let guard = match mgr.lock() {
+            Ok(_) => panic!("非预期：管理器锁未被 poison，lock() 返回 Ok"),
+            Err(poison) => poison.into_inner(), // 预期错误：PoisonError → 恢复锁
+        };
+        drop(guard);
+
+        // 恢复验证：所有需要管理器锁的公开操作仍可用
+        assert!(
+            alloc
+                .path_exists(&"poison_base")
+                .expect("poison 后 path_exists 失败"),
+            "poison 后既有文件应仍可见"
+        );
+        alloc
+            .create_dir_all(&String::from("poison/recover"))
+            .expect("poison 后创建目录失败");
+        assert!(alloc.path_exists(&"poison/recover").expect("检查路径存在失败"));
+        write_then_read_back(&mut alloc, "poison/new_file", &[9, 8, 7, 6]);
+        let mut root_items = alloc
+            .get_root_struct_item_name_list()
+            .expect("poison 后获取根目录项列表失败");
+        root_items.sort();
+        assert_eq!(
+            root_items,
+            vec!["poison".to_string(), "poison_base".to_string()],
+            "poison 后根目录应仅含 poison/ 与 poison_base"
+        );
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+/// 其他线程持包IO锁时 panic 使锁 poison；恢复后写入、回读、哈希验证均正常。
+///
+/// A thread panics while holding the pack I/O lock, poisoning it; writes,
+/// reads and hash verification recover afterwards.
+#[test]
+fn pack_io_lock_poison_recovered() {
+    let (dir, pack) = setup_ok_test("pack_io_lock_poison_recovered");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "io_base", &[1, 2, 3]);
+
+        // 子线程持包IO锁并故意 panic → 锁 poison
+        let io = alloc.pack_io.clone();
+        let io_thread = io.clone();
+        let handle = thread::spawn(move || {
+            let _guard = io_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("intentional panic while holding pack_io lock");
+        });
+        // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；
+        // 若未 panic 或消息不同（非预期错误）则测试失败
+        let payload = handle.join().expect_err("子线程应 panic 崩溃");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"intentional panic while holding pack_io lock"),
+            "panic 消息应为预期的 intentional panic"
+        );
+        assert!(io.is_poisoned(), "包IO锁应处于 poison 状态");
+
+        // 预期错误 2（恢复前）：lock() 必须返回预期的 PoisonError；
+        // 若返回 Ok 说明锁未被 poison（panic 未生效）→ 测试立即失败；
+        // 确认为预期错误后再用 into_inner 恢复锁
+        let guard = match io.lock() {
+            Ok(_) => panic!("非预期：包IO锁未被 poison，lock() 返回 Ok"),
+            Err(poison) => poison.into_inner(), // 预期错误：PoisonError → 恢复锁
+        };
+        drop(guard);
+
+        // 恢复验证：写数据需要包IO锁，完整走一遍写入→回读→哈希
+        write_then_read_back(&mut alloc, "io/recovered", &[4, 5, 6, 7]);
+        assert!(alloc.path_exists(&"io_base").expect("检查路径存在失败"));
+        let vhr = alloc
+            .verify_all_file_hash()
+            .expect("poison 后哈希验证出错");
+        assert!(
+            vhr.err_path.is_empty(),
+            "poison 后哈希验证应全部通过: {:?}",
+            vhr.err_path
+        );
+    }
+    TestTool::cleanup_test_dir(&dir);
 }
 
 #[test]
@@ -1331,6 +1436,5 @@ fn reopen_after_delete() {
         r.read_exact(&mut buf).expect("读取数据失败");
         assert_eq!(buf, data_b);
     }
-    TestTool::remove_test_pack_files(&pack);
-    _ = fs::remove_dir_all(&dir);
+    TestTool::cleanup_test_dir(&dir);
 }

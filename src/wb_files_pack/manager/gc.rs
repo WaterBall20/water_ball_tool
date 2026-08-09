@@ -1,4 +1,4 @@
-use crate::wb_files_pack::error::{PackFileError, Result};
+use crate::wb_files_pack::error::Result;
 
 use super::WBFPManager;
 
@@ -12,7 +12,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(pack_file.get_file_pos(length))
     }
 
@@ -32,7 +32,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(pack_file.get_data_file_pos_multi(length, current_seg, max_seg)?)
     }
 
@@ -40,7 +40,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pack_file.file_gc_add(gc_pos_list);
         Ok(())
     }
@@ -49,7 +49,7 @@ impl WBFPManager {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pack_file.file_gc()?;
         drop(pack_file);
         self.save_empty_data_list()

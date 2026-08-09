@@ -1,58 +1,67 @@
-# 更新日志 / Changelog
+# Changelog
+
+> **Language**: English | [简体中文](docs/zh_CN/CHANGELOG.md)
 
 ## [Unreleased] — 2026-07-30
 
-### 文档注释规范化 / Doc Comment Normalization
+### Doc Comment Normalization
 
-- `cargo doc --no-deps` 警告归零（修复 2 处 `SearchWarning` 被解析为未闭合 HTML 标签的问题）
-- `FileInfo::new()`、`PackVirtualFile::get_modified()`、`PackVirtualFile::set_modified()`：补全缺失的公共 API 文档注释
-- `bytes_len_to_string()`、`path_to_string_vec()`、`path_remove_head()`：增加算法说明及可执行示例文档测试
-- `ManifestDataBlock::next_ver()` / `ver_is_older()` / `get_ver()` / `get_block_len()` / `get_block_len_us()`：增加内部算法文档注释
-- `bytes_len_to_string()` 格式化字符串修正 `"{}"` → `"{:.2}"`，确保两位小数输出与文档描述一致
-- `path_remove_head()` 修复前缀比较 bug：`path_vec > head_vec`（字典序）→ `path_vec[..head_vec.len()] == head_vec`（正确的前缀匹配）
+- `cargo doc --no-deps` warnings reduced to zero (fixed 2 `SearchWarning` instances being parsed as unclosed HTML tags)
+- `FileInfo::new()`, `PackVirtualFile::get_modified()`, `PackVirtualFile::set_modified()`: added missing public API doc comments
+- `bytes_len_to_string()`, `path_to_string_vec()`, `path_remove_head()`: added algorithm notes and runnable doc-test examples
+- `ManifestDataBlock::next_ver()` / `ver_is_older()` / `get_ver()` / `get_block_len()` / `get_block_len_us()`: added internal algorithm doc comments
+- `bytes_len_to_string()` format string fixed `"{}"` → `"{:.2}"` to match the documented two-decimal output
+- `path_remove_head()` fixed prefix comparison bug: `path_vec > head_vec` (lexicographic) → `path_vec[..head_vec.len()] == head_vec` (correct prefix matching)
 
-### 代码清理与格式化规范化 / Code Cleanup & Format Normalization
+### Code Cleanup & Format Normalization
 
-- `src/wb_files_pack/*.rs`: 全局统一 `use` 导入顺序（标准库 → 第三方 → crate 内部），合并分散导入
-- 多行长表达式格式化：`match` 臂、方法链、元组解构，消除行超长警告
-- 为仅测试环境使用的 `assert!` / `debug_assert!` 添加 `#[cfg(test)]` 门控，消除 release 构建中的 unused 警告
-- `src/gakumasu/data.rs`: 修复多行块注释对齐
-- 修复多个文件末尾缺失换行符问题（`simulator.rs`, `file_hash.rs`, `pack_io.rs`）
+- `src/wb_files_pack/*.rs`: globally unified `use` import ordering (std → third-party → crate-internal), merged scattered imports
+- Reformatted multi-line expressions: `match` arms, method chains, tuple destructuring; eliminated line-too-long warnings
+- Added `#[cfg(test)]` gating to test-only `assert!` / `debug_assert!` usage, removing unused warnings in release builds
+- `src/gakumasu/data.rs`: fixed multi-line block comment alignment
+- Fixed missing trailing newlines in several files (`simulator.rs`, `file_hash.rs`, `pack_io.rs`)
 
-### 包文件管理器重构 / WBFP Manager Refactoring
+### WBFP Manager Refactoring
 
-- `src/wb_files_pack/manager.rs`: `WBFPManagerRun.write_lock` 重构为独立子结构体 `WBFPManagerRunLock { lock, path, file }`，提升内聚性
-- `WBFPManagerRunLock` 实现 `Clone`（`file` 字段在克隆时置 `None`，避免文件描述符重复）
-- `PackLockInfo.run_lock` 类型从 `bool` 提升为 `WBFPManagerRunLock`，传递完整锁状态
-- `src/wb_files_pack/data.rs`: `WBFilesPackManifest::file()` 返回类型从 `&Option<PackIO>` 改为 `Option<&PackIO>`，更符合 Rust API 惯例
-- `WBFPManager::save_all()` 可见性从 `pub(super)` 调整为 `pub(crate)`
+- `src/wb_files_pack/manager.rs`: `WBFPManagerRun.write_lock` refactored into standalone substruct `WBFPManagerRunLock { lock, path, file }` for better cohesion
+- `WBFPManagerRunLock` implements `Clone` (`file` field set to `None` on clone to avoid duplicated file descriptors)
+- `PackLockInfo.run_lock` type promoted from `bool` to `WBFPManagerRunLock`, carrying full lock state
+- `src/wb_files_pack/data.rs`: `WBFilesPackManifest::file()` return type changed from `&Option<PackIO>` to `Option<&PackIO>`, more idiomatic Rust API
+- `WBFPManager::save_all()` visibility adjusted from `pub(super)` to `pub(crate)`
 
-### PackVirtualFile API 简化 / PackVirtualFile API Simplification
+### PackVirtualFile API Simplification
 
-- `get_len()` / `get_modified()` 移除 `Result` 包装，直接返回 `u64` / `u128` —— 内部锁获取不再产生可恢复错误
-- 锁毒性恢复统一使用 `std::sync::PoisonError::into_inner` 替代闭包 `\|e\| e.into_inner()`
-- `check_sync_compat()` 使用 `|` 模式合并只读/只写匹配分支，消除冗余代码
+- `get_len()` / `get_modified()` removed the `Result` wrapper, returning `u64` / `u128` directly — internal lock acquisition no longer produces a recoverable error
+- Lock poisoning recovery unified to `std::sync::PoisonError::into_inner`, replacing the closure `|e| e.into_inner()`
+- `check_sync_compat()` uses `|` pattern to merge read-only/write-only match branches, eliminating redundant code
 
-### 命令层解耦重构 / Command-Layer Extraction
+### Command-Layer Extraction
 
-- `src/command/wbfp.rs`: 解包工作循环提取为 `wpfp_u_work()` 独立函数
-- 哈希校验工作循环提取为 `wpfp_h_work()` 独立函数
-- 消除解包与哈希校验中队列消费逻辑的重复实现
+- `src/command/wbfp.rs`: unpack work loop extracted into standalone `wpfp_u_work()` function
+- Hash-verify work loop extracted into `wpfp_h_work()` function
+- Eliminated duplicate queue-consumption logic between unpack and hash-verify
 
-### 条件编译优化 / Conditional Compilation Optimization
+### Conditional Compilation Optimization
 
-- `gakumasu` 模块（开发中游戏模拟器）门控为 `#[cfg(debug_assertions)]`，release 构建不再编译
-- `net_server` 模块（开发中网络服务）同样门控为 `#[cfg(debug_assertions)]`
-- `src/lib.rs` 公共 API 在 release 中更精简
+- `gakumasu` module (WIP game simulator) gated behind `#[cfg(debug_assertions)]`; no longer compiled in release builds
+- `net_server` module (WIP network server) likewise gated behind `#[cfg(debug_assertions)]`
+- `src/lib.rs` public API more lean in release
 
-### 错误处理统一 / Error Handling Unification
+### Error Handling Unification
 
-- `src/wb_files_pack/error.rs`: `Display` 实现全部改用内联格式变量 `{e}` `{msg}`，消除冗余 format! 调用
-- 代码库整体移除不必要的 `.into()` 调用（通过类型推导自动转换）
+- `src/wb_files_pack/error.rs`: all `Display` implementations use inline format variables `{e}` `{msg}`, eliminating redundant `format!` calls
+- Removed unnecessary `.into()` calls across the codebase (auto-converted via type inference)
 
-### 杂项 / Misc
+### Misc
 
-- `.vscode/launch.json`: 调试配置名称简化，增加 `--include-ignored` 测试运行配置
-- `src/tools.rs`: 合并嵌套的 `use std::path` 路径声明
-- `ManagerSync`: `access_mode` 字段初始化位置提前，与声明顺序一致
-- `ManagerSync::create_new()`: 增加 `path.try_exists()` 前置检查，使存在性判断逻辑更明确
+- `.vscode/launch.json`: simplified debug config names, added `--include-ignored` test-run config
+- `src/tools.rs`: merged nested `use std::path` declarations
+- `ManagerSync`: `access_mode` field initialization moved earlier to match declaration order
+- `ManagerSync::create_new()`: added `path.try_exists()` pre-check for clearer existence semantics
+
+### Warning Suppression Removal
+
+- Removed all 5 lint-suppression attributes across the codebase: `#![allow(clippy::unwrap_used)]` in `src/file_finder/test.rs` and `src/wb_files_pack/pack_io/file.rs`, plus `#[allow(clippy::too_many_arguments)]` on 3 functions in `src/file_finder.rs`
+- Added `TestTool::expect_ok()` helper (`src/tools.rs`) for tests — a non-panicking unwrap replacement compatible with the crate-wide `#![deny(clippy::unwrap_used)]`
+- Rewrote all 30 `unwrap()`/`expect()` calls in test code to `TestTool::expect_ok()` or an explicit `match` (thread `join()` errors are `Box<dyn Any + Send>`, not `Display`)
+- AGENTS.md: added "Warning-suppression attributes are FORBIDDEN" rule — `#[allow(...)]`, `#![allow(...)]`, `#[expect(...)]` and any other lint-suppression attribute MUST NOT be added to production or test code

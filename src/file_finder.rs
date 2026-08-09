@@ -526,7 +526,6 @@ impl FileFinder {
     ///    - Same inode found in chain → cycle! skip
     ///    - Not in chain → append inode to chain, push to work queue
     /// 3. If target is a file: process directly (no cycle check — files cannot point to dirs)
-    #[allow(clippy::too_many_arguments)]
     fn process_symlink(
         path_buf: &Path,
         skip_symlink: bool,
@@ -638,7 +637,6 @@ impl FileFinder {
     }
 
     /// 处理普通文件 / Process a regular file
-    #[allow(clippy::too_many_arguments)]
     fn process_file(
         path_buf: &Path,
         results: Option<&Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
@@ -725,7 +723,6 @@ impl FileFinder {
     /// - Symlinks → special handling (inode cycle detection only for symlink→dir)
     ///
     /// Thread exits when queue is empty. Multiple threads pull from queue for parallel scanning.
-    #[allow(clippy::too_many_arguments)]
     fn run_worker(
         dir_queue: Arc<Mutex<VecDeque<DirEntry>>>,
         results: Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,

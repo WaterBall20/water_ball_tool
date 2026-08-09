@@ -1,5 +1,7 @@
 #[cfg(test)]
 use std::fs;
+#[cfg(test)]
+use std::io;
 use std::path::{Path, PathBuf};
 
 //内部路径工具
@@ -152,5 +154,46 @@ impl TestTool {
         let mut pack_lock_path = pack_path.clone();
         pack_lock_path.push_str(".lock");
         _ = fs::remove_file(pack_lock_path);
+    }
+
+    /// 测试开始准备：删除旧的测试临时目录（不存在不算错误），
+    /// 其他非预期错误直接 panic 终止测试；然后创建测试目录。
+    ///
+    /// Prepare a test temp dir: remove any stale directory first (missing is not
+    /// an error), any other unexpected error aborts the test; then create it.
+    pub fn prepare_test_dir(dir: &Path) {
+        match fs::remove_dir_all(dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => panic!("清理测试临时目录失败: {e}"),
+            Ok(()) => {}
+        }
+        fs::create_dir_all(dir).expect("创建测试临时目录失败");
+    }
+
+    /// 测试结束清理：仅当测试逻辑执行到此（未 panic / 未提前返回）才删除临时目录，
+    /// 从而在测试失败时保留证据（AGENTS.md 测试规范：失败时保留临时文件）。
+    /// 清理本身失败视为测试失败。
+    ///
+    /// End-of-test cleanup: only runs when the test logic reached here (no panic
+    /// or early return), preserving evidence on failure. A cleanup error fails
+    /// the test.
+    pub fn cleanup_test_dir(dir: &Path) {
+        match fs::remove_dir_all(dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => panic!("测试通过后清理临时目录失败: {e}"),
+            Ok(()) => {}
+        }
+    }
+
+    /// 测试代码中替代 `Result::unwrap`/`expect` 的助手：`Err` 时以消息 panic。
+    ///
+    /// Test helper replacing `Result::unwrap`/`expect`: panics with the message
+    /// on `Err`. Exists because the crate globally denies `clippy::unwrap_used`
+    /// and the spec forbids warning-suppression attributes.
+    pub fn expect_ok<T, E: std::fmt::Display>(r: Result<T, E>, msg: &str) -> T {
+        match r {
+            Ok(v) => v,
+            Err(e) => panic!("{msg}: {e}"),
+        }
     }
 }

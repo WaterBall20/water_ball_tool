@@ -1,5 +1,5 @@
 use crate::wb_files_pack::manager_sync::ManagerSync;
-use crate::wb_files_pack::error::{PackFileError, Result};
+use crate::wb_files_pack::error::Result;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ impl WBFPServerRun {
         let pack_list = self.pack_list.clone();
         let mut pack_list = pack_list
             .lock()
-            .map_err(|e| PackFileError::Lock(format!("无法获得包文件实例列表对象锁, err:{e}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pack_list.insert(path.display().to_string(), sync);
         Ok(())
     }

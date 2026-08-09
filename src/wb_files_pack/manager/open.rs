@@ -52,7 +52,7 @@ impl WBFPManager {
             let pack_file = self.pack_file.clone();
             let mut pack_file = pack_file
                 .lock()
-                .map_err(|err| PackFileError::Lock(format!("无法获得包文件锁, err: {err}")))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pack_file.write_all(&file_header_buf)?;
             pack_file.set_len(FILE_HEADER_BLOCK_LEN as u64)?;
         }
@@ -73,7 +73,7 @@ impl WBFPManager {
         let m_pack_file_arc = pack_file.clone();
         let mut m_pack_file = m_pack_file_arc
             .lock()
-            .map_err(|err| PackFileError::Lock(format!("获得包文件IO锁错误, err: {err}")))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pack_path = pack_path
             .as_ref()
             .to_str()
