@@ -132,6 +132,10 @@ impl ManifestDataBlock {
             let (is_a_data, data) = Self::get_data2(&block_data)?;
             let data_len = data.len() as u64;
             let hash_value = Self::get_hash(&block_data)?.to_vec();
+            //进行数据校验
+            if !Self::data_hash_v(data, &hash_value){
+                Err(PackFileError::Format("哈希校验不通过".into()))?;
+            }
             Ok(Self {
                 file_pos,
                 block_data,
@@ -256,11 +260,13 @@ impl ManifestDataBlock {
         }
     }
 
-    pub(crate) fn this_data_hash_x(&self) -> Result<bool> {
-        Ok(Self::data_hash_x(self.get_this_data()?, &self.hash_value))
+    /// 哈希校验
+    pub(crate) fn this_data_hash_v(&self) -> Result<bool> {
+        Ok(Self::data_hash_v(self.get_this_data()?, &self.hash_value))
     }
 
-    fn data_hash_x(data: &[u8], hash: &[u8]) -> bool {
+    /// 哈希校验
+    fn data_hash_v(data: &[u8], hash: &[u8]) -> bool {
         let binding = blake3::hash(data);
         let in_hash = binding.as_bytes();
         let in_hash = &in_hash[..MANIFEST_DATA_BLOCK_DATA_HASH_LEN];
@@ -1620,7 +1626,7 @@ impl PackFileMetadata {
         let type_data = &data[PACK_FILE_METADATA_TYPE_DATA_INDEX..];
         let file_type = match this_type {
             0 => {
-                if !data_block.this_data_hash_x()? {
+                if !data_block.this_data_hash_v()? {
                     Err(PackFileError::Integrity("文件的哈希验证未通过".into()))?;
                 }
                 let hash_type = type_data[PACK_METADATA_FILE_HASH_TYPE_INDEX];

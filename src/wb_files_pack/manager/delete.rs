@@ -17,7 +17,7 @@ impl WBFPManager {
     /// Removes the specified virtual file from the pack file directory tree,
     /// freeing its data blocks to the garbage collection staging list.
     /// Actual space reclamation occurs during the next throttled save or save_all.
-    pub(crate) fn delete_file(&mut self, path_list: &[String]) -> Result<()> {
+    pub fn delete_file(&mut self, path_list: &[String]) -> Result<()> {
         if path_list.is_empty() {
             return Err(PackFileError::Other(
                 "不能删除根目录 / Cannot delete root directory".into(),
@@ -32,7 +32,7 @@ impl WBFPManager {
     }
 
     /// 递归删除目录及所有内容 / Recursively delete a directory and all contents
-    pub(crate) fn delete_dir_all(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
+    pub fn delete_dir_all(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
         if path_list.is_empty() {
             return Err(PackFileError::Other(
                 "不能删除根目录 / Cannot delete root directory".into(),
@@ -53,7 +53,7 @@ impl WBFPManager {
     ///
     /// Before deletion, overwrites the file's data blocks and metadata block
     /// using the specified strategy, ensuring data is unrecoverable.
-    pub(crate) fn erase_file(
+    pub fn erase_file(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
@@ -76,7 +76,7 @@ impl WBFPManager {
     /// 递归覆写每个文件的数据和元数据后，再执行删除。
     ///
     /// Recursively overwrites each file's data and metadata, then performs deletion.
-    pub(crate) fn erase_dir_all(
+    pub fn erase_dir_all(
         &mut self,
         path_list: &[String],
         strategy: OverwriteStrategy,
