@@ -37,7 +37,7 @@ static BUF_LEN: usize = 1024 * 1024;
 
 
 /// 打包进度条样式模板 / Pack progress bar style template
-const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta:>4})] {percent_precise:>7}% {bytes:>11}/{total_bytes:>11} \n{msg}";
+const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta:>4})] {percent_precise:>7}% {bytes:>11} / {total_bytes:>11} \n{msg}";
 
 // 挂起时 spinner 模板 / Spinner template when suspended
 const SPINNER_TEMPLATE: &str = "{spinner:.blue} {prefix:<8} {msg}";

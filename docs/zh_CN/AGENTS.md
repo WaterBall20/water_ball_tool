@@ -7,10 +7,10 @@ Rust 2024 CLI 工具箱。两个命令：`ff`（并行文件搜索器）和 `wbf
 ## 命令
 
 ```bash
-cargo build --release          # 发布构建
-cargo check                    # 仅编译检查（快速）
-cargo clippy                   # 代码检查
-cargo test                     # 跳过长时间测试（#[ignore] 自动处理）
+cargo build --release           # 发布构建
+cargo check                     # 仅编译检查（快速）
+cargo clippy                    # 代码检查
+cargo test                      # 跳过长时间测试（#[ignore] 自动处理）
 cargo test -- --include-ignored # 包含长时间测试（主分支推送时全量 CI）
 ./target/release/water_ball_tool -h
 ```
@@ -51,7 +51,6 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
   - 随机化测试绝不能生成资源文件——只能产生 `temp/test/` 下的临时文件（随机夹具是测试产物，绝不是资源）。
   - 发生非预期错误时，临时文件保留（不删除）；失败现场遗留的文件本身就是复现手段——检查它们即可诊断。无需种子重放机制。
   - 随机化测试仅在全量模式（`cargo test -- --include-ignored`）运行，用 `#[ignore = "longtime"]` 门控。
-  - 预算：≤ 1000 个文件，单文件 ≤ 4 MiB，目录深度 ≤ 5。
 
 ### 测试意图与错误断言
 

@@ -61,11 +61,11 @@ _创建：2026/02/27 &emsp; 最后更新：2026/06/17_
 
 ```
 ┌───────────────────────────┐
-│  数据区空闲 DataPosList   │ ← empty_data_pos_list_pos 指向
+│  数据区空闲 DataPosList    │ ← empty_data_pos_list_pos 指向
 ├───────────────────────────┤
-│  清单空闲 DataPosList     │ ← manifest_empty_data_pos_list_pos 指向（仅分离模式）
+│  清单空闲 DataPosList      │ ← manifest_empty_data_pos_list_pos 指向（仅分离模式）
 ├───────────────────────────┤
-│  根结构 PackStruct        │ ← root_struct_pos 指向
+│  根结构 PackStruct         │ ← root_struct_pos 指向
 │    ├─ PackStructItem      │
 │    │   └─ 子 PackStruct   │ ← struct_file_pos 指向
 │    ├─ PackStructItem      │

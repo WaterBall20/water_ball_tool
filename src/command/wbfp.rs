@@ -779,7 +779,7 @@ impl WaterBallFilePackArgsRuning {
                         //基于检查修改时间和大小，简单的写入优化判断
                         if write_optimization
                             && (v.get_modified() == info.modified_time()
-                                || v.get_len() == info.length())
+                                && v.get_len() == info.length())
                         {
                             update_pb(
                                 info.length(),

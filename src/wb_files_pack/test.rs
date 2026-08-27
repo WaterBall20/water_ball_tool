@@ -1,4 +1,7 @@
-use super::data::{MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN};
+use super::data::{
+    MANIFEST_ATTRIBUTE_LEN, MANIFEST_DATA_BLOCK_DATA_VER_INDEX, MANIFEST_DATA_BLOCK_DATA_VER_LEN,
+    MANIFEST_VERSION, MANIFEST_VERSION_COMPATIBLE,
+};
 use crate::wb_files_pack::{
     Attribute, DATA_BLOCK_LEN, DataPosList, ManifestDataBlock, ManifestDataBlockTrait,
     PackFileError, PackFileMetadata, PackFileMetadataRun, PackFileMetadataType, PackStruct,
@@ -198,6 +201,96 @@ fn pack_file_metadata_data_block_save_and_load() {
     )
     .expect("加载Attribute失败");
     assert_eq!(b, b_load);
+}
+
+// ============================================================
+// Attribute binrw 序列化测试 / Attribute binrw serialization tests
+// ============================================================
+
+/// Attribute 的 binrw 序列化应与手写格式逐字节一致（61 字节 LE 布局）
+/// Attribute's binrw serialization must be byte-identical to the hand-rolled format (61-byte LE layout)
+#[test]
+fn attribute_to_bytes_vec_golden_bytes() {
+    let mut a = Attribute::default();
+    a.set_cow(true);
+    a.set_empty_data_pos_list_pos(5);
+    a.set_manifest_empty_data_pos_list_pos(6);
+    a.set_manifest_file_len(7);
+    a.set_root_struct_pos(4);
+    a.add_file_count(0x0102_0304_0506_0708);
+    a.add_dir_count(2);
+    a.add_data_len(3);
+    let bytes = a.to_bytes_vec();
+    // 期望布局: version(2) | version_compatible(2) | bool_data(1) | 7×u64 LE
+    // Expected layout: version(2) | version_compatible(2) | bool_data(1) | 7×u64 LE
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&MANIFEST_VERSION.to_le_bytes());
+    expected.extend_from_slice(&MANIFEST_VERSION_COMPATIBLE.to_le_bytes());
+    expected.push(0b1000_0000); // cow = true → bit 7 / cow = true → bit 7
+    expected.extend_from_slice(&5u64.to_le_bytes());
+    expected.extend_from_slice(&6u64.to_le_bytes());
+    expected.extend_from_slice(&7u64.to_le_bytes());
+    expected.extend_from_slice(&4u64.to_le_bytes());
+    expected.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+    expected.extend_from_slice(&2u64.to_le_bytes());
+    expected.extend_from_slice(&3u64.to_le_bytes());
+    assert_eq!(bytes, expected);
+    assert_eq!(bytes.len(), MANIFEST_ATTRIBUTE_LEN);
+}
+
+/// golden 字节经 binrw load 后应还原出相同字段（含 COW 位解析）
+/// Golden bytes loaded via binrw must reproduce the same fields (incl. COW bit parsing)
+#[test]
+fn attribute_load_from_golden_bytes() {
+    let mut a = Attribute::default();
+    a.set_cow(true);
+    a.set_empty_data_pos_list_pos(5);
+    a.set_manifest_empty_data_pos_list_pos(6);
+    a.set_manifest_file_len(7);
+    a.set_root_struct_pos(4);
+    a.add_file_count(99);
+    a.add_dir_count(877);
+    a.add_data_len(231);
+    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+        .expect("从块数据创建ManifestDataBlock失败");
+    let a_load = Attribute::load(block).expect("加载Attribute失败");
+    assert_eq!(a, a_load);
+}
+
+/// 版本过低时应返回 Version 错误
+/// A too-old version must return a Version error
+#[test]
+fn attribute_load_version_too_old() {
+    let mut a = Attribute::default();
+    a.set_version(MANIFEST_VERSION_COMPATIBLE - 1);
+    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+        .expect("从块数据创建ManifestDataBlock失败");
+    let err = Attribute::load(block).expect_err("版本过低应加载失败");
+    assert!(matches!(err, PackFileError::Version(_)));
+}
+
+/// 版本过高（且兼容版本超过当前版本）时应返回 Version 错误
+/// A too-new version (with compatible version above current) must return a Version error
+#[test]
+fn attribute_load_version_too_high() {
+    let mut a = Attribute::default();
+    a.set_version(MANIFEST_VERSION + 1);
+    a.set_version_compatible(MANIFEST_VERSION + 1);
+    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+        .expect("从块数据创建ManifestDataBlock失败");
+    let err = Attribute::load(block).expect_err("版本过高应加载失败");
+    assert!(matches!(err, PackFileError::Version(_)));
+}
+
+/// 截断的负载应返回 Format 错误而非 panic
+/// A truncated payload must return a Format error rather than panic
+#[test]
+fn attribute_load_truncated_payload() {
+    // 构造一个远小于 61 字节的 A/B 块负载 / Build an A/B block with a payload far smaller than 61 bytes
+    let mut md = ManifestDataBlock::default();
+    md.update(&[0x0a, 0x00, 0x0a, 0x00, 0x00]).expect("更新数据块失败");
+    let err = Attribute::load(md).expect_err("截断数据应加载失败");
+    assert!(matches!(err, PackFileError::Format(_)));
 }
 
 // ============================================================

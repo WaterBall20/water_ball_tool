@@ -51,7 +51,6 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
   - A randomized test MUST NOT generate resource files — it may only produce temp files under `temp/test/` (random fixtures are test artifacts, never resources).
   - On unexpected errors, temp files are kept (not deleted); the leftover files at the failure site ARE the reproduction — inspect them to diagnose. No seed-replay mechanism is required.
   - Randomized tests run ONLY in full-suite mode (`cargo test -- --include-ignored`), gated with `#[ignore = "longtime"]`.
-  - Budget: ≤ 1000 files, single file ≤ 4 MiB, directory depth ≤ 5.
 
 ### Test intent and error assertions
 

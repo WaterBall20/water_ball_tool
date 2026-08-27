@@ -4,7 +4,6 @@ use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-use tracing::info;
 
 use super::{PackLockInfo, PackLockType, WBFPManager};
 
@@ -132,7 +131,6 @@ impl WBFPManager {
         write_lock.write_all(pid.to_le_bytes().as_slice())?;
         write_lock.sync_all()?;
         write_lock.lock()?;
-        info!("已为包文件上写入锁");
         Ok(write_lock)
     }
 }

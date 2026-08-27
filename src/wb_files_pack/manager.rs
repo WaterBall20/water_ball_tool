@@ -2,7 +2,6 @@ use crate::wb_files_pack::WBFilesPackManifest;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::pack_io::PackIO;
 use std::fs::File;
-use std::ops::Not;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 

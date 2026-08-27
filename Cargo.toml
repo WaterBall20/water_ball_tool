@@ -12,6 +12,9 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 rand = "0.10.2"
 blake3 = "1.8.6"
+#AI=== binrw 二进制序列化依赖（Attribute 等 on-disk 结构）/ binrw binary serialization dependency (on-disk structs like Attribute)
+binrw = "0.15.2"
+#AI_END===
 clap = { version = "4.6.6", features = ["derive"] }
 
 [dev-dependencies]

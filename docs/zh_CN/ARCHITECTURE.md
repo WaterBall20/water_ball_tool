@@ -269,8 +269,7 @@ pub struct Dir {
 | 特性 | `search()` | `search_stream()` |
 |---|---|---|
 |  `FilesList` 树  |  `(JoinHandle, Receiver<(PathBuf, FileInfo)>)`  |
-|  `HashMap`（内存中）  |  无（零开销）
-|  阻塞式、一次性
+|  `HashMap`（内存中）  |  无（零开销）|  阻塞式、一次性
 |  `ff` 命令  |  `wbfp` 打包（生产者-消费者）  |
 |  `Some(results)`  |  `None`（跳过 HashMap
 

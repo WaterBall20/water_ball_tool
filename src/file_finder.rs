@@ -26,7 +26,6 @@ use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 // === 平台相关的 inode 标识 / Platform-specific inode key ===
 
@@ -540,7 +539,6 @@ impl FileFinder {
         condver: &Arc<Condvar>,
     ) {
         if skip_symlink {
-            debug!("已跳过符号链接:{path_buf:?}");
             return;
         }
 

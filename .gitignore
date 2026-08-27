@@ -1,4 +1,5 @@
 /target
-/temp/test/
-.omo
-.VSCodeCounter
+/temp
+/.omo
+/.VSCodeCounter
+/.agent-teams

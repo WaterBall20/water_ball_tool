@@ -1,5 +1,8 @@
 use crate::wb_files_pack::pack_io::PackIO;
 
+//AI=== binrw 序列化 trait / binrw serialization traits
+use binrw::{BinRead, BinWrite};
+//AI_END===
 use super::error::{PackFileError, Result};
 use super::manager::DEFAULT_COW;
 use super::pack_io::file_handle::PackFileHandle;
@@ -45,46 +48,31 @@ pub(crate) const DATA_DATA_BLOCK_LEN: u64 = 4 * 1024 * 1024;
 /// and .wbm manifests do not bloat; allocation is rejected when over the limit.
 pub(crate) const MAX_DATA_SEGMENTS: usize = 16;
 
+//AI=== 原 9 个 MANIFEST_ATTRIBUTE_*_INDEX 偏移常量已删除：字段布局改由 AttributeData(binrw) 定义
+// The 9 former MANIFEST_ATTRIBUTE_*_INDEX offset constants were removed: field layout is now defined by AttributeData (binrw)
+//AI_END===
 //格式版本
 const MANIFEST_ATTRIBUTE_VERSION_LEN: usize = 2;
 //格式兼容版本
-const MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX: usize = MANIFEST_ATTRIBUTE_VERSION_LEN;
 const MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN: usize = 2;
 //布尔数据
-const MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX: usize =
-    MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN;
 const MANIFEST_ATTRIBUTE_BOOL_DATA_LEN: usize = 1;
 //空数据列表的文件指针位置
-const MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX: usize =
-    MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN;
 const MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN: usize = 8;
 //清单..
-const MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX: usize =
-    MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN;
 const MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN: usize = 8;
 //清单文件大小
-const MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX: usize =
-    MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-        + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN;
 const MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN: usize = 8;
 //根结构的文件指针位置
-const MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX: usize =
-    MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN;
 const MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN: usize = 8;
 //所有文件数
-const MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX: usize =
-    MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN;
 const MANIFEST_ATTRIBUTE_FILE_COUNT_LEN: usize = 8;
 //所有目录数
-const MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX: usize =
-    MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN;
 const MANIFEST_ATTRIBUTE_DIR_COUNT_LEN: usize = 8;
 //数据大小
-const MANIFEST_ATTRIBUTE_DATA_LEN_INDEX: usize =
-    MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN;
 const MANIFEST_ATTRIBUTE_DATA_LEN_LEN: usize = 8;
 
-const MANIFEST_ATTRIBUTE_LEN: usize = MANIFEST_ATTRIBUTE_VERSION_LEN
+pub(super) const MANIFEST_ATTRIBUTE_LEN: usize = MANIFEST_ATTRIBUTE_VERSION_LEN
     + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN
     + MANIFEST_ATTRIBUTE_BOOL_DATA_LEN
     + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN
@@ -438,17 +426,27 @@ pub(crate) trait ManifestDataBlockTrait {
     }
 }
 
-/// 清单属性 / Manifest attribute
+//AI=== binrw 属性 IO 结构 / binrw attribute IO struct
+/// 属性二进制 IO 结构（on-disk 布局）/ Attribute on-disk binary IO struct
 ///
-/// 存储包文件的全局属性信息，包括版本、文件计数、数据位置等。
-/// Stores global attribute information for the pack file, including version, file counts, data positions, etc.
-#[derive(Debug, Clone)]
-pub struct Attribute {
+/// 对应清单格式 §5 的 61 字节 Attribute 布局：全字段小端序，COW 布尔位
+/// 位于第 4 字节的 bit 7（MSB-first），其余位保留为 0。
+/// Mirrors the 61-byte Attribute layout of manifest format §5: all fields
+/// little-endian, with the COW bool stored at bit 7 of byte 4 (MSB-first).
+#[derive(BinRead, BinWrite)]
+#[brw(little)]
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeData {
     /// 格式版本 / Format version
     version: u16,
     /// 最低兼容版本 / Minimum compatible version
     version_compatible: u16,
     /// 是否启用写时复制 / Whether copy-on-write is enabled
+    ///
+    /// 磁盘上编码为 1 字节，bit 7 表示 COW（MSB-first），其余位保留为 0。
+    /// Encoded on disk as one byte with bit 7 indicating COW (MSB-first).
+    #[br(map = |b: u8| (b >> 7) == 1)]
+    #[bw(map = |cow: &bool| if *cow { 0b1000_0000u8 } else { 0u8 })]
     cow: bool,
     /// 空数据位置列表的文件偏移 / File offset of the empty data position list
     empty_data_pos_list_pos: u64,
@@ -464,29 +462,10 @@ pub struct Attribute {
     dir_count: u64,
     /// 数据总长度（字节）/ Total data length (bytes)
     data_len: u64,
-    /// 数据块 / Data block
-    data_block: ManifestDataBlock,
-    /// 是否脏（未写入）/ Whether dirty (not yet written)
-    dirty: bool,
 }
 
-impl PartialEq for Attribute {
-    fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.version_compatible == other.version_compatible
-            && self.cow == other.cow
-            && self.empty_data_pos_list_pos == other.empty_data_pos_list_pos
-            && self.manifest_empty_data_pos_list_pos == other.manifest_empty_data_pos_list_pos
-            && self.manifest_file_len == other.manifest_file_len
-            && self.root_struct_pos == other.root_struct_pos
-            && self.file_count == other.file_count
-            && self.dir_count == other.dir_count
-            && self.data_len == other.data_len
-            && self.data_block == other.data_block
-    }
-}
-
-impl Default for Attribute {
+impl Default for AttributeData {
+    /// 默认属性数据（版本 = 当前清单版本）/ Default attribute data (version = current manifest version)
     fn default() -> Self {
         Self {
             version: MANIFEST_VERSION,
@@ -499,6 +478,46 @@ impl Default for Attribute {
             file_count: 0,
             dir_count: 0,
             data_len: 0,
+        }
+    }
+}
+
+impl AttributeData {
+    /// 转换为领域结构（附带数据块）/ Convert to the domain struct (with data block)
+    fn into_attribute(self, data_block: ManifestDataBlock) -> Attribute {
+        Attribute {
+            attr_data: self,
+            data_block,
+            dirty: false,
+        }
+    }
+}
+//AI_END===
+
+/// 清单属性 / Manifest attribute
+///
+/// 存储包文件的全局属性信息，包括版本、文件计数、数据位置等。
+/// Stores global attribute information for the pack file, including version, file counts, data positions, etc.
+#[derive(Debug, Clone)]
+pub struct Attribute {
+    /// binrw 属性 IO 数据（on-disk 字段）/ binrw attribute IO data (on-disk fields)
+    attr_data: AttributeData,
+    /// 数据块 / Data block
+    data_block: ManifestDataBlock,
+    /// 是否脏（未写入）/ Whether dirty (not yet written)
+    dirty: bool,
+}
+
+impl PartialEq for Attribute {
+    fn eq(&self, other: &Self) -> bool {
+        self.attr_data == other.attr_data && self.data_block == other.data_block
+    }
+}
+
+impl Default for Attribute {
+    fn default() -> Self {
+        Self {
+            attr_data: AttributeData::default(),
             data_block: ManifestDataBlock::default(),
             dirty: false,
         }
@@ -509,120 +528,120 @@ impl Attribute {
     /// 返回包文件的格式版本 / Returns the format version of the pack file
     #[must_use]
     pub fn version(&self) -> u16 {
-        self.version
+        self.attr_data.version
     }
 
     /// 返回包文件的最低兼容版本 / Returns the minimum compatible version
     #[must_use]
     pub fn version_compatible(&self) -> u16 {
-        self.version_compatible
+        self.attr_data.version_compatible
     }
 
     /// 返回是否启用写时复制 / Returns whether copy-on-write is enabled
     #[must_use]
     pub fn cow(&self) -> bool {
-        self.cow
+        self.attr_data.cow
     }
 
     /// 返回包中文件总数 / Returns total file count in the pack
     #[must_use]
     pub fn file_count(&self) -> u64 {
-        self.file_count
+        self.attr_data.file_count
     }
 
     /// 返回包中目录总数 / Returns total directory count in the pack
     #[must_use]
     pub fn dir_count(&self) -> u64 {
-        self.dir_count
+        self.attr_data.dir_count
     }
 
     /// 返回包中数据的总长度（字节）/ Returns total data length in the pack (bytes)
     #[must_use]
     pub fn data_len(&self) -> u64 {
-        self.data_len
+        self.attr_data.data_len
     }
 
     pub(crate) fn empty_data_pos_list_pos(&self) -> u64 {
-        self.empty_data_pos_list_pos
+        self.attr_data.empty_data_pos_list_pos
     }
 
     pub(crate) fn root_struct_pos(&self) -> u64 {
-        self.root_struct_pos
+        self.attr_data.root_struct_pos
     }
 
     pub(crate) fn manifest_empty_data_pos_list_pos(&self) -> u64 {
-        self.manifest_empty_data_pos_list_pos
+        self.attr_data.manifest_empty_data_pos_list_pos
     }
 
     pub(crate) fn manifest_file_len(&self) -> u64 {
-        self.manifest_file_len
+        self.attr_data.manifest_file_len
     }
 
     pub(crate) fn set_root_struct_pos(&mut self, pos: u64) {
-        self.root_struct_pos = pos;
+        self.attr_data.root_struct_pos = pos;
         self.dirty = true;
     }
 
     pub(crate) fn add_file_count(&mut self, delta: u64) {
-        self.file_count += delta;
+        self.attr_data.file_count += delta;
         self.dirty = true;
     }
 
     pub(crate) fn add_dir_count(&mut self, delta: u64) {
-        self.dir_count += delta;
+        self.attr_data.dir_count += delta;
         self.dirty = true;
     }
 
     pub(crate) fn add_data_len(&mut self, delta: u64) {
-        self.data_len += delta;
+        self.attr_data.data_len += delta;
         self.dirty = true;
     }
 
     pub(crate) fn sub_file_count(&mut self, delta: u64) {
-        self.file_count -= delta;
+        self.attr_data.file_count -= delta;
         self.dirty = true;
     }
 
     pub(crate) fn sub_dir_count(&mut self, delta: u64) {
-        self.dir_count -= delta;
+        self.attr_data.dir_count -= delta;
         self.dirty = true;
     }
 
     pub(crate) fn sub_data_len(&mut self, delta: u64) {
-        self.data_len -= delta;
+        self.attr_data.data_len -= delta;
         self.dirty = true;
     }
 
     pub(crate) fn set_empty_data_pos_list_pos(&mut self, pos: u64) {
-        self.empty_data_pos_list_pos = pos;
+        self.attr_data.empty_data_pos_list_pos = pos;
         self.dirty = true;
     }
 
     pub(crate) fn set_cow(&mut self, cow: bool) {
-        self.cow = cow;
+        self.attr_data.cow = cow;
         self.dirty = true;
     }
 
     #[cfg(test)]
     pub(crate) fn set_version(&mut self, version: u16) {
-        self.version = version;
+        self.attr_data.version = version;
         self.dirty = true;
     }
 
     #[cfg(test)]
     pub(crate) fn set_version_compatible(&mut self, version_compatible: u16) {
-        self.version_compatible = version_compatible;
+        self.attr_data.version_compatible = version_compatible;
         self.dirty = true;
     }
 
     pub(crate) fn set_manifest_empty_data_pos_list_pos(&mut self, pos: u64) {
-        self.manifest_empty_data_pos_list_pos = pos;
+        self.attr_data.manifest_empty_data_pos_list_pos = pos;
         self.dirty = true;
     }
 
     #[cfg(test)]
     pub(crate) fn set_manifest_file_len(&mut self, len: u64) {
-        self.manifest_file_len = len;
+        self.attr_data.manifest_file_len = len;
         self.dirty = true;
     }
 
@@ -630,18 +649,13 @@ impl Attribute {
         let data = data_block
             .get_this_data()
             .map_err(|err| PackFileError::Format(format!(r"无法获取属性数据, err: {err}")))?;
-        let version = u16::from_le_bytes(
-            data[..MANIFEST_ATTRIBUTE_VERSION_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let version_compatible = u16::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                ..MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_INDEX
-                    + MANIFEST_ATTRIBUTE_VERSION_COMPATIBLE_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
+        //AI=== 使用 binrw 解析负载 / Parse the payload with binrw
+        let mut cursor = std::io::Cursor::new(data);
+        let attr_data = AttributeData::read_le(&mut cursor)
+            .map_err(|err| PackFileError::Format(format!(r"属性数据格式错误, err: {err}")))?;
+        let version = attr_data.version;
+        let version_compatible = attr_data.version_compatible;
+        //AI_END===
         if version != MANIFEST_VERSION {
             if version < MANIFEST_VERSION_COMPATIBLE {
                 Err(PackFileError::Version("版本过低，无法解析".into()))?;
@@ -649,67 +663,9 @@ impl Attribute {
                 Err(PackFileError::Version("版本过高，无法解析".into()))?;
             }
         }
-        let bool_data = &data[MANIFEST_ATTRIBUTE_BOOL_DATA_INDEX];
-        let cow = (bool_data >> 7) == 1;
-        let empty_data_pos_list_pos = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX
-                ..MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_INDEX + MANIFEST_ATTRIBUTE_EMPTY_DATA_POS_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let manifest_empty_data_pos_list_pos = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-                ..MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_MANIFEST_EMPTY_DATA_POS_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let manifest_file_len = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
-                ..MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_INDEX
-                    + MANIFEST_ATTRIBUTE_MANIFEST_FILE_LEN_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let root_struct_pos = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                ..MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_INDEX
-                    + MANIFEST_ATTRIBUTE_ROOT_STRUCT_POS_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let file_count = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX
-                ..MANIFEST_ATTRIBUTE_FILE_COUNT_INDEX + MANIFEST_ATTRIBUTE_FILE_COUNT_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let dir_count = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX
-                ..MANIFEST_ATTRIBUTE_DIR_COUNT_INDEX + MANIFEST_ATTRIBUTE_DIR_COUNT_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        let data_len = u64::from_le_bytes(
-            data[MANIFEST_ATTRIBUTE_DATA_LEN_INDEX
-                ..MANIFEST_ATTRIBUTE_DATA_LEN_INDEX + MANIFEST_ATTRIBUTE_DATA_LEN_LEN]
-                .try_into()
-                .map_err(|_| PackFileError::Format("数据格式错误".into()))?,
-        );
-        Ok(Self {
-            version,
-            version_compatible,
-            cow,
-            file_count,
-            dir_count,
-            data_len,
-            empty_data_pos_list_pos,
-            manifest_empty_data_pos_list_pos,
-            manifest_file_len,
-            root_struct_pos,
-            data_block,
-            dirty: false,
-        })
+        //AI=== 由 IO 结构还原领域结构 / Rebuild the domain struct from the IO struct
+        Ok(attr_data.into_attribute(data_block))
+        //AI_END===
     }
 
     pub(crate) fn is_dirty(&self) -> bool {
@@ -723,42 +679,15 @@ impl Attribute {
 
 impl ManifestDataBlockTrait for Attribute {
     fn to_bytes_vec(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        for to_le_byte in self.version.to_le_bytes() {
-            data.push(to_le_byte);
+        //AI=== 通过 binrw 序列化（与 load 互为逆操作）/ Serialize via binrw (inverse of load)
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        match self.attr_data.write_le(&mut cursor) {
+            Ok(()) => cursor.into_inner(),
+            // 写入内存 Vec 缓冲区不会失败：Vec<u8> 的 Write 实现是惰性的
+            // Writing to an in-memory Vec cannot fail: Vec<u8>'s Write impl is infallible
+            Err(err) => unreachable!("binrw 写入属性数据到内存失败: {err}"),
         }
-        for to_le_byte in self.version_compatible.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        let mut bool_data = 0;
-        if self.cow {
-            bool_data |= 0b1000_0000;
-        }
-        data.push(bool_data);
-        for to_le_byte in self.empty_data_pos_list_pos.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.manifest_empty_data_pos_list_pos.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.manifest_file_len.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.root_struct_pos.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.file_count.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.dir_count.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        for to_le_byte in self.data_len.to_le_bytes() {
-            data.push(to_le_byte);
-        }
-        #[cfg(test)]
-        assert!(!data.is_empty(), "输出数据为空，但不能为空");
-        data
+        //AI_END===
     }
 
     fn data_block_mut(&mut self) -> &mut ManifestDataBlock {
