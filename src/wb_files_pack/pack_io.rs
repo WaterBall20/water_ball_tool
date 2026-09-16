@@ -1,4 +1,5 @@
 use crate::tools;
+use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
     DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN,
@@ -219,10 +220,10 @@ impl PackIO /*核心*/ {
         max_seg: usize,
     ) -> Result<Vec<(u64, u64)>> {
         //块对齐
-        let length = if length.is_multiple_of(DATA_DATA_BLOCK_LEN) {
+        let length = if length.is_multiple_of(DATA_DATA_BLOCK_LEN_U64) {
             length
         } else {
-            (length / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN
+            (length / DATA_DATA_BLOCK_LEN_U64 + 1) * DATA_DATA_BLOCK_LEN_U64
         };
         let seg_budget = max_seg.saturating_sub(current_seg);
         if seg_budget == 0 {

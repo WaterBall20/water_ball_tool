@@ -40,8 +40,9 @@ const DATA_POS_LIST_ITEM_LEN: usize = DATA_POS_LIST_ITEM_POS_LEN + DATA_POS_LIST
 //数据块大小
 pub(crate) const DATA_BLOCK_LEN: usize = 128;
 
-pub(crate) const DATA_DATA_BLOCK_LEN: u64 = 4 * 1024 * 1024;
+pub(crate) const DATA_DATA_BLOCK_LEN: usize = 4 * 1024 * 1024;
 
+pub(crate) const DATA_DATA_BLOCK_LEN_U64: u64 = DATA_DATA_BLOCK_LEN as u64;
 /// 虚拟文件数据段数上限：碎片拼接分配时的最大段数，防止拼接碎片过多
 /// 导致 metadata/.wbm 清单膨胀；超过上限时拒绝分配。
 /// Max data segments per virtual file: caps fragment-stitching so metadata
@@ -121,7 +122,7 @@ impl ManifestDataBlock {
             let data_len = data.len() as u64;
             let hash_value = Self::get_hash(&block_data)?.to_vec();
             //进行数据校验
-            if !Self::data_hash_v(data, &hash_value){
+            if !Self::data_hash_v(data, &hash_value) {
                 Err(PackFileError::Format("哈希校验不通过".into()))?;
             }
             Ok(Self {

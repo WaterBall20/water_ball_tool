@@ -355,7 +355,7 @@ impl WaterBallFilePackArgsRuning {
                 let thread_count = thread::available_parallelism()
                     .unwrap_or(NonZero::new(8).unwrap())
                     .get();
-                info!("未指定线程数量，将使用{thread_count}线程");
+                info!("未指定线程数量，将最多使用{thread_count}个线程");
                 thread_count
             };
 
@@ -932,9 +932,11 @@ impl WaterBallFilePackArgsRuning {
             out
         };
         let thread_count = args.thread_count.unwrap_or_else(|| {
-            thread::available_parallelism()
+            let r = thread::available_parallelism()
                 .unwrap_or(NonZero::new(8).unwrap())
-                .get()
+                .get();
+            info!("未指定线程数量，将最多使用{r}个线程");
+            r
         });
 
         info!("开始准备解包");
@@ -1342,9 +1344,11 @@ impl WaterBallFilePackArgsRuning {
 
         let pack_path = &args.pack_path;
         let thread_count = args.thread_count.unwrap_or_else(|| {
-            thread::available_parallelism()
+            let r = thread::available_parallelism()
                 .unwrap_or(NonZero::new(8).unwrap())
-                .get()
+                .get();
+            info!("未指定线程数量，将最多使用{r}个线程");
+            r
         });
 
         info!("开始准备哈希校验");

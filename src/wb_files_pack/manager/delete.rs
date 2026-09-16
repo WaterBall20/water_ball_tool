@@ -1,7 +1,8 @@
+use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    ManifestDataBlockTrait, OverwriteStrategy, PackFileMetadataRun, PackFileMetadataType,
-    PackStruct, PackStructItemType,
+    DATA_DATA_BLOCK_LEN, ManifestDataBlockTrait, OverwriteStrategy, PackFileMetadataRun,
+    PackFileMetadataType, PackStruct, PackStructItemType,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,11 +54,7 @@ impl WBFPManager {
     ///
     /// Before deletion, overwrites the file's data blocks and metadata block
     /// using the specified strategy, ensuring data is unrecoverable.
-    pub fn erase_file(
-        &mut self,
-        path_list: &[String],
-        strategy: OverwriteStrategy,
-    ) -> Result<()> {
+    pub fn erase_file(&mut self, path_list: &[String], strategy: OverwriteStrategy) -> Result<()> {
         if path_list.is_empty() {
             return Err(PackFileError::Other(
                 "不能删除根目录 / Cannot delete root directory".into(),
@@ -1317,33 +1314,61 @@ impl WBFPManager {
         let len_us = usize::try_from(len).map_err(|e| {
             PackFileError::Other(format!("无法将len的u64的数字转为usize, err: {e}"))
         })?;
-        let mut buf = vec![0u8; len_us];
+        let mut buf = vec![0u8; DATA_DATA_BLOCK_LEN];
+        let mut write_len = 0;
 
         match strategy {
             OverwriteStrategy::Zero => {
-                Self::fill_zero(&mut buf);
-                pack_file.set_pos_write(pos)?;
-                pack_file.write_all(&buf)?;
+                while write_len < len_us {
+                    let this_write_len = if (len_us - write_len) < buf.len() {
+                        len_us - write_len
+                    } else {
+                        buf.len()
+                    };
+                    let mut buf = &mut buf[..this_write_len];
+                    Self::fill_zero(&mut buf);
+                    pack_file.set_pos_write(pos + write_len as u64)?;
+                    pack_file.write_all(&buf)?;
+                    write_len += this_write_len;
+                }
             }
             OverwriteStrategy::Random => {
-                Self::fill_random(&mut buf);
-                pack_file.set_pos_write(pos)?;
-                pack_file.write_all(&buf)?;
+                while write_len < len_us {
+                    let this_write_len = if (len_us - write_len) < buf.len() {
+                        len_us - write_len
+                    } else {
+                        buf.len()
+                    };
+                    let mut buf = &mut buf[..this_write_len];
+                    Self::fill_random(&mut buf);
+                    pack_file.set_pos_write(pos)?;
+                    pack_file.write_all(&buf)?;
+                    write_len += this_write_len;
+                }
             }
             OverwriteStrategy::Dod5220 => {
-                // DoD 5220.22-M: 三次独立磁盘覆写 / Three independent disk overwrites
-                // Pass 1: 全 0x00 → 磁盘 / All zeros → disk
-                Self::fill_zero(&mut buf);
-                pack_file.set_pos_write(pos)?;
-                pack_file.write_all(&buf)?;
-                // Pass 2: 全 0xFF → 磁盘 / All ones → disk
-                Self::fill_ones(&mut buf);
-                pack_file.set_pos_write(pos)?;
-                pack_file.write_all(&buf)?;
-                // Pass 3: 随机字节 → 磁盘 / Random bytes → disk
-                Self::fill_random(&mut buf);
-                pack_file.set_pos_write(pos)?;
-                pack_file.write_all(&buf)?;
+                while write_len < len_us {
+                    let this_write_len = if (len_us - write_len) < buf.len() {
+                        len_us - write_len
+                    } else {
+                        buf.len()
+                    };
+                    let mut buf = &mut buf[..this_write_len];
+                    // DoD 5220.22-M: 三次独立磁盘覆写 / Three independent disk overwrites
+                    // Pass 1: 全 0x00 → 磁盘 / All zeros → disk
+                    Self::fill_zero(&mut buf);
+                    pack_file.set_pos_write(pos)?;
+                    pack_file.write_all(&buf)?;
+                    // Pass 2: 全 0xFF → 磁盘 / All ones → disk
+                    Self::fill_ones(&mut buf);
+                    pack_file.set_pos_write(pos)?;
+                    pack_file.write_all(&buf)?;
+                    // Pass 3: 随机字节 → 磁盘 / Random bytes → disk
+                    Self::fill_random(&mut buf);
+                    pack_file.set_pos_write(pos)?;
+                    pack_file.write_all(&buf)?;
+                    write_len += this_write_len;
+                }
             }
         }
 
@@ -1397,9 +1422,8 @@ impl WBFPManager {
     }
 
     fn fill_random(buf: &mut [u8]) {
-        for chunk in buf.chunks_mut(4096) {
-            let random_bytes: Vec<u8> = (0..chunk.len()).map(|_| rand::random::<u8>()).collect();
-            chunk.copy_from_slice(&random_bytes);
+        for chunk in buf {
+            *chunk = rand::random::<u8>();
         }
     }
 }

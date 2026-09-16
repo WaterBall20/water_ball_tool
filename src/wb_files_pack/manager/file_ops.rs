@@ -1,4 +1,5 @@
 use crate::tools::PathTool;
+use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::DEFAULT_HASH_TYPE;
 use crate::wb_files_pack::{
@@ -23,7 +24,7 @@ impl WBFPManager {
         path: P,
         alloc_size: Option<u64>,
     ) -> Result<(Vec<String>, PackFileMetadata)> {
-        let alloc_len = alloc_size.unwrap_or(DATA_DATA_BLOCK_LEN);
+        let alloc_len = alloc_size.unwrap_or(DATA_DATA_BLOCK_LEN_U64);
         self.create_file_raw(
             path,
             if let Ok(d) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {

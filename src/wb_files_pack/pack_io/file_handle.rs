@@ -1,3 +1,4 @@
+use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 /*
 开始时间：2026/06/26 08:42
 */
@@ -507,7 +508,7 @@ impl PackFileHandle {
         let total_cap: u64 = pos_s.iter().map(|&(_, len)| len).sum();
         if total_cap < buf.len() as u64 {
             let data_len = buf.len() as u64;
-            let add_running_len = (data_len / DATA_DATA_BLOCK_LEN + 1) * DATA_DATA_BLOCK_LEN;
+            let add_running_len = (data_len / DATA_DATA_BLOCK_LEN_U64 + 1) * DATA_DATA_BLOCK_LEN_U64;
             self.add_running_len(add_running_len)?; //警告：此处调用pack_io，必须提前调用，顺序错误将导致死锁。
             pos_s = self.get_add_pos_list2(buf.len() as u64, false)?;
             #[cfg(test)]
