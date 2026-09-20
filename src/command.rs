@@ -63,7 +63,7 @@ fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
 
 pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Commands::Ff(ff) => ff::ff(ff, mp),
-        Commands::Wbfp(wbfp) => wbfp::wbfp(&wbfp, mp),
+        Commands::Ff(args) => ff::args(args, mp),
+        Commands::Wbfp(commands) => wbfp::commands(commands, mp),
     }
 }

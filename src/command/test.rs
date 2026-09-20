@@ -35,7 +35,7 @@ fn ff_out_file_skip_symlink() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_file_path = out_dir_path.join("out.json");
     _ = fs::remove_file(&out_file_path);
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             fixture_str,
             Some(
@@ -46,12 +46,12 @@ fn ff_out_file_skip_symlink() -> Result<(), Box<dyn std::error::Error>> {
             ),
             true,
             None,
+            None,
         ),
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 /// ff：输出文件 / ff: output file
@@ -69,7 +69,7 @@ fn ff_out_file() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_file_path = out_dir_path.join("out.json");
     _ = fs::remove_file(&out_file_path);
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             fixture_str,
             Some(
@@ -80,12 +80,12 @@ fn ff_out_file() -> Result<(), Box<dyn std::error::Error>> {
             ),
             false,
             None,
+            None,
         ),
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 /// ff：大规模随机文件搜索测试 / ff: large-scale random file search test
@@ -104,7 +104,7 @@ fn ff_out_file_longtime() -> Result<(), Box<dyn std::error::Error>> {
     let out_file_path = out_dir_path.join("out.json");
     _ = fs::remove_file(&out_file_path);
 
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             fixture_str,
             Some(
@@ -115,12 +115,12 @@ fn ff_out_file_longtime() -> Result<(), Box<dyn std::error::Error>> {
             ),
             false,
             None,
+            None,
         ),
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -136,13 +136,12 @@ fn ff_no_out_file() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = get_small_fixture("ff_no_out_file");
     // ===== TEST-ONLY RESOURCE GENERATION: END =====
     let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
-    let r = ff(
-        FileFinderArgs::new(fixture_str, None, false, None),
+    let r = args(
+        FileFinderArgs::new(fixture_str, None, false, None, None),
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&no_out_dir)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&no_out_dir).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -166,8 +165,8 @@ fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
-    let r = wbfp(
-        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+    let r = commands(
+        WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 fixture_str,
                 Some(out_file_path.clone()),
@@ -179,8 +178,7 @@ fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 /// wbfp：大规模随机文件打包+校验+解包 / wbfp: large-scale random file pack+verify+unpack
@@ -189,7 +187,8 @@ fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
 fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> {
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
-    let out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH) + "/wbfp_pack_verify_unpack_longtime";
+    let out_dir_path =
+        String::from(WBFP_TEST_TEMP_OK_DIR_PATH) + "/wbfp_pack_verify_unpack_longtime";
     prepare_test_dir(Path::new(&out_dir_path));
 
     let fixture = create_large_fixture("wbfp_pack_verify_unpack_longtime");
@@ -197,8 +196,8 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
 
     // Step 1: 打包 / Pack
     let r = || -> Result<(), Box<dyn std::error::Error>> {
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                 WaterBallFilePackCommandsPack::new(
                     fixture.to_str().expect("转换夹具路径失败").to_string(),
                     Some(pack_path.clone()),
@@ -212,9 +211,9 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
 
         // Step 2: 哈希校验 / Hash verify
         let wbfp_path = pack_path.clone() + ".wbfp";
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
-                WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone(),false),
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
+                WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone(), false),
             )),
             Some(&mp),
         )?;
@@ -222,8 +221,8 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
         // Step 3: 解包 / Unpack
         let unpack_dir = out_dir_path.clone() + "/unpacked";
         _ = fs::create_dir_all(&unpack_dir);
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                 WaterBallFilePackCommandsUnpack::new(
                     wbfp_path.clone(),
                     Some(unpack_dir),
@@ -238,8 +237,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
 
     // 清理 / Cleanup
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -259,8 +257,8 @@ fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Err
 
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
-    let r = wbfp(
-        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+    let r = commands(
+        WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 fixture_str,
                 Some(out_file_path.clone()),
@@ -272,8 +270,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Err
         Some(&mp),
     );
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -300,8 +297,8 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
     let r = || -> Result<(), Box<dyn std::error::Error>> {
         //前提：打包
         {
-            wbfp(
-                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+            commands(
+                WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                     WaterBallFilePackCommandsPack::new(
                         fixture_str,
                         Some(out_file_path.clone()),
@@ -316,8 +313,8 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         out_file_path.push_str(".wbfp");
         //哈希校验（仅需包路径）
         {
-            wbfp(
-                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
+            commands(
+                WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
                     WaterBallFilePackCommandsHashVerify::new(out_file_path.clone(), false),
                 )),
                 Some(&mp),
@@ -327,8 +324,8 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         {
             let mut s_out_path = out_dir_path.clone();
             s_out_path.push_str("/s");
-            wbfp(
-                &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+            commands(
+                WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                     WaterBallFilePackCommandsUnpack::new(
                         out_file_path.clone(),
                         Some(s_out_path),
@@ -342,8 +339,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
         Ok(())
     }();
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -420,8 +416,8 @@ fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
     out_file_path.push_str("/pack");
     let r = || -> Result<(), Box<dyn std::error::Error>> {
         //打包
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                 WaterBallFilePackCommandsPack::new(
                     fixture_str,
                     Some(out_file_path.clone()),
@@ -439,8 +435,8 @@ fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
         //解包（hash_verify = true：校验失败的文件被跳过）
         let mut s_out_path = out_dir_path.clone();
         s_out_path.push_str("/s");
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                 WaterBallFilePackCommandsUnpack::new(
                     out_file_path.clone(),
                     Some(s_out_path.clone()),
@@ -467,8 +463,7 @@ fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     }();
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -492,8 +487,8 @@ fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>
     out_file_path.push_str("/pack");
     let r = || -> Result<(), Box<dyn std::error::Error>> {
         //打包
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
                 WaterBallFilePackCommandsPack::new(
                     fixture_str,
                     Some(out_file_path.clone()),
@@ -510,8 +505,8 @@ fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>
         //解包（hash_verify = false）
         let mut s_out_path = out_dir_path.clone();
         s_out_path.push_str("/s");
-        wbfp(
-            &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
+        commands(
+            WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
                 WaterBallFilePackCommandsUnpack::new(
                     out_file_path.clone(),
                     Some(s_out_path.clone()),
@@ -532,8 +527,7 @@ fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>
         Ok(())
     }();
     r?;
-    fs::remove_dir_all(&out_dir_path)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -556,7 +550,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
     // 断言失败时测试 panic，跳过清理以保留证据
     let r = std::panic::catch_unwind(|| {
         //命令行参数处理
-        ff(
+        args(
             FileFinderArgs::new(
                 "/~".to_string(),
                 Some(
@@ -566,6 +560,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
                         .to_string(),
                 ),
                 true,
+                None,
                 None,
             ),
             Some(&mp),
@@ -586,8 +581,8 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
     let mut out_file_path = out_dir_path.clone();
     out_file_path.push_str("/pack");
     //命令行参数处理
-    let result = wbfp(
-        &WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
+    let result = commands(
+        WaterBallFilePackCommand::new(WaterBallFilePackCommands::Pack(
             WaterBallFilePackCommandsPack::new(
                 "/~".to_string(),
                 Some(out_file_path.clone()),
@@ -605,10 +600,10 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
 
 // === 符号链接循环检测 / Symlink cycle detection ===
 
-use crate::command::ff::{FileFinderArgs, ff};
+use crate::command::ff::{FileFinderArgs, args};
 use crate::command::wbfp::{
     WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsHashVerify,
-    WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack, wbfp,
+    WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack, commands,
 };
 use std::io;
 use std::io::{Read, Seek, Write};
@@ -727,7 +722,9 @@ fn create_large_fixture(name: &str) -> PathBuf {
 /// Returns `resources/test/command/ok/{name}/fixture`; after generation it is
 /// reused as a read-only resource across runs, never rebuilt per test run.
 fn get_small_fixture(name: &str) -> PathBuf {
-    let dir = PathBuf::from(SMALL_FIXTURE_RESOURCE_DIR).join(name).join("fixture");
+    let dir = PathBuf::from(SMALL_FIXTURE_RESOURCE_DIR)
+        .join(name)
+        .join("fixture");
     // 固定内容夹具：3 子目录 × 5 文件 = 15 文件 "content_{i}_{j}\n"。
     // 仅资源缺失时生成（首次运行），生成后即作为只读资源复用；
     // 资源生成的作用域以调用方测试函数内的 TEST-ONLY 分界标注。
@@ -759,7 +756,7 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             root.to_str()
                 .expect("转换根目录路径为字符串失败")
@@ -772,6 +769,7 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
             ),
             false,
             None,
+            None,
         ),
         Some(&mp),
     );
@@ -782,8 +780,7 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
     assert!(file_count >= 1, "JSON 输出应包含文件");
 
     r?;
-    fs::remove_dir_all(&root)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&root).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -802,7 +799,7 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
 
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             root.to_str()
                 .expect("转换根目录路径为字符串失败")
@@ -815,6 +812,7 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
             ),
             true,
             None,
+            None,
         ),
         Some(&mp),
     );
@@ -825,8 +823,7 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(file_count, 1, "跳过符号链接后应只有 1 个真实文件");
 
     r?;
-    fs::remove_dir_all(&root)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&root).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -845,7 +842,7 @@ fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>
     let mp = MultiProgress::new();
     crate::init_global_logging(&mp);
 
-    let r = ff(
+    let r = args(
         FileFinderArgs::new(
             root.to_str()
                 .expect("转换根目录路径为字符串失败")
@@ -853,12 +850,12 @@ fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>
             None,
             false,
             None,
+            None,
         ),
         Some(&mp),
     );
 
     r?;
-    fs::remove_dir_all(&root)
-        .map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    fs::remove_dir_all(&root).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }

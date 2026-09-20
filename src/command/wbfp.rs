@@ -29,7 +29,7 @@ use water_ball_tool::wb_files_pack::manager_sync::ManagerSync;
 use water_ball_tool::wb_files_pack::{PackFileError, PackStructItemType};
 type ArcMutex<T> = Arc<Mutex<T>>;
 
-/// wbfp 命令参数 / wbfp command arguments
+/// 水球包文件操作
 #[derive(Args, Debug)]
 pub(crate) struct WaterBallFilePackCommand {
     #[command(subcommand)]
@@ -149,8 +149,8 @@ impl WaterBallFilePackCommandsHashVerify {
 /// wbfp command router. Dispatches to the appropriate execution function
 /// based on the subcommand. Each function handles its own progress bars
 /// and multi-threading logic independently.
-pub fn wbfp(
-    args: &WaterBallFilePackCommand,
+pub fn commands(
+    args: WaterBallFilePackCommand,
     mp: Option<&MultiProgress>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let args2 = &args.commands;
@@ -314,7 +314,7 @@ impl WaterBallFilePackArgsRuning {
                 file_name.clone(),
                 file_metadata.len(),
                 FileFinder::get_file_modified(&file_metadata),
-                FileKind::File,
+                FileKind::File { hash: None },
             );
             let mut run_buf = vec![0u8; 1024 * 1024];
             let mut write_len = 0;
@@ -465,7 +465,7 @@ impl WaterBallFilePackArgsRuning {
                     match event {
                         SearchEvent::Entry(path, info) => {
                             //只有文件才会加入队列
-                            if let FileKind::File = info.file_kind() {
+                            if let FileKind::File { .. } = info.file_kind() {
                                 *data_len.lock().unwrap() += info.length();
                                 results.lock().unwrap().push_back((path, info));
                                 condver.notify_one();
@@ -885,7 +885,7 @@ impl WaterBallFilePackArgsRuning {
                     );
                     break;
                 }
-            }
+            } 
         }
     }
 
@@ -965,8 +965,7 @@ impl WaterBallFilePackArgsRuning {
 
         // 统一工作队列 + 终止控制
         // Unified work queue + termination control
-        let queue: Arc<(Mutex<VecDeque<PathBuf>>, Condvar)> =
-            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
         let all_done = Arc::new(AtomicBool::new(false));
         {
@@ -1490,7 +1489,7 @@ impl WaterBallFilePackArgsRuning {
         }
 
         for h in handles {
-            h.join().unwrap()?;
+            h.join().expect("等待线程发生错误")?;
         }
 
         Ok(())
