@@ -25,6 +25,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
+use serde;
 use serde::{Deserialize, Serialize};
 
 // === 平台相关的 inode 标识 / Platform-specific inode key ===
@@ -186,6 +187,7 @@ impl FileInfo {
 
     /// 创建一个新的 `FileInfo` 实例（搜索器内部使用）。
     /// Creates a new `FileInfo` instance (used internally by the search engine).
+    #[must_use]
     pub fn new(name: String, length: u64, modified_time: u128, file_kind: FileKind) -> Self {
         Self {
             name,
@@ -239,7 +241,10 @@ impl Dir {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum FileKind {
     /// 普通文件 / Regular file
-    File,
+    File {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hash: Option<HashMap<String, String>>,
+    },
     /// 目录 / Directory
     Dir(Dir),
 }
@@ -387,7 +392,7 @@ impl FileFinder {
             file_count: u64,
             dir_count: u64,
         }
-        
+
         let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for path in flat.keys() {
             if let Some(parent) = path.parent() {
@@ -398,7 +403,6 @@ impl FileFinder {
             }
         }
 
-    
         // 初始栈：根目录 / Initial stack: root directory
         let mut stack = vec![Fr {
             st: St::Pre,
@@ -420,7 +424,7 @@ impl FileFinder {
                         for child in children {
                             if let Some(info) = flat.get(child) {
                                 match info.file_kind() {
-                                    FileKind::File => {
+                                    FileKind::File { .. } => {
                                         let name = child
                                             .file_name()
                                             .and_then(|n| n.to_str())
@@ -492,16 +496,16 @@ impl FileFinder {
                     parent.dir_count += 1 + fr.dir_count;
                     parent.files.insert(
                         dir_name.clone(),
-                        FileInfo::new(
-                            dir_name,
-                            fr.total_len,
+                        FileInfo {
+                            name: dir_name,
+                            length: fr.total_len,
                             modified_time,
-                            FileKind::Dir(Dir {
+                            file_kind: FileKind::Dir(Dir {
                                 files_list: fr.files,
                                 file_count: fr.file_count,
                                 dir_count: fr.dir_count,
                             }),
-                        ),
+                        },
                     );
                 }
             }
@@ -666,7 +670,7 @@ impl FileFinder {
                 name: name.to_string(),
                 length: len,
                 modified_time,
-                file_kind: FileKind::File,
+                file_kind: FileKind::File { hash: None },
             };
 
             // 流式发送：先发送再插入结果集，避免在持锁期间发送
@@ -702,7 +706,9 @@ impl FileFinder {
             tx.send(SearchEvent::Warning(warning.clone())).ok();
         }
         if let Some(w) = warnings {
-            w.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(warning);
+            w.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(warning);
         }
     }
 
@@ -732,13 +738,17 @@ impl FileFinder {
         condver: Arc<Condvar>,
     ) {
         let fn_running_count_add = || -> i32 {
-            let mut lock = running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut lock = running_count
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *lock += 1;
             *lock
         };
 
         let fn_running_count_sub = || -> i32 {
-            let mut lock = running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut lock = running_count
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *lock -= 1;
             *lock
         };
@@ -749,7 +759,9 @@ impl FileFinder {
         fn_running_count_add();
         'worker: loop {
             let entry = {
-                let mut queue = dir_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut queue = dir_queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 queue.pop_front()
             };
 
@@ -757,7 +769,9 @@ impl FileFinder {
                 d
             } else {
                 //如果是空的
-                let mut dir_queue = dir_queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut dir_queue = dir_queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 //当前线程计数
                 let this_running_count = fn_running_count_sub();
                 if this_running_count == 0 {
@@ -766,7 +780,9 @@ impl FileFinder {
                     break;
                 }
                 loop {
-                    dir_queue = condver.wait(dir_queue).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    dir_queue = condver
+                        .wait(dir_queue)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match dir_queue.pop_front() {
                         Some(d) => {
                             //添加线程计数
@@ -775,7 +791,11 @@ impl FileFinder {
                         }
                         None => {
                             //如果队列是空的，且运行中的线程数为0
-                            if *running_count.lock().unwrap_or_else(std::sync::PoisonError::into_inner) == 0 {
+                            if *running_count
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                == 0
+                            {
                                 break 'worker;
                             }
                         }
@@ -785,33 +805,37 @@ impl FileFinder {
 
             let rd = match entry.path.read_dir() {
                 Ok(rd) => rd,
-                Err(err) => if err.kind() == ErrorKind::PermissionDenied {
-                    Self::emit_warning(
-                        SearchWarning {
-                            path: entry.path.clone(),
-                            warning_type: SearchWarningType::PermissionDenied,
-                        },
-                        stream_tx.as_ref(),
-                        warnings.as_ref(),
-                    );
-                    continue;
-                } else {
-                    Self::emit_warning(
-                        SearchWarning {
-                            path: entry.path.clone(),
-                            warning_type: SearchWarningType::ReadDirError(err.to_string()),
-                        },
-                        stream_tx.as_ref(),
-                        warnings.as_ref(),
-                    );
-                    continue;
-                },
+                Err(err) => {
+                    if err.kind() == ErrorKind::PermissionDenied {
+                        Self::emit_warning(
+                            SearchWarning {
+                                path: entry.path.clone(),
+                                warning_type: SearchWarningType::PermissionDenied,
+                            },
+                            stream_tx.as_ref(),
+                            warnings.as_ref(),
+                        );
+                        continue;
+                    } else {
+                        Self::emit_warning(
+                            SearchWarning {
+                                path: entry.path.clone(),
+                                warning_type: SearchWarningType::ReadDirError(err.to_string()),
+                            },
+                            stream_tx.as_ref(),
+                            warnings.as_ref(),
+                        );
+                        continue;
+                    }
+                }
             };
 
             for dir_entry in rd.flatten() {
                 let path_buf = dir_entry.path();
 
-                let metadata = if let Ok(m) = path_buf.symlink_metadata() { m } else {
+                let metadata = if let Ok(m) = path_buf.symlink_metadata() {
+                    m
+                } else {
                     Self::emit_warning(
                         SearchWarning {
                             path: path_buf,

@@ -325,7 +325,7 @@ fn search_stream_receives_all_entries() {
 
     let file_entry_count = entries
         .iter()
-        .filter(|(_, i)| matches!(i.file_kind(), FileKind::File))
+        .filter(|(_, i)| matches!(i.file_kind(), FileKind::File { hash: None }))
         .count();
     assert_eq!(file_entry_count, 3, "应收到 3 个文件条目");
 

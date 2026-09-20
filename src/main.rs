@@ -13,6 +13,7 @@ use clap::Parser;
 use indicatif::MultiProgress;
 use std::io;
 use std::io::Write;
+use std::process::exit;
 use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -29,6 +30,7 @@ fn main() {
     let result = command::cli(cli, Option::from(&mp));
     if let Err(err) = result {
         error!("运行时发生错误， err: {}", err);
+        exit(-1)
     }
 }
 
