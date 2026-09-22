@@ -1,4 +1,3 @@
-use crate::command::ff::HashType::BLAKE3;
 use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb};
 use clap::error::Result;
 use clap::{Args, ValueEnum};
@@ -602,4 +601,63 @@ fn hash_work(
             } */
         }
     }));
+}
+
+fn hash(mp: Option<&MultiProgress>, thread_count: usize, all_file_count: Arc<AtomicU64>) {
+    // 总进度条 / Main progress bar
+    let main_pb = create_pb(mp);
+    if let Some(pb) = &main_pb {
+        pb.set_length(0);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                .unwrap()
+                .progress_chars("=>-"),
+        );
+        pb.set_prefix("哈希计算总进度");
+    }
+
+    // 创建子线程进度条 / Create per-worker progress bars
+    let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
+    for i in 0..thread_count {
+        let pb = create_pb(mp);
+        if let Some(pb) = &pb {
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            pb.set_prefix(format!("线程{i}"));
+        }
+        worker_pbs.push(pb);
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let mut handles = Vec::with_capacity(thread_count);
+
+    // 主线程：汇总进度条 / Main thread: aggregate progress
+    let mut written_len = 0u64;
+    let mut file_count = 0u64;
+    let mut last_pb_update_len = 0u64;
+
+    for bytes_written in rx {
+        written_len += bytes_written;
+        file_count += 1;
+
+        if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
+            if let Some(pb) = &main_pb {
+                pb.set_position(written_len);
+                pb.set_message(format!(
+                    "[{file_count}/{}个文件]",
+                    all_file_count.load(Ordering::SeqCst)
+                ));
+            }
+            last_pb_update_len = written_len;
+        }
+    }
+
+    for h in handles {
+        h.join().unwrap()?;
+    }
 }
