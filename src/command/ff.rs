@@ -213,15 +213,21 @@ pub(crate) fn search_files(
     let (ff_thread, event_rx) = ff.search_stream(path, skip_symlink, tx, thread_count)?;
 
     //获取结果线程
-    let mut results = HashMap::<PathBuf, FileInfo>::new();
+    let mut results = Arc::new(Mutex::new(HashMap::new()));
     let ff_r_thread = {
         let hash_type = hash_type.clone();
+        let file_count = file_count.clone();
+        let queue = queue.clone();
+        let results = results.clone();
         thread::spawn(move || {
             for event in event_rx {
                 match event {
                     SearchEvent::Entry(p, i) => match i.file_kind() {
                         FileKind::Dir(_) => {
-                            results.insert(p, i);
+                            results
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(p, i);
                         }
                         FileKind::File { .. } => {
                             if hash_type.is_some() {
@@ -234,7 +240,10 @@ pub(crate) fn search_files(
                                     .push_back((p, i));
                                 queue.1.notify_one();
                             } else {
-                                results.insert(p, i);
+                                results
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(p, i);
                             }
                         }
                     },
@@ -263,10 +272,6 @@ pub(crate) fn search_files(
             results
         })
     };
-
-    //哈希计算线程
-    if let Some(hash_type) = hash_type {}
-
     let ff_info_thread = thread::spawn(move || {
         let mut file_count = 0;
         let mut dir_count = 0;
@@ -283,16 +288,34 @@ pub(crate) fn search_files(
             }
         }
     });
+
+
+    //哈希计算
+    if let Some(hash_type) = hash_type {
+        hash(
+            &queue,
+            &search_end,
+            mp,
+            thread_count,
+            file_count.clone(),
+            hash_type,
+            results.clone(),
+        );
+    }
     ff_info_thread
         .join()
         .map_err(|e| io::Error::other(format!("搜索信息线程发生错误: {e:?}")))?;
+   
     ff_thread
         .join()
         .map_err(|e| io::Error::other(format!("搜索时发生错误: {e:?}")))??;
     let r = ff_r_thread
         .join()
         .map_err(|e| io::Error::other(format!("获取搜索结果时发生错误: {e:?}")))?;
-    Ok(FileFinder::build_tree(&r, path.as_ref()))
+    Ok(FileFinder::build_tree(
+        &r.lock().unwrap_or_else(|e| e.into_inner()),
+        path.as_ref(),
+    ))
 }
 
 fn hash(
@@ -302,6 +325,7 @@ fn hash(
     thread_count: usize,
     all_file_count: Arc<AtomicU64>,
     hash_type: HashTypeS,
+    results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
 ) -> Result<(), Box<dyn error::Error>> {
     // 总进度条 / Main progress bar
     let main_pb = create_pb(mp);
@@ -435,12 +459,6 @@ fn hash_work(
                 None
             }; */
 
-            let mut hash_write = |buf| {
-                if let Some(b3) = &mut blake3 {
-                    b3.update(buf);
-                }
-            };
-
             //尝试打开文件
             let mut in_file = match File::open(&path) {
                 Ok(file) => file,
@@ -474,7 +492,10 @@ fn hash_work(
                         break;
                     }
                     Ok(this_read_len) => {
-                        hash_write(&read_buf[..this_read_len]);
+                        let data = &read_buf[..this_read_len];
+                        if let Some(b3) = &mut blake3 {
+                            b3.update(data);
+                        }
                         read_len += this_read_len as u64;
                     }
                     Err(err) => {
