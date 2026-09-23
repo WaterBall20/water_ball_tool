@@ -2,9 +2,14 @@ use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, cr
 use clap::error::Result;
 use clap::{Args, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use md5::Md5;
+use md5::digest::FixedOutputReset;
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write};
+use std::mem::replace;
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -59,72 +64,211 @@ pub(crate) enum HashType {
     #[value(alias = "*")]
     All,
     #[value(alias = "m5")]
-    MD5,
+    Md5,
     #[value(alias = "s256")]
-    SHA256,
+    Sha256,
     #[value(alias = "s512")]
-    SHA512,
+    Sha512,
     #[value(alias = "s1")]
-    SHA1,
+    Sha1,
     #[value(alias = "b3")]
-    BLAKE3,
+    Blake3,
     #[value(alias = "b2b")]
-    BLAKE2b,
+    Blake2b,
     #[value(alias = "crc")]
-    CRC32,
+    Crc32,
 }
 
 #[derive(Clone)]
 struct HashTypeS {
-    md5: bool,
-    sha256: bool,
-    sha512: bool,
-    sha1: bool,
-    blake3: bool,
-    blake2b: bool,
-    crc32: bool,
+    sha256: Option<Sha256>,
+    sha512: Option<Sha512>,
+    blake3: Option<blake3::Hasher>,
+    blake2b: Option<blake2b_simd::State>,
+    crc32: Option<crc32fast::Hasher>,
+    sha1: Option<Sha1>,
+    md5: Option<Md5>,
 }
 
 impl HashTypeS {
     fn new(hash_list: &[HashType]) -> Self {
         let mut this = Self {
-            md5: false,
-            sha256: false,
-            sha512: false,
-            sha1: false,
-            blake3: false,
-            blake2b: false,
-            crc32: false,
+            sha256: None,
+            sha512: None,
+            blake3: None,
+            blake2b: None,
+            crc32: None,
+            sha1: None,
+            md5: None,
         };
         for i in hash_list {
             match i {
                 HashType::All => {
                     return Self {
-                        md5: true,
-                        sha256: true,
-                        sha512: true,
-                        sha1: true,
-                        blake3: true,
-                        blake2b: true,
-                        crc32: true,
+                        sha256: Some(Sha256::default()),
+                        sha512: Some(Sha512::default()),
+                        blake3: Some(blake3::Hasher::new()),
+                        blake2b: Some(blake2b_simd::State::new()),
+                        crc32: Some(crc32fast::Hasher::new()),
+                        sha1: Some(Sha1::default()),
+                        md5: Some(Md5::default()),
                     };
                 }
-                HashType::MD5 => {
-                    this.md5 = true;
-                    warn!("已启用MD5，但MD5不安全");
-                }
-                HashType::SHA256 => this.sha256 = true,
-                HashType::SHA512 => this.sha512 = true,
-                HashType::SHA1 => {
-                    this.sha1 = true;
+                HashType::Sha256 => this.sha256 = Some(Sha256::default()),
+                HashType::Sha512 => this.sha512 = Some(Sha512::default()),
+                HashType::Blake3 => this.blake3 = Some(blake3::Hasher::new()),
+                HashType::Blake2b => this.blake2b = Some(blake2b_simd::State::new()),
+                HashType::Crc32 => this.crc32 = Some(crc32fast::Hasher::new()),
+                HashType::Sha1 => {
+                    this.sha1 = Some(Sha1::default());
                     warn!("已启用SHA-1，但SHA-1不安全");
                 }
-                HashType::BLAKE3 => this.blake3 = true,
-                HashType::BLAKE2b => this.blake2b = true,
-                HashType::CRC32 => this.crc32 = true,
+                HashType::Md5 => {
+                    this.md5 = Some(Md5::default());
+                    warn!("已启用MD5，但MD5不安全");
+                }
             }
         }
         this
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        //SHA-256
+        if let Some(h) = &mut self.sha256 {
+            h.update(data);
+        }
+        //SHA-512
+        if let Some(h) = &mut self.sha512 {
+            h.update(data);
+        }
+        //BLAKE3
+        if let Some(h) = &mut self.blake3 {
+            h.update(data);
+        }
+        //BLAKE2b
+        if let Some(h) = &mut self.blake2b {
+            h.update(data);
+        }
+        //CRC32
+        if let Some(h) = &mut self.crc32 {
+            h.update(data);
+        }
+        //SHA-1
+        if let Some(h) = &mut self.sha1 {
+            h.update(data);
+        }
+        //MD5
+        if let Some(h) = &mut self.md5 {
+            h.update(data);
+        }
+    }
+
+    fn reset(&mut self) {
+        //SHA-256
+        if let Some(h) = &mut self.sha256 {
+            h.reset();
+        }
+        //SHA-512
+        if let Some(h) = &mut self.sha512 {
+            h.reset();
+        }
+        //BLAKE3
+        if let Some(h) = &mut self.blake3 {
+            h.reset();
+        }
+        //BLAKE2b
+        if let Some(h) = &mut self.blake2b {
+            *h = blake2b_simd::State::new();
+        }
+        //CRC32
+        if let Some(h) = &mut self.crc32 {
+            h.reset();
+        }
+        //SHA-1
+        if let Some(h) = &mut self.sha1 {
+            h.reset();
+        }
+        //MD5
+        if let Some(h) = &mut self.md5 {
+            h.reset();
+        }
+    }
+
+    fn finalize_reset_str_map(&mut self) -> HashMap<String, String> {
+        const T: &[u8; 16] = b"0123456789abcdef";
+        #[inline]
+        fn to_hex(data: &[u8]) -> Vec<char> {
+            let mut s = Vec::with_capacity(data.len() * 2);
+            for &b in data {
+                s.push(T[(b >> 4) as usize] as char);
+                s.push(T[(b & 0xf) as usize] as char);
+            }
+            s
+        }
+        #[inline]
+        fn to_str(hex: Vec<char>) -> String {
+            let mut s = String::with_capacity(hex.len());
+            for ch in hex {
+                s.push(ch);
+            }
+            s
+        }
+        
+        #[inline]
+        fn fb_to_str(fb: &[u8]) -> String {
+            to_str(to_hex(fb))
+        }
+
+        let mut r = HashMap::new();
+        //SHA-256
+        if let Some(h) = &mut self.sha256 {
+            let fb = h.finalize_fixed_reset().to_vec();
+            let s = fb_to_str(&fb);
+            r.insert("sha-256", s);
+        }
+        //SHA-512
+        if let Some(h) = &mut self.sha512 {
+            let fb = h.finalize_fixed_reset().to_vec();
+            let s = fb_to_str(&fb);
+            r.insert("sha-512", s);
+        }
+        //BLAKE3
+        if let Some(h) = &mut self.blake3 {
+            let hf = h.finalize();
+            let fb = hf.as_bytes();
+            let s = fb_to_str(fb);
+            r.insert("blake3", s);
+            h.reset();
+        }
+        //BLAKE2b
+        if let Some(h) = &mut self.blake2b {
+            let hf = h.finalize();
+            let fb = hf.as_bytes();
+            let s = fb_to_str(fb);
+            r.insert("blake2b", s);
+            *h = blake2b_simd::State::new();
+        }
+        //CRC32
+        if let Some(h) = &mut self.crc32 {
+            let h = replace(h, crc32fast::Hasher::new());
+            let hf = h.finalize();
+            let fb = hf.to_be_bytes();
+            let s = fb_to_str(&fb);
+            r.insert("crc32", s);
+        }
+        //SHA-1
+        if let Some(h) = &mut self.sha1 {
+            let fb = h.finalize_fixed_reset().to_vec();
+            let s = fb_to_str(&fb);
+            r.insert("sha-1", s);
+        }
+        //MD5
+        if let Some(h) = &mut self.md5 {
+            let fb = h.finalize_fixed_reset().to_vec();
+            let s = fb_to_str(&fb);
+            r.insert("md5", s);
+        }
+        r.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
     }
 }
 
@@ -410,7 +554,7 @@ fn hash_work(
     tx: &Sender<u64>,
     worker_pbs: &mut Vec<Option<ProgressBar>>,
     handles: &mut Vec<JoinHandle<()>>,
-    hash_type: HashTypeS,
+    mut hash_type: HashTypeS,
     results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
 ) {
     use std::thread;
@@ -455,18 +599,6 @@ fn hash_work(
                 }
             };
 
-            let mut blake3 = if hash_type.blake3 {
-                Some(blake3::Hasher::new())
-            } else {
-                None
-            };
-
-            /* let mut sha256 = if hash_type.sha256 {
-                SHA256
-            } else {
-                None
-            }; */
-
             //尝试打开文件
             let mut in_file = match File::open(&path) {
                 Ok(file) => file,
@@ -510,9 +642,7 @@ fn hash_work(
                     }
                     Ok(this_read_len) => {
                         let data = &read_buf[..this_read_len];
-                        if let Some(b3) = &mut blake3 {
-                            b3.update(data);
-                        }
+                        hash_type.update(data);
                         read_len += this_read_len as u64;
 
                         if let Some(pb) = &w_pb
@@ -539,19 +669,13 @@ fn hash_work(
             }
 
             if loop_no_err {
-                let mut hash_list = HashMap::new();
-                //BLAKE3
-                if let Some(h) = blake3 {
-                    let h = h.finalize();
-                    let h = h.to_string();
-                    hash_list.insert("BLAKE3".to_string(), h);
-                }
+                let hash_list = hash_type.finalize_reset_str_map();
                 let new_info = FileInfo::new(
                     info.name().to_string(),
                     info.length(),
                     info.modified_time(),
                     match info.file_kind() {
-                        FileKind::Dir(_) => panic!("逻辑错误"),
+                        FileKind::Dir(_) => unreachable!("逻辑错误: 目录不应进入哈希计算"),
                         FileKind::File { .. } => FileKind::File {
                             hash: Some(hash_list),
                         },
@@ -562,167 +686,12 @@ fn hash_work(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(path, new_info);
             } else {
+                hash_type.reset();
                 results
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(path, info);
             }
-
-            /*
-            // 2. 判定路径类型（按需加载目录结构或文件元数据）
-            //    Determine path type (lazy-load dir struct or file metadata)
-            let item = match pack.get_pack_struct_item(&path) {
-                Ok(v) => v,
-                Err(err) => {
-                    error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
-                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                        all_done.store(true, Ordering::SeqCst);
-                        queue.1.notify_all();
-                    }
-                    continue;
-                }
-            };
-
-            match item.item_type() {
-                PackStructItemType::Dir { .. } => {
-                    // 展开目录：获取子项并推入队列
-                    // Expand directory: get children and push to queue
-                    let children = match pack.get_struct_item_name_list(&path) {
-                        Ok(v) => v,
-                        Err(err) => {
-                            error!(
-                                r#"无法获取虚拟路径"{}"的子项名称, err:{err}"#,
-                                path.display()
-                            );
-                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                all_done.store(true, Ordering::SeqCst);
-                                queue.1.notify_all();
-                            }
-                            continue;
-                        }
-                    };
-
-                    let n = children.len();
-                    if n > 0 {
-                        pending.fetch_add(n, Ordering::SeqCst);
-                        let mut q = queue.0.lock().unwrap();
-                        for child in children {
-                            q.push_back(path.join(child));
-                        }
-                        // 唤醒所有等待线程 / Wake all waiting threads
-                        queue.1.notify_all();
-                    }
-                    // 目录自身处理完毕 / Directory itself resolved
-                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                        all_done.store(true, Ordering::SeqCst);
-                        queue.1.notify_all();
-                    }
-                }
-                PackStructItemType::File { .. } => {
-                    let mut rw = match pack.open_virtual_file(&path) {
-                        Ok(v) => v,
-                        Err(err) => {
-                            error!("无法获取包文件读写器，err: {err}");
-                            let _ = tx.send((path.display().to_string(), 0u64, None));
-                            if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                all_done.store(true, Ordering::SeqCst);
-                                queue.1.notify_all();
-                            }
-                            continue;
-                        }
-                    };
-
-                    let file_len = rw.get_len();
-
-                    let path_str = path.display().to_string();
-                    let result = match rw.verify_hash(Some(
-                        &(|done, total| {
-                            if let Some(pb) = &w_pb {
-                                pb.set_length(total);
-                                pb.set_position(done);
-                                pb.set_message(format!("\tFile path: {path_str}"));
-                            }
-                        }),
-                    )) {
-                        Ok(true) => Some(true),
-                        Ok(false) => Some(false),
-                        Err(err) => {
-                            warn!(
-                                r#"虚拟文件"{}"哈希验证发生错误, err: {err:?}"#,
-                                path.display()
-                            );
-                            None
-                        }
-                    };
-
-                    let _ = tx.send((path.display().to_string(), file_len, result));
-                    // 文件处理完毕 / File resolved
-                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                        all_done.store(true, Ordering::SeqCst);
-                        queue.1.notify_all();
-                    }
-                }
-            } */
         }
     }));
 }
-
-/* fn hash_file(mp: Option<&MultiProgress>, thread_count: usize, all_file_count: Arc<AtomicU64>) {
-    // 总进度条 / Main progress bar
-    let main_pb = create_pb(mp);
-    if let Some(pb) = &main_pb {
-        pb.set_length(0);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                .unwrap()
-                .progress_chars("=>-"),
-        );
-        pb.set_prefix("哈希计算总进度");
-    }
-
-    // 创建子线程进度条 / Create per-worker progress bars
-    let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
-    for i in 0..thread_count {
-        let pb = create_pb(mp);
-        if let Some(pb) = &pb {
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .unwrap()
-                    .progress_chars("=>-"),
-            );
-            pb.set_prefix(format!("线程{i}"));
-        }
-        worker_pbs.push(pb);
-    }
-
-    let (tx, rx) = mpsc::channel();
-    let mut handles = Vec::with_capacity(thread_count);
-
-    // 主线程：汇总进度条 / Main thread: aggregate progress
-    let mut written_len = 0u64;
-    let mut file_count = 0u64;
-    let mut last_pb_update_len = 0u64;
-
-    for bytes_written in rx {
-        written_len += bytes_written;
-        file_count += 1;
-
-        if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
-            if let Some(pb) = &main_pb {
-                pb.set_position(written_len);
-                pb.set_message(format!(
-                    "[{file_count}/{}个文件]",
-                    all_file_count.load(Ordering::SeqCst)
-                ));
-            }
-            last_pb_update_len = written_len;
-        }
-    }
-
-    for h in handles {
-        h.join().unwrap()?;
-    }
-}
- */

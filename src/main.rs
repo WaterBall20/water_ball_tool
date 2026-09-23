@@ -46,7 +46,7 @@ struct MultiProgressWriter(MultiProgress);
 impl Write for MultiProgressWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let s = String::from_utf8_lossy(buf);
-        self.0.println(s)?;
+        self.0.println(s.trim_end())?;
         Ok(buf.len())
     }
 
