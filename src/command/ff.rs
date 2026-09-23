@@ -212,12 +212,15 @@ pub(crate) fn search_files(
     let (ff_thread, event_rx) = ff.search_stream(path, skip_symlink, tx, thread_count)?;
 
     //获取结果线程
-    let mut results = Arc::new(Mutex::new(HashMap::new()));
+    let results = Arc::new(Mutex::new(HashMap::new()));
     let ff_r_thread = {
         let hash_type = hash_type.clone();
         let file_count = file_count.clone();
         let queue = queue.clone();
         let results = results.clone();
+        let data_len = data_len.clone();
+
+        let search_end = search_end.clone();
         thread::spawn(move || {
             for event in event_rx {
                 match event {
@@ -225,7 +228,7 @@ pub(crate) fn search_files(
                         FileKind::Dir(_) => {
                             results
                                 .lock()
-                                .unwrap_or_else(|e| e.into_inner())
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .insert(p, i);
                         }
                         FileKind::File { .. } => {
@@ -241,7 +244,7 @@ pub(crate) fn search_files(
                             } else {
                                 results
                                     .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                                     .insert(p, i);
                             }
                         }
@@ -268,6 +271,7 @@ pub(crate) fn search_files(
                     },
                 }
             }
+            search_end.store(true, Ordering::SeqCst);
             results
         })
     };
@@ -288,7 +292,6 @@ pub(crate) fn search_files(
         }
     });
 
-
     //哈希计算
     if let Some(hash_type) = hash_type {
         hash(
@@ -296,15 +299,15 @@ pub(crate) fn search_files(
             &search_end,
             mp,
             thread_count,
-            file_count.clone(),
+            file_count,
+            data_len,
             hash_type,
-            results.clone(),
+            results,
         );
     }
     ff_info_thread
         .join()
         .map_err(|e| io::Error::other(format!("搜索信息线程发生错误: {e:?}")))?;
-   
     ff_thread
         .join()
         .map_err(|e| io::Error::other(format!("搜索时发生错误: {e:?}")))??;
@@ -312,7 +315,7 @@ pub(crate) fn search_files(
         .join()
         .map_err(|e| io::Error::other(format!("获取搜索结果时发生错误: {e:?}")))?;
     Ok(FileFinder::build_tree(
-        &r.lock().unwrap_or_else(|e| e.into_inner()),
+        &r.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
         path.as_ref(),
     ))
 }
@@ -323,9 +326,10 @@ fn hash(
     mp: Option<&MultiProgress>,
     thread_count: usize,
     all_file_count: Arc<AtomicU64>,
+    data_len: Arc<AtomicU64>,
     hash_type: HashTypeS,
     results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
-) -> Result<(), Box<dyn error::Error>> {
+) {
     // 总进度条 / Main progress bar
     let main_pb = create_pb(mp);
     if let Some(pb) = &main_pb {
@@ -358,7 +362,7 @@ fn hash(
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::with_capacity(thread_count);
 
-    for i in 0..thread_count {
+    for _ in 0..thread_count {
         let hash_type = hash_type.clone();
         hash_work(
             queue,
@@ -367,8 +371,11 @@ fn hash(
             &mut worker_pbs,
             &mut handles,
             hash_type,
+            results.clone(),
         );
     }
+
+    drop(tx);
 
     // 主线程：汇总进度条 / Main thread: aggregate progress
     let mut written_len = 0u64;
@@ -381,6 +388,7 @@ fn hash(
 
         if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
             if let Some(pb) = &main_pb {
+                pb.set_length(data_len.load(Ordering::SeqCst));
                 pb.set_position(written_len);
                 pb.set_message(format!(
                     "[{file_count}/{}个文件]",
@@ -392,7 +400,7 @@ fn hash(
     }
 
     for h in handles {
-        h.join().expect("等待线程发生错误")?;
+        h.join().expect("等待线程发生错误");
     }
 }
 
@@ -401,8 +409,9 @@ fn hash_work(
     search_end: &Arc<AtomicBool>,
     tx: &Sender<u64>,
     worker_pbs: &mut Vec<Option<ProgressBar>>,
-    handles: &mut Vec<JoinHandle<Result<(), Error>>>,
+    handles: &mut Vec<JoinHandle<()>>,
     hash_type: HashTypeS,
+    results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
 ) {
     use std::thread;
     let queue = queue.clone();
@@ -410,7 +419,7 @@ fn hash_work(
     let tx = tx.clone();
     let w_pb = worker_pbs.pop().unwrap();
 
-    handles.push(thread::spawn(move || -> io::Result<()> {
+    handles.push(thread::spawn(move || {
         let mut read_buf = vec![0u8; BUF_LEN];
         loop {
             // 1. 从队列取路径（空队列时 Condvar 挂起）
@@ -424,7 +433,7 @@ fn hash_work(
                     }
                     if all_done.load(Ordering::SeqCst) {
                         cvar.notify_all();
-                        return Ok(());
+                        return;
                     }
                     if let Some(pb) = &w_pb {
                         pb.set_style(
@@ -476,8 +485,16 @@ fn hash_work(
                 }
             };
 
+            if let Some(pb) = &w_pb {
+                pb.set_length(info.length());
+                pb.set_position(0);
+                pb.set_message(format!("正在计算哈希: {}", path.display()));
+            }
+
             let mut read_len = 0;
-            loop {
+
+            let mut pb_last_up_len = 0;
+            let loop_no_err = loop {
                 match in_file.read(&mut read_buf) {
                     Ok(0) => {
                         //EOF 防御：未达到记录长度时警告而不是进入无限循环
@@ -487,8 +504,9 @@ fn hash_work(
                                 path.display(),
                                 info.length()
                             );
+                            break false;
                         }
-                        break;
+                        break true;
                     }
                     Ok(this_read_len) => {
                         let data = &read_buf[..this_read_len];
@@ -496,12 +514,58 @@ fn hash_work(
                             b3.update(data);
                         }
                         read_len += this_read_len as u64;
+
+                        if let Some(pb) = &w_pb
+                            && read_len - pb_last_up_len > 10 * 1024 * 1024
+                        {
+                            pb.set_position(read_len);
+                            pb_last_up_len = read_len;
+                        }
                     }
                     Err(err) => {
                         error!(r#"读取文件"{}"失败，将跳过，err:{err}"#, path.display());
-                        break;
+                        break false;
                     }
                 }
+            };
+
+            //
+            if let Some(pb) = &w_pb {
+                pb.set_position(info.length());
+            }
+            if let Err(e) = tx.send(info.length()) {
+                error!("发送更新总进度失败, err: {e}");
+                continue;
+            }
+
+            if loop_no_err {
+                let mut hash_list = HashMap::new();
+                //BLAKE3
+                if let Some(h) = blake3 {
+                    let h = h.finalize();
+                    let h = h.to_string();
+                    hash_list.insert("BLAKE3".to_string(), h);
+                }
+                let new_info = FileInfo::new(
+                    info.name().to_string(),
+                    info.length(),
+                    info.modified_time(),
+                    match info.file_kind() {
+                        FileKind::Dir(_) => panic!("逻辑错误"),
+                        FileKind::File { .. } => FileKind::File {
+                            hash: Some(hash_list),
+                        },
+                    },
+                );
+                results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(path, new_info);
+            } else {
+                results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(path, info);
             }
 
             /*
@@ -603,7 +667,7 @@ fn hash_work(
     }));
 }
 
-fn hash(mp: Option<&MultiProgress>, thread_count: usize, all_file_count: Arc<AtomicU64>) {
+/* fn hash_file(mp: Option<&MultiProgress>, thread_count: usize, all_file_count: Arc<AtomicU64>) {
     // 总进度条 / Main progress bar
     let main_pb = create_pb(mp);
     if let Some(pb) = &main_pb {
@@ -661,3 +725,4 @@ fn hash(mp: Option<&MultiProgress>, thread_count: usize, all_file_count: Arc<Ato
         h.join().unwrap()?;
     }
 }
+ */

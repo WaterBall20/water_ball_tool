@@ -588,10 +588,8 @@ impl WaterBallFilePackArgsRuning {
             }
 
             //等待所有工作线程结束
-            for (index, item) in thread_handle.into_iter().enumerate() {
-                if let Err(err) = item.join().unwrap() {
-                    error!("线程{index}，发生错误：{err}");
-                }
+            for item in thread_handle {
+                item.join().unwrap();
             }
         })
     }
@@ -618,7 +616,7 @@ impl WaterBallFilePackArgsRuning {
         condver: Arc<Condvar>,
         main_pb_tx: Sender<(u64, u64)>,
         write_optimization: bool,
-    ) -> io::Result<()> {
+    ) {
         let mut run_buf = vec![0u8; 1024 * 1024];
         let mut thread_write_len = 0;
         let mut last_thread_write_len = 0;
@@ -697,7 +695,6 @@ impl WaterBallFilePackArgsRuning {
             );
             let _ = main_pb_tx.send((1, 0)); //更新总进度条的文件数量
         }
-        Ok(())
     }
 
     /// 将单个文件从磁盘复制到包文件的虚拟文件系统中。
@@ -885,7 +882,7 @@ impl WaterBallFilePackArgsRuning {
                     );
                     break;
                 }
-            } 
+            }
         }
     }
 
