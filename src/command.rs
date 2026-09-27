@@ -8,6 +8,7 @@
 //! updating progress bars with consistent styling.
 
 use crate::command::ff::FileFinderArgs;
+use crate::command::music_play::MusicPlayArgs;
 use crate::command::wbfp::WaterBallFilePackCommand;
 use clap::error::Result;
 use clap::{Parser, Subcommand};
@@ -15,6 +16,7 @@ use indicatif::{MultiProgress, ProgressBar};
 use std::time::Duration;
 
 mod ff;
+mod music_play;
 #[cfg(test)]
 mod test;
 mod wbfp;
@@ -31,10 +33,10 @@ pub(crate) struct Cli {
 enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
+    MP(MusicPlayArgs),
 }
 
 static BUF_LEN: usize = 1024 * 1024;
-
 
 /// 打包进度条样式模板 / Pack progress bar style template
 const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta:>4})] {percent_precise:>7}% {bytes:>11} / {total_bytes:>11} \n{msg}";
@@ -65,5 +67,6 @@ pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn st
     match cli.command {
         Commands::Ff(args) => ff::args(args, mp),
         Commands::Wbfp(commands) => wbfp::commands(commands, mp),
+        Commands::MP(args) => music_play::args(args, mp),
     }
 }

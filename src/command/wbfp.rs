@@ -23,10 +23,10 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::{fs, io};
 use tracing::{error, info, warn};
-use water_ball_tool::file_finder::{FileFinder, FileInfo, FileKind, SearchEvent};
-use water_ball_tool::tools::PathTool;
-use water_ball_tool::wb_files_pack::manager_sync::ManagerSync;
-use water_ball_tool::wb_files_pack::{PackFileError, PackStructItemType};
+use water_ball_tool_lib::file_finder::{FileFinder, FileInfo, FileKind, SearchEvent};
+use water_ball_tool_lib::tools::PathTool;
+use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
+use water_ball_tool_lib::wb_files_pack::{PackFileError, PackStructItemType};
 type ArcMutex<T> = Arc<Mutex<T>>;
 
 /// 水球包文件操作
@@ -1253,7 +1253,7 @@ impl WaterBallFilePackArgsRuning {
                 r#"正在从包文件虚拟路径"{}"复制大文件到"{}"，大小:{}[{}]"#,
                 pack_path.display(),
                 out_path.display(),
-                water_ball_tool::tools::bytes_len_to_string(file_len),
+                water_ball_tool_lib::tools::bytes_len_to_string(file_len),
                 file_len
             );
         }

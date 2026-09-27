@@ -18,7 +18,7 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::{error, io, thread};
 use tracing::{error, info, warn};
-use water_ball_tool::file_finder::{
+use water_ball_tool_lib::file_finder::{
     FileFinder, FileInfo, FileKind, FilesList, SearchEvent, SearchWarningType,
 };
 
@@ -340,8 +340,8 @@ pub(crate) fn search_files(
         );
         pb.set_message("搜索文件中");
     }
-    let thread_count = if hash_type.is_some() {
-        thread_count / 2
+    let ff_thread_count = if hash_type.is_some() {
+        1
     } else {
         thread_count
     };
@@ -353,7 +353,7 @@ pub(crate) fn search_files(
     //搜索
     let ff = FileFinder;
     let (tx, rx) = mpsc::channel();
-    let (ff_thread, event_rx) = ff.search_stream(path, skip_symlink, tx, thread_count)?;
+    let (ff_thread, event_rx) = ff.search_stream(path, skip_symlink, tx, ff_thread_count)?;
 
     //获取结果线程
     let results = Arc::new(Mutex::new(HashMap::new()));
@@ -506,7 +506,7 @@ fn hash(
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::with_capacity(thread_count);
 
-    for _ in 0..thread_count {
+    for i in 0..thread_count {
         let hash_type = hash_type.clone();
         hash_work(
             queue,
@@ -575,6 +575,7 @@ fn hash_work(
                     if let Some(p) = q.pop_front() {
                         break p;
                     }
+                    //搜索完成
                     if all_done.load(Ordering::SeqCst) {
                         cvar.notify_all();
                         return;

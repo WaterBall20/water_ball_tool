@@ -1,0 +1,21 @@
+[package]
+name = "water_ball_tool_lib"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+documentation.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sysinfo = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+blake3 = { workspace = true }
+#AI=== binrw 二进制序列化依赖（Attribute 等 on-disk 结构）/ binrw binary serialization dependency (on-disk structs like Attribute)
+binrw = { workspace = true }
+#AI_END===
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
