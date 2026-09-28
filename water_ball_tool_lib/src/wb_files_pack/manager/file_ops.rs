@@ -3,7 +3,7 @@ use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::DEFAULT_HASH_TYPE;
 use crate::wb_files_pack::{
-    DATA_DATA_BLOCK_LEN, DataPosList, MAX_DATA_SEGMENTS, PackFileMetadata, PackFileMetadataRun,
+    DataPosList, MAX_DATA_SEGMENTS, PackFileMetadata, PackFileMetadataRun,
     PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
 };
 use std::path::Path;

@@ -116,7 +116,7 @@ impl PlayList {
                     // 周期不循环
                     let tracks_len = self.tracks.len();
                     // 重置
-                    if self.shuffle_bag.len() == tracks_len {
+                    if self.shuffle_bag.len() >= tracks_len {
                         self.shuffle_bag.clear();
                     }
                     'root: loop {
@@ -129,6 +129,7 @@ impl PlayList {
                         }
                         self.shuffle_bag.push(random_index);
                         self.current_index = random_index;
+                        break;
                     }
                 }
             };
@@ -143,7 +144,7 @@ impl PlayList {
 
     fn update_next_id(&mut self) -> u64 {
         if self.next_id == u64::MAX {
-            self.next_id == 0;
+            self.next_id = 0;
         } else {
             self.next_id += 1;
         }

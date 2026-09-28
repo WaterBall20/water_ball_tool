@@ -1,4 +1,3 @@
-use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
     DATA_DATA_BLOCK_LEN, ManifestDataBlockTrait, OverwriteStrategy, PackFileMetadataRun,

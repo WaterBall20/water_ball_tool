@@ -8,12 +8,11 @@ use crate::command::music_play::data::{PlayList, Track};
 use clap::{Args, ValueEnum};
 use indicatif::MultiProgress;
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
     ///播放文件或目录
-    #[arg(short, long)]
     files: Vec<PathBuf>,
     ///初始音量 (0到<1的小数或0-100的数，大于或等于1视为0-100)
     #[arg(short, long, default_value_t = 0.75)]
@@ -68,6 +67,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
                 break;
             }
             ":next" | ":n" => {
+                debug!("开始执行换曲");
                 let r = running.next();
                 if let Err(e) = r {
                     error!("切换下一曲发生错误, err: {e}");

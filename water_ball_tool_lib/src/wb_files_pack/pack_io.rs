@@ -2,7 +2,7 @@ use crate::tools;
 use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN,
+    DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN,
     ManifestDataBlock,
 };
 use std::fs::File;

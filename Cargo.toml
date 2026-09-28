@@ -37,6 +37,10 @@ pretty_assertions = "1.4.1"
 [package]
 name = "water_ball_tool"
 edition = "2024"
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+documentation.workspace = true
 
 [dependencies]
 water_ball_tool_lib = { path = "./water_ball_tool_lib" }
