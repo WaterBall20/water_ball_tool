@@ -19,7 +19,7 @@ pub(crate) struct MusicPlayArgs {
     #[arg(short, long, default_value_t = 0.75)]
     volume: f64,
     ///详细输出
-    #[arg(short, long)]
+    #[arg(long)]
     verbose: bool,
     /// 播放模式
     #[arg(short, long, default_value = "sequential-loop")]
@@ -54,6 +54,9 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
     let play_list = create_play_list(&files, loop_mode)?;
     let mut running = running::Running::create(play_list)?;
     running.set_volume(volume);
+    if let Err(e) = running.next() {
+        error!("切换下一曲发生错误, err: {e}");
+    }
 
     //交互处理
     loop {
@@ -61,7 +64,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
         std::io::stdin().read_line(&mut input)?;
         match input.trim() {
             ":exit" => {
-                running.run_stop();
+                running.run_stop().unwrap();
                 break;
             }
             ":next" | ":n" => {
@@ -76,9 +79,6 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
             ":pause" | ":pa" => {
                 running.pause();
             }
-            ":stop" | ":s" => {
-                running.stop();
-            }
             _ => warn!("未知命令： {input}"),
         }
     }
@@ -90,6 +90,39 @@ fn create_play_list(
     files: &[PathBuf],
     loop_mode: LoopMode,
 ) -> Result<PlayList, Box<dyn error::Error>> {
+    fn dir_tracks(path: &Path, tracks: &mut Vec<Track>) {
+        let read_dir = path.read_dir();
+        match read_dir {
+            Ok(dir) => {
+                for i in dir {
+                    match i {
+                        Ok(entry) => {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                dir_tracks(&path, tracks);
+                            } else if path.is_file() {
+                                let track = create_track(&path);
+                                match track {
+                                    Ok(track) => {
+                                        tracks.push(track);
+                                    }
+                                    Err(e) => {
+                                        error!(r#"创建文件"{}"轨道失败, err: {e}"#, path.display());
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(r#"迭代目录"{}"发生错误, err: {e}"#, path.display());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(r#"无法读取目录:"{}", err,: {e}"#, path.display());
+            }
+        }
+    }
     let mut tracks = Vec::new();
     for path in files {
         if !path.exists() {
@@ -107,33 +140,7 @@ fn create_play_list(
                 }
             }
         } else if path.is_dir() {
-            let read_dir = path.read_dir();
-            match read_dir {
-                Ok(dir) => {
-                    for i in dir {
-                        match i {
-                            Ok(entry) => {
-                                let path = entry.path();
-                                let track = create_track(&path);
-                                match track {
-                                    Ok(track) => {
-                                        tracks.push(track);
-                                    }
-                                    Err(e) => {
-                                        error!(r#"创建文件"{}"轨道失败, err: {e}"#, path.display());
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(r#"迭代目录"{}"发生错误, err: {e}"#, path.display());
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!(r#"无法读取目录:"{}", err,: {e}"#, path.display());
-                }
-            }
+            dir_tracks(path, &mut tracks);
         }
     }
     if tracks.is_empty() {

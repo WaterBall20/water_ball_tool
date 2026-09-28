@@ -1,7 +1,7 @@
 use crate::command::music_play::LoopMode;
+use std::fs::File;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
-use std::fs::File;
 
 #[derive(Debug)]
 pub(super) struct Track {
@@ -33,7 +33,6 @@ impl Track {
     pub(super) fn duration(&self) -> &Duration {
         &self.duration
     }
-    
 }
 
 pub(super) struct NextTrack<'t> {
@@ -65,7 +64,7 @@ impl PlayList {
         let tracks_len = tracks.len();
         Self {
             tracks,
-            current_index: tracks_len,
+            current_index: tracks_len - 1,
             loop_mode,
             shuffle_bag: Vec::with_capacity(tracks_len),
             next_id: 0,
@@ -75,6 +74,9 @@ impl PlayList {
     /// 执行下一首
     /// play_end: 表示播放结束触发
     pub(super) fn next(&mut self, play_end: bool, next_id: u64) -> Option<NextTrack<'_>> {
+        if self.tracks.is_empty() {
+            return None;
+        }
         if !play_end || self.next_id == next_id {
             let next_id = self.update_next_id();
             match &self.loop_mode {
@@ -131,7 +133,7 @@ impl PlayList {
                 }
             };
             Some(NextTrack {
-                track: self.get_current_track(),
+                track: self.get_current_track().expect("没有音轨"),
                 next_id,
             })
         } else {
@@ -148,8 +150,8 @@ impl PlayList {
         self.next_id
     }
 
-    pub(super) fn get_current_track(&self) -> &Track {
-        &self.tracks[self.current_index]
+    pub(super) fn get_current_track(&self) -> Option<&Track> {
+        self.tracks.get(self.current_index)
     }
 
     pub(super) fn loop_mod(&self) -> LoopMode {

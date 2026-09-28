@@ -8,7 +8,8 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use tracing::{error, info};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 pub(super) struct Running {
     play_object: Arc<Mutex<PlayObject>>,
@@ -30,16 +31,7 @@ struct NextThread {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        let mut play_object = self
-            .play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        play_object.stop();
-        play_object.run_stop = true;
-        self.next_thread.condvar.notify_all();
-        if let Some(h) = self.next_thread.thread.take() {
-            _ = h.join();
-        }
+        _ = self.run_stop_inner();
     }
 }
 
@@ -48,6 +40,7 @@ impl Running {
     pub(super) fn create(play_list: PlayList) -> Result<Self, Box<dyn std::error::Error>> {
         let handle = rodio::DeviceSinkBuilder::open_default_sink()?;
         let player = Player::connect_new(handle.mixer());
+        player.pause();
         let play_object = Arc::new(Mutex::new(PlayObject {
             play_list,
             handle,
@@ -63,62 +56,74 @@ impl Running {
             let play_object = play_object.clone();
             thread::spawn(move || {
                 loop {
-                    let mut play_object = play_object.lock().unwrap_or_else(|e| e.into_inner());
+                    thread::sleep(Duration::from_millis(10));
+                    let mut play_object = play_object
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     if play_object.player.is_paused() {
-                        info!("播放暂停，下一曲线程挂起");
+                        debug!("播放暂停，下一曲线程挂起");
                         play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                        info!("下一曲线程唤醒");
-                        if !play_object.run_stop {
+                        debug!("下一曲线程唤醒");
+                        if play_object.run_stop {
                             break; // 如果正在释放就退出线程
                         }
                         continue;
                     }
                     //如果正在播放
                     let play_pos = play_object.player.get_pos();
-                    let track = play_object.play_list.get_current_track();
-                    let track_dur = *track.duration();
-                    let next_id = play_object.next_id;
-                    // 判断是否需要挂起
-                    if track_dur > play_pos {
-                        let wait_dur = track_dur.checked_sub(play_pos).unwrap();
-                        info!("下一曲线程指定超时挂起，超时： {wait_dur:?}");
-                        let (guard, timeout_result) = condvar
-                            .wait_timeout(play_object, wait_dur)
-                            .expect("Condvar won't fail");
-                        if timeout_result.timed_out() {
-                            info!("下一曲线程唤醒，已超时");
-                        } else {
-                            info!("下一曲线程唤醒，非超时");
+                    if let Some(track) = play_object.play_list.get_current_track() {
+                        let track_dur = *track.duration();
+                        let next_id = play_object.next_id;
+                        // 判断是否需要挂起
+                        if track_dur > play_pos {
+                            let wait_dur = track_dur.checked_sub(play_pos).unwrap();
+                            debug!("下一曲线程指定超时挂起，超时： {wait_dur:?}");
+                            let (guard, timeout_result) = condvar
+                                .wait_timeout(play_object, wait_dur)
+                                .expect("Condvar won't fail");
+                            if timeout_result.timed_out() {
+                                debug!("下一曲线程唤醒，已超时");
+                            } else {
+                                debug!("下一曲线程唤醒，非超时");
+                            }
+                            play_object = guard;
                         }
-                        play_object = guard;
-                    }
-                    // 如果运行时退出就退出线程
-                    if !play_object.run_stop {
-                        break;
-                    }
-                    // 检查是否暂停
-                    if !play_object.player.is_paused() {
-                        //执行换曲
-                        let r = play_object.next_inner(true, next_id);
-                        match r {
-                            Ok(o) => {
-                                if let Some(o) = o {
-                                    let track = o.track();
-                                    info!("自动换曲为, debug: {track:?}");
-                                } else {
-                                    info!("自动换曲，没有换曲");
-                                    if let LoopMode::Sequential = play_object.play_list.loop_mod() {
-                                        info!("自动换曲，顺序播放已结束，暂停播放");
-                                        play_object.player.pause();
+
+                        // 如果运行时退出就退出线程
+                        if play_object.run_stop {
+                            break;
+                        }
+                        // 检查是否暂停
+                        if !play_object.player.is_paused() {
+                            //执行换曲
+                            let r = play_object.next_inner(true, next_id);
+                            match r {
+                                Ok(o) => {
+                                    if let Some(o) = o {
+                                        let track = o.track();
+                                        info!("自动换曲为, debug: {track:?}");
+                                    } else {
+                                        debug!("自动换曲，没有换曲");
+                                        if let LoopMode::Sequential =
+                                            play_object.play_list.loop_mod()
+                                        {
+                                            info!("自动换曲，顺序播放已结束，暂停播放");
+                                            play_object.player.pause();
+                                        }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                error!("自动换曲发生错误 {e:?}");
+                                Err(e) => {
+                                    error!("自动换曲发生错误 {e:?}");
+                                }
                             }
                         }
+                    } else {
+                        info!("无法获取当前播放音轨，下一曲线程挂起");
+                        play_object = condvar.wait(play_object).expect("Condvar won't fail");
+                        info!("下一曲线程唤醒");
                     }
                 }
+                warn!("下一曲线程已退出");
             })
         };
         let next_thread = NextThread {
@@ -160,10 +165,16 @@ impl Running {
 
     /// 下一曲
     pub(super) fn next(&mut self) -> Result<(), Box<dyn Error>> {
-        self.play_object
+        let mut play_object =  self.play_object
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let r = play_object
             .next()?;
+        if let Some(t) = r {
+            let track = t.track();
+            info!("换曲为, debug: {track:?}");
+        }
+        drop(play_object);
         self.next_thread.condvar.notify_one();
         Ok(())
     }
@@ -184,8 +195,23 @@ impl Running {
     }
 
     /// 运行时停止
-    pub(super) fn run_stop(self) {
-        drop(self);
+    pub(super) fn run_stop(self) -> Result<(), Box<dyn Any + Send + 'static>> {
+        let mut run = self;
+        run.run_stop_inner()
+    }
+
+    fn run_stop_inner(&mut self) -> Result<(), Box<dyn Any + Send + 'static>> {
+        let mut play_object = self
+            .play_object
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        play_object.stop();
+        play_object.run_stop = true;
+        self.next_thread.condvar.notify_one();
+        if let Some(h) = self.next_thread.thread.take() {
+            h.join()?;
+        }
+        Ok(())
     }
 }
 impl PlayObject {
@@ -221,13 +247,14 @@ impl PlayObject {
         play_end: bool,
         next_id: u64,
     ) -> Result<Option<NextTrack<'_>>, Box<dyn std::error::Error>> {
-        self.player.clear();
+        let paused = self.player.is_paused();
         let loop_mode = self.play_list.loop_mod();
         let next_track = self.play_list.next(play_end, next_id);
         if let Some(next_track) = &next_track {
             let track = next_track.track();
             let file = File::open(track.path())
                 .map_err(|e| io::Error::new(e.kind(), format!("打开文件错误, err: {e}")))?;
+            self.player.clear();
             if let LoopMode::RepeatOne = loop_mode {
                 let d = Decoder::new_looped(file)?;
                 self.player.append(d);
@@ -236,6 +263,9 @@ impl PlayObject {
                 self.player.append(d);
             }
             self.next_id = next_track.next_id();
+            if !paused {
+                self.player.play();
+            }
         }
         Ok(next_track)
     }
