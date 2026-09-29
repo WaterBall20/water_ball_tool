@@ -48,7 +48,7 @@ fn ff_out_file_skip_symlink() -> Result<(), Box<dyn std::error::Error>> {
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -82,7 +82,7 @@ fn ff_out_file() -> Result<(), Box<dyn std::error::Error>> {
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -117,7 +117,7 @@ fn ff_out_file_longtime() -> Result<(), Box<dyn std::error::Error>> {
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -138,7 +138,7 @@ fn ff_no_out_file() -> Result<(), Box<dyn std::error::Error>> {
     let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
     let r = args(
         FileFinderArgs::new(fixture_str, None, false, None, None),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&no_out_dir).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -175,7 +175,7 @@ fn wbfp_create_new_pack_m() -> Result<(), Box<dyn std::error::Error>> {
                 true,
             ),
         )),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -206,7 +206,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
                     true,
                 ),
             )),
-            Some(&mp),
+            Some(mp.clone()),
         )?;
 
         // Step 2: 哈希校验 / Hash verify
@@ -215,7 +215,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
             WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
                 WaterBallFilePackCommandsHashVerify::new(wbfp_path.clone(), false),
             )),
-            Some(&mp),
+            Some(mp.clone()),
         )?;
 
         // Step 3: 解包 / Unpack
@@ -230,7 +230,7 @@ fn wbfp_pack_verify_unpack_longtime() -> Result<(), Box<dyn std::error::Error>> 
                     None,
                 ),
             )),
-            Some(&mp),
+            Some(mp),
         )?;
         Ok(())
     }();
@@ -267,7 +267,7 @@ fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Err
                 true,
             ),
         )),
-        Some(&mp),
+        Some(mp),
     );
     r?;
     fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
@@ -307,7 +307,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
                         true,
                     ),
                 )),
-                Some(&mp),
+                Some(mp.clone()),
             )?;
         }
         out_file_path.push_str(".wbfp");
@@ -317,7 +317,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
                 WaterBallFilePackCommand::new(WaterBallFilePackCommands::HashVerify(
                     WaterBallFilePackCommandsHashVerify::new(out_file_path.clone(), false),
                 )),
-                Some(&mp),
+                Some(mp.clone()),
             )?;
         }
         //解包
@@ -333,7 +333,7 @@ fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::E
                         None,
                     ),
                 )),
-                Some(&mp),
+                Some(mp),
             )?;
         }
         Ok(())
@@ -426,7 +426,7 @@ fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
                     true,
                 ),
             )),
-            Some(&mp),
+            Some(mp.clone()),
         )?;
         out_file_path.push_str(".wbfp");
         //在数据文件（.wbfp）三个分散位置翻转字节，损坏至少一个文件的数据
@@ -444,7 +444,7 @@ fn wbfp_unpack_skip_corrupted_file() -> Result<(), Box<dyn std::error::Error>> {
                     None,
                 ),
             )),
-            Some(&mp),
+            Some(mp),
         )?;
         //断言：损坏文件被跳过（缺失），其余文件正常解包
         let fixture_files = collect_relative_files(&fixture);
@@ -497,7 +497,7 @@ fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>
                     true,
                 ),
             )),
-            Some(&mp),
+            Some(mp.clone()),
         )?;
         out_file_path.push_str(".wbfp");
         //与 skip 测试相同构造损坏，但解包不指定哈希校验
@@ -514,7 +514,7 @@ fn wbfp_unpack_no_verify_extracts_all() -> Result<(), Box<dyn std::error::Error>
                     None,
                 ),
             )),
-            Some(&mp),
+            Some(mp),
         )?;
         //断言：不校验时损坏文件也全部解包（输出与源完全一致）
         let fixture_files = collect_relative_files(&fixture);
@@ -563,7 +563,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
                 None,
                 None,
             ),
-            Some(&mp),
+            Some(mp),
         )
         .expect("执行命令行操作时错误");
     });
@@ -591,7 +591,7 @@ fn wbfp_create_new_pack_m_err_not_found_in_dir() {
                 true,
             ),
         )),
-        Some(&mp),
+        Some(mp),
     );
     // 不 panic，而是返回 Ok（搜索错误已记录）
     assert!(result.is_ok());
@@ -705,8 +705,8 @@ fn create_large_fixture(name: &str) -> PathBuf {
         for j in 0..files_per_dir {
             let size = rand::random_range(50..=2048);
             let content: Vec<u8> = (0..size).map(|_| rand::random::<u8>()).collect();
-            let fpath = sub.join(format!("data_{j:03}.bin"));
-            fs::write(&fpath, &content).expect("写入夹具文件失败");
+            let f_path = sub.join(format!("data_{j:03}.bin"));
+            fs::write(&f_path, &content).expect("写入夹具文件失败");
         }
     }
     dir
@@ -771,7 +771,7 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
 
     let json_str = fs::read_to_string(&json_path).expect("读取 JSON 结果文件失败");
@@ -814,7 +814,7 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
 
     let json_str = fs::read_to_string(&json_path).expect("读取 JSON 结果文件失败");
@@ -852,7 +852,7 @@ fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>
             None,
             None,
         ),
-        Some(&mp),
+        Some(mp),
     );
 
     r?;

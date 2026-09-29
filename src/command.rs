@@ -39,7 +39,18 @@ enum Commands {
 static BUF_LEN: usize = 1024 * 1024;
 
 /// 打包进度条样式模板 / Pack progress bar style template
-const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8} [{bar:40.cyan/blue}] [{elapsed_precise}(ETA:{eta:>4})] {percent_precise:>7}% {bytes:>11} / {total_bytes:>11} \n{msg}";
+///
+/// 颜色方案 / Color scheme:
+///   prefix     -> 绿色加粗   (任务标识)
+///   wide_bar   -> 青底蓝条   (保留原有,进度条主体)
+///   elapsed    -> dim        (次要信息,弱化)
+///   eta        -> 黄色       (估算值,醒目)
+///   percent    -> 品红       (核心数值)
+///   bytes      -> 默认       (字节数)
+///   msg        -> 黄色       (提示语,易读)
+const PACK_PROGRESS_STYLE_TEMPLATE: &str = "{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] \
+[{elapsed_precise:.dim}(ETA:{eta:>4.yellow})] \
+{percent_precise:>7.magenta}% {bytes:>11} / {total_bytes:>11} \n{msg:.yellow}";
 
 // 挂起时 spinner 模板 / Spinner template when suspended
 const SPINNER_TEMPLATE: &str = "{spinner:.blue} {prefix:<8} {msg}";
@@ -63,7 +74,7 @@ fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
     }
 }
 
-pub(crate) fn cli(cli: Cli, mp: Option<&MultiProgress>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cli(cli: Cli, mp: Option<MultiProgress>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Ff(args) => ff::args(args, mp),
         Commands::Wbfp(commands) => wbfp::commands(commands, mp),

@@ -275,9 +275,9 @@ impl HashTypeS {
 /// 文件查找器——多线程扫描目录并输出 JSON 文件列表。
 ///
 /// File finder — multi-threaded directory scanner that outputs a JSON file list.
-pub fn args(args: FileFinderArgs, mp: Option<&MultiProgress>) -> Result<(), Box<dyn error::Error>> {
+pub fn args(args: FileFinderArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
     //进度条
-    let pb = create_pb(mp);
+    let pb = create_pb(mp.as_ref());
     //所用的线程数
     let thread_count = if let Some(v) = args.thread_count {
         v
@@ -297,7 +297,7 @@ pub fn args(args: FileFinderArgs, mp: Option<&MultiProgress>) -> Result<(), Box<
         pb,
         thread_count,
         hash_type,
-        mp,
+        mp.as_ref(),
     )
     .unwrap();
 

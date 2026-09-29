@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 use std::{error, path::PathBuf};
 
 mod data;
@@ -39,7 +40,7 @@ enum LoopMode {
     PeriodicShuffle,
 }
 
-pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<dyn error::Error>> {
+pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
     let files = args.files;
     let volume = {
         if args.volume < 0.0 {
@@ -51,7 +52,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
     };
     let loop_mode = args.mode;
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut running = running::Running::create(play_list)?;
+    let mut running = running::Running::create(play_list, mp.as_ref())?;
     running.set_volume(volume);
     if let Err(e) = running.next() {
         error!("切换下一曲发生错误, err: {e}");
@@ -79,12 +80,23 @@ pub fn args(args: MusicPlayArgs, mp: Option<&MultiProgress>) -> Result<(), Box<d
             ":pause" | ":pa" => {
                 running.pause();
             }
+
+            /*//进度控制
+            "+5s" => {
+                if let Err(e) = running.add_pos(Duration::from_secs(5)) {
+                    error!("增加进度失败, err: {e}");
+                }
+            }*/
             _ => warn!("未知命令： {input}"),
         }
     }
 
     Ok(())
 }
+
+/*fn tui_args_pos(args: &str) {
+    let args = args.get()
+}*/
 
 fn create_play_list(
     files: &[PathBuf],

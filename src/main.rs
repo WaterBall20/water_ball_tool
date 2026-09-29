@@ -27,7 +27,7 @@ fn main() {
     let mp = MultiProgress::new();
     init_global_logging(&mp);
 
-    let result = command::cli(cli, Option::from(&mp));
+    let result = command::cli(cli, Option::from(mp));
     if let Err(err) = result {
         error!("运行时发生错误， err: {}", err);
         exit(-1)

@@ -1,5 +1,5 @@
 use crate::command::music_play::LoopMode;
-use std::fs::File;
+use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
 
@@ -37,26 +37,26 @@ impl Track {
 
 pub(super) struct NextTrack<'t> {
     track: &'t Track,
-    next_id: u64,
+    next_id: usize,
 }
 impl NextTrack<'_> {
     pub(super) fn track(&self) -> &Track {
         self.track
     }
 
-    pub(super) fn next_id(&self) -> u64 {
+    pub(super) fn next_id(&self) -> usize {
         self.next_id
     }
 }
 
 pub(super) struct PlayList {
     tracks: Vec<Track>,
-    current_index: usize,
+    current_index: usize, //tracks的当前索引，对于定期洗牌模式（周期不重复）则为shuffle_bag
     loop_mode: LoopMode,
     // 用于"周期不重复"模式的随机队列
-    shuffle_bag: Vec<usize>,
+    shuffle_bag: VecDeque<usize>,
     // 换曲ID
-    next_id: u64,
+    next_id: usize,
 }
 
 impl PlayList {
@@ -66,14 +66,14 @@ impl PlayList {
             tracks,
             current_index: tracks_len - 1,
             loop_mode,
-            shuffle_bag: Vec::with_capacity(tracks_len),
+            shuffle_bag: VecDeque::with_capacity(tracks_len),
             next_id: 0,
         }
     }
 
     /// 执行下一首
     /// play_end: 表示播放结束触发
-    pub(super) fn next(&mut self, play_end: bool, next_id: u64) -> Option<NextTrack<'_>> {
+    pub(super) fn next(&mut self, play_end: bool, next_id: usize) -> Option<NextTrack<'_>> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -116,21 +116,25 @@ impl PlayList {
                     // 周期不循环
                     let tracks_len = self.tracks.len();
                     // 重置
-                    if self.shuffle_bag.len() >= tracks_len {
-                        self.shuffle_bag.clear();
-                    }
-                    'root: loop {
-                        let random_index = rand::random_range(0..tracks_len);
-                        // 重复性检查
-                        for i in &self.shuffle_bag {
-                            if *i == random_index {
-                                continue 'root;
+                    if self.shuffle_bag.is_empty() {
+                        //用于洗牌的临时列表
+                        let mut temp_list = {
+                            let mut temp = VecDeque::with_capacity(tracks_len);
+                            for i in 0..tracks_len {
+                                temp.push_back(i);
                             }
+                            temp
+                        };
+                        while !temp_list.is_empty() {
+                            let r = rand::random_range(0..temp_list.len());
+                            self.shuffle_bag.push_back(
+                                temp_list
+                                    .remove(r)
+                                    .expect("逻辑错误：用于洗牌的临时列表无法正常获取项"),
+                            );
                         }
-                        self.shuffle_bag.push(random_index);
-                        self.current_index = random_index;
-                        break;
                     }
+                    self.current_index = self.shuffle_bag.pop_front().unwrap_or(0);
                 }
             };
             Some(NextTrack {
@@ -142,8 +146,15 @@ impl PlayList {
         }
     }
 
-    fn update_next_id(&mut self) -> u64 {
-        if self.next_id == u64::MAX {
+    pub(super) fn set_loop_mod(&mut self, loop_mode: LoopMode) {
+        self.loop_mode = loop_mode;
+        if let LoopMode::PeriodicShuffle = self.loop_mode {
+            self.shuffle_bag.clear();
+        }
+    }
+
+    fn update_next_id(&mut self) -> usize {
+        if self.next_id == usize::MAX {
             self.next_id = 0;
         } else {
             self.next_id += 1;
