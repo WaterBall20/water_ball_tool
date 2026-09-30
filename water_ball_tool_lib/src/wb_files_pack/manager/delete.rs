@@ -357,13 +357,11 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
+            let PackStructItemType::Dir {
                 struct_file_pos,
                 pack_struct,
             } = first_item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            else {
                 unreachable!()
             };
 
@@ -440,13 +438,11 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
+            let PackStructItemType::Dir {
                 struct_file_pos,
                 pack_struct,
             } = first_item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            else {
                 unreachable!()
             };
 
@@ -526,13 +522,7 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = first_item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = first_item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -611,13 +601,7 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = first_item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = first_item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -741,13 +725,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -818,13 +796,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -856,13 +828,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -1042,13 +1008,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -1120,13 +1080,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -1162,13 +1116,7 @@ impl WBFPManager {
                 )));
             }
 
-            let (struct_file_pos, pack_struct) = if let PackStructItemType::Dir {
-                struct_file_pos,
-                pack_struct,
-            } = item.item_type_mut()
-            {
-                (struct_file_pos, pack_struct)
-            } else {
+            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
                 unreachable!()
             };
 
@@ -1324,10 +1272,10 @@ impl WBFPManager {
                     } else {
                         buf.len()
                     };
-                    let mut buf = &mut buf[..this_write_len];
-                    Self::fill_zero(&mut buf);
+                    let buf = &mut buf[..this_write_len];
+                    Self::fill_zero(buf);
                     pack_file.set_pos_write(pos + write_len as u64)?;
-                    pack_file.write_all(&buf)?;
+                    pack_file.write_all(buf)?;
                     write_len += this_write_len;
                 }
             }
@@ -1338,10 +1286,10 @@ impl WBFPManager {
                     } else {
                         buf.len()
                     };
-                    let mut buf = &mut buf[..this_write_len];
-                    Self::fill_random(&mut buf);
+                    let buf = &mut buf[..this_write_len];
+                    Self::fill_random(buf);
                     pack_file.set_pos_write(pos)?;
-                    pack_file.write_all(&buf)?;
+                    pack_file.write_all(buf)?;
                     write_len += this_write_len;
                 }
             }
@@ -1352,20 +1300,20 @@ impl WBFPManager {
                     } else {
                         buf.len()
                     };
-                    let mut buf = &mut buf[..this_write_len];
+                    let buf = &mut buf[..this_write_len];
                     // DoD 5220.22-M: 三次独立磁盘覆写 / Three independent disk overwrites
                     // Pass 1: 全 0x00 → 磁盘 / All zeros → disk
-                    Self::fill_zero(&mut buf);
+                    Self::fill_zero(buf);
                     pack_file.set_pos_write(pos)?;
-                    pack_file.write_all(&buf)?;
+                    pack_file.write_all(buf)?;
                     // Pass 2: 全 0xFF → 磁盘 / All ones → disk
-                    Self::fill_ones(&mut buf);
+                    Self::fill_ones(buf);
                     pack_file.set_pos_write(pos)?;
-                    pack_file.write_all(&buf)?;
+                    pack_file.write_all(buf)?;
                     // Pass 3: 随机字节 → 磁盘 / Random bytes → disk
-                    Self::fill_random(&mut buf);
+                    Self::fill_random(buf);
                     pack_file.set_pos_write(pos)?;
-                    pack_file.write_all(&buf)?;
+                    pack_file.write_all(buf)?;
                     write_len += this_write_len;
                 }
             }

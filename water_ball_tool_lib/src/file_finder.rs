@@ -647,19 +647,16 @@ impl FileFinder {
         warnings: Option<&Arc<Mutex<Vec<SearchWarning>>>>,
         thread_file_count: &mut u64,
     ) {
-        let file_metadata = match path_buf.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                Self::emit_warning(
-                    SearchWarning {
-                        path: path_buf.to_path_buf(),
-                        warning_type: SearchWarningType::MetadataError,
-                    },
-                    stream_tx,
-                    warnings,
-                );
-                return;
-            }
+        let Ok(file_metadata) = path_buf.metadata() else {
+            Self::emit_warning(
+                SearchWarning {
+                    path: path_buf.to_path_buf(),
+                    warning_type: SearchWarningType::MetadataError,
+                },
+                stream_tx,
+                warnings,
+            );
+            return;
         };
 
         if let Some(name) = Self::get_file_name(path_buf) {
@@ -816,26 +813,23 @@ impl FileFinder {
                             warnings.as_ref(),
                         );
                         continue;
-                    } else {
-                        Self::emit_warning(
-                            SearchWarning {
-                                path: entry.path.clone(),
-                                warning_type: SearchWarningType::ReadDirError(err.to_string()),
-                            },
-                            stream_tx.as_ref(),
-                            warnings.as_ref(),
-                        );
-                        continue;
                     }
+                    Self::emit_warning(
+                        SearchWarning {
+                            path: entry.path.clone(),
+                            warning_type: SearchWarningType::ReadDirError(err.to_string()),
+                        },
+                        stream_tx.as_ref(),
+                        warnings.as_ref(),
+                    );
+                    continue;
                 }
             };
 
             for dir_entry in rd.flatten() {
                 let path_buf = dir_entry.path();
 
-                let metadata = if let Ok(m) = path_buf.symlink_metadata() {
-                    m
-                } else {
+                let Ok(metadata) = path_buf.symlink_metadata() else {
                     Self::emit_warning(
                         SearchWarning {
                             path: path_buf,
@@ -1062,12 +1056,12 @@ impl FileFinder {
         let results = Arc::try_unwrap(results)
             .map_err(|_| Error::other("results Arc still has references"))?
             .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let collected_warnings = Arc::try_unwrap(warnings)
             .map_err(|_| Error::other("warnings Arc still has references"))?
             .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         Ok(SearchResult {
             files_list: Self::build_tree(&results, path),

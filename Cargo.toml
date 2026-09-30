@@ -32,6 +32,7 @@ rodio = { version = "0.22.2", features = ["64bit"] }
 lofty = "0.25.4"
 pretty_assertions = "1.4.1"
 colored = "3.1.1"
+cpal = "0.18.2"
 
 
 # package
@@ -46,7 +47,6 @@ documentation.workspace = true
 [dependencies]
 water_ball_tool_lib = { path = "./water_ball_tool_lib" }
 serde_json = { workspace = true }
-serde = { workspace = true }
 indicatif = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -63,7 +63,8 @@ crc32fast = { workspace = true }
 
 rodio = { workspace = true }
 lofty = { workspace = true }
-colored = { workspace = true}
+colored = { workspace = true }
+cpal = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

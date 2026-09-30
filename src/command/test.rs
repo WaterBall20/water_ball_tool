@@ -565,7 +565,7 @@ fn ff_out_file_skip_symlink_err_not_found_dir() {
             ),
             Some(mp),
         )
-        .expect("执行命令行操作时错误");
+            .expect("执行命令行操作时错误");
     });
     assert!(r.is_err(), "搜索不存在的目录应 panic");
     fs::remove_dir_all(&out_dir_path).expect("测试通过后清理临时目录失败");

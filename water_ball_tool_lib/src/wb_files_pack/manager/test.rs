@@ -39,7 +39,7 @@ fn create_manager(
     let pack_io = PackIO::new(pack_file);
     let pack_io = Arc::new(Mutex::new(pack_io));
     let mut manager =
-        WBFPManager::create_pack_file(&pack_path, pack_io.clone(), cow, separate_manifest, true)
+        WBFPManager::create_pack_file(pack_path, pack_io.clone(), cow, separate_manifest, true)
             .expect("无法创建包管理器");
     manager.init_new_pack().expect("初始化新包文件错误");
     Ok((manager, pack_io))

@@ -12,8 +12,10 @@
 
 An all-in-one command-line toolkit written in **Rust**. Currently provides two core features:
 
-- **File Finder** (`ff`) — Multi-threaded parallel directory-tree scanner that emits a JSON file manifest. Supports symlink cycle detection.
-- **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, and BLAKE3 hash verification.
+- **File Finder** (`ff`) — Multi-threaded parallel directory-tree scanner that emits a JSON file manifest. Supports
+  symlink cycle detection.
+- **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, and BLAKE3 hash
+  verification.
 
 ---
 
@@ -81,16 +83,16 @@ water_ball_tool wbfp h my.pack
 
 A custom binary archive format with the following key features:
 
-| Feature | Description |
-|---|---|
-| **A/B atomic writes** | Manifest data blocks use dual-block alternating writes; at least one complete version survives a crash |
-| **BLAKE3 hashing** | File data integrity verification |
-| **Incremental save** | Dirty-flag tracking; only changed parts are written |
-| **Garbage collection** | Auto-merges adjacent free blocks and reuses freed space |
+| Feature                     | Description                                                                                                                                                                                                                                                                |
+|-----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **A/B atomic writes**       | Manifest data blocks use dual-block alternating writes; at least one complete version survives a crash                                                                                                                                                                     |
+| **BLAKE3 hashing**          | File data integrity verification                                                                                                                                                                                                                                           |
+| **Incremental save**        | Dirty-flag tracking; only changed parts are written                                                                                                                                                                                                                        |
+| **Garbage collection**      | Auto-merges adjacent free blocks and reuses freed space                                                                                                                                                                                                                    |
 | **Virtual file add/delete** | `create_dir_all`/`create_file` to create; `delete_file`/`delete_dir_all`/`erase_file`/`erase_dir_all` to delete/erase: delete removes metadata only (data blocks are GC'd, not overwritten), erase overwrites to disk first (Zero/Random/DoD 5220 strategies) then removes |
-| **Progressive save** | Auto-saves periodically while data or files are written |
-| **Process write lock** | `.lock` file + PID for process-level mutual exclusion |
-| **Manifest separation** | Optionally split index data into a `.wbm` file |
+| **Progressive save**        | Auto-saves periodically while data or files are written                                                                                                                                                                                                                    |
+| **Process write lock**      | `.lock` file + PID for process-level mutual exclusion                                                                                                                                                                                                                      |
+| **Manifest separation**     | Optionally split index data into a `.wbm` file                                                                                                                                                                                                                             |
 
 Full specification: [`docs/en_US/wb_files_pack/manifest-data.md`](docs/en_US/wb_files_pack/manifest-data.md)
 

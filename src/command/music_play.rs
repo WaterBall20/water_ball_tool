@@ -1,15 +1,17 @@
 use std::path::Path;
-use std::time::Duration;
 use std::{error, path::PathBuf};
 
-mod data;
+mod audio;
+mod decoder;
+mod play_list;
+pub mod ring_buffer_wait;
 mod running;
 
-use crate::command::music_play::data::{PlayList, Track};
+use crate::command::music_play::play_list::{PlayList, Track};
 use clap::{Args, ValueEnum};
 use indicatif::MultiProgress;
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
@@ -51,42 +53,49 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         args.volume
     };
     let loop_mode = args.mode;
+    info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;
     let mut running = running::Running::create(play_list, mp.as_ref())?;
+    debug!("创建运行时");
     running.set_volume(volume);
+    debug!("设置音量");
     if let Err(e) = running.next() {
         error!("切换下一曲发生错误, err: {e}");
     }
+
+    info!("收集音频信息完成");
+    info!("进入交互模式");
+    info!(
+        "命令（不含括号，括号表示短命令）：\
+    \n|command |作用\
+    \n|exit    |退出程序\
+    \n|(n)ext  |下一首\
+    \n|(P)lay  |播放\
+    \n|(p)ause |暂停"
+    );
 
     //交互处理
     loop {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         match input.trim() {
-            ":exit" => {
-                running.run_stop().unwrap();
+            "exit" => {
+                running.run_stop().expect("退出发生错误");
                 break;
             }
-            ":next" | ":n" => {
+            "next" | "n" => {
                 debug!("开始执行换曲");
                 let r = running.next();
                 if let Err(e) = r {
                     error!("切换下一曲发生错误, err: {e}");
                 }
             }
-            ":play" | ":p" => {
+            "Play" | "P" => {
                 running.play();
             }
-            ":pause" | ":pa" => {
+            "pause" | "p" => {
                 running.pause();
             }
-
-            /*//进度控制
-            "+5s" => {
-                if let Err(e) = running.add_pos(Duration::from_secs(5)) {
-                    error!("增加进度失败, err: {e}");
-                }
-            }*/
             _ => warn!("未知命令： {input}"),
         }
     }

@@ -51,7 +51,7 @@ fn search_dir(path: &Path, skip_symlink: bool) -> FilesList {
         crate::tools::TestTool::expect_ok(rrx.recv(), "接收搜索结果失败"),
         "搜索返回错误",
     )
-    .into_files_list()
+        .into_files_list()
 }
 
 /// 准备测试目录：清理并创建 / Prepare test dir: clean and create
@@ -310,10 +310,7 @@ fn search_stream_receives_all_entries() {
     // 等待搜索完成 / wait for search completion
     // join() 的 Err 是 Box<dyn Any + Send>（非 Display），不能走 expect_ok，
     // 用 match 解包：panic 时直接以字面消息失败
-    let search_result = match handle.join() {
-        Ok(r) => r,
-        Err(_) => panic!("搜索线程异常终止"),
-    };
+    let Ok(search_result) = handle.join() else { panic!("搜索线程异常终止") };
     crate::tools::TestTool::expect_ok(search_result, "搜索过程返回错误");
 
     // 验证：sub 目录 + 3 个文件 = 至少 4 条流式条目（根目录不会被流式输出）
@@ -353,10 +350,7 @@ fn search_stream_empty_dir() {
     for _ in rx {}
     // join() 的 Err 是 Box<dyn Any + Send>（非 Display），不能走 expect_ok，
     // 用 match 解包：panic 时直接以字面消息失败
-    let search_result = match handle.join() {
-        Ok(r) => r,
-        Err(_) => panic!("搜索线程异常终止"),
-    };
+    let Ok(search_result) = handle.join() else { panic!("搜索线程异常终止") };
     crate::tools::TestTool::expect_ok(search_result, "搜索过程返回错误");
 
     assert_eq!(entries.len(), 0, "空目录应无流式条目");
@@ -410,7 +404,7 @@ fn random_tree_search_stress() {
 
     let result = search_dir(&root, false);
     assert_eq!(
-        result.file_count() as u32,
+        u32::try_from(result.file_count()).unwrap_or_default(),
         expected_files,
         "随机树搜索应发现全部 {expected_files} 个文件，实际: {}",
         result.file_count()

@@ -75,7 +75,7 @@ impl ManagerSync {
     /// Open an existing virtual file in read-only mode.
     pub fn open_virtual_file<P: AsRef<Path>>(
         &mut self,
-        path: &P
+        path: &P,
     ) -> Result<PackVirtualFile> {
         self.virtual_file_options()
             .read(true)

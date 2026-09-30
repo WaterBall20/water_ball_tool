@@ -366,7 +366,7 @@ impl PackFileHandle {
         {
             let len = metadata.len();
             let hash_type = *hash_type;
-            let mut buf = vec![0; DATA_DATA_BLOCK_LEN as usize];
+            let mut buf = vec![0; DATA_DATA_BLOCK_LEN];
             //设置位置
             self.set_pos(0)?;
             let mut read_hash = PackFileHash::new(hash_type);

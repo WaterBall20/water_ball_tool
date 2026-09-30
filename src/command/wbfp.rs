@@ -17,7 +17,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -237,7 +237,7 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备打包");
 
-        let data_len = Arc::new(Mutex::new(0));
+        let data_len = Arc::new(AtomicU64::new(0));
 
         let pack = {
             if pack_path.exists() {
@@ -276,7 +276,7 @@ impl WaterBallFilePackArgsRuning {
 
     fn wbfp_p_run(
         wb_pb: Option<ArcMutex<ProgressBar>>,
-        data_len: ArcMutex<u64>,
+        data_len: Arc<AtomicU64>,
         in_path: &Path,
         ff_pb: Option<ProgressBar>,
         mut pack: ManagerSync,
@@ -291,11 +291,7 @@ impl WaterBallFilePackArgsRuning {
         //设置为包文件具体进度条
         if let Some(pb) = &wb_pb {
             let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            pb.set_length(
-                *data_len
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            );
+            pb.set_length(data_len.load(Ordering::SeqCst));
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template(PACK_PROGRESS_STYLE_TEMPLATE)?
@@ -310,7 +306,12 @@ impl WaterBallFilePackArgsRuning {
             info!("输入路径是文件，跳过搜索，直接复制");
             //移除搜索进度条
             drop(ff_pb);
-            let mut file_name = in_path.file_name().unwrap().to_str().unwrap().to_string();
+            let mut file_name = in_path
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
             file_name.push_str(".wbfp");
             let file_metadata = in_path.metadata()?;
             let file_info = FileInfo::new(
@@ -328,7 +329,7 @@ impl WaterBallFilePackArgsRuning {
                     if write_len - last_write_len >= 5 * 1024 * 1024
                         && let Some(pb) = &wb_pb
                     {
-                        let pb = pb.lock().unwrap();
+                        let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         pb.set_length(info.length());
                         pb.set_position(write_len);
                         pb.set_message(format!(
@@ -356,7 +357,7 @@ impl WaterBallFilePackArgsRuning {
                 v
             } else {
                 let thread_count = thread::available_parallelism()
-                    .unwrap_or(NonZero::new(8).unwrap())
+                    .unwrap_or(NonZero::new(8).expect("valid thread count"))
                     .get();
                 info!("未指定线程数量，将最多使用{thread_count}个线程");
                 thread_count
@@ -368,11 +369,11 @@ impl WaterBallFilePackArgsRuning {
             //搜索结果队列
             let results = Arc::new(Mutex::new(VecDeque::new()));
             //搜索结束标志
-            let ff_end = Arc::new(Mutex::new(false));
+            let ff_end = Arc::new(AtomicBool::new(false));
             //控制线程继续和等待的控制变量
             let condver = Arc::new(Condvar::new());
             //文件计数
-            let file_count = Arc::new(Mutex::new(0));
+            let file_count = Arc::new(AtomicU64::new(0));
 
             //创建专门的线程搜索
             let ff_thread = Self::wbfp_p_search(
@@ -400,15 +401,13 @@ impl WaterBallFilePackArgsRuning {
                 file_count,
             );
             //等待线程结束
-            if let Err(e) = ff_thread.join().unwrap() {
+            if let Err(e) = ff_thread.join().expect("ff_thread join failed") {
                 error!("文件搜索线程错误：{e}");
             }
-            *ff_end
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            ff_end.store(true, Ordering::SeqCst);
             //唤醒所有线程，避免死锁
             condver.notify_all();
-            wp_thread.join().unwrap();
+            wp_thread.join().expect("wp_thread join failed");
         }
         info!("操作已完成,文件保存到{}", pack_path.display());
         Ok(())
@@ -418,10 +417,10 @@ impl WaterBallFilePackArgsRuning {
     fn wbfp_p_search(
         in_path: &Path,
         results: &ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
-        ff_end: &ArcMutex<bool>,
+        ff_end: &Arc<AtomicBool>,
         condver: &Arc<Condvar>,
-        file_count: &ArcMutex<u64>,
-        data_len: &ArcMutex<u64>,
+        file_count: &Arc<AtomicU64>,
+        data_len: &Arc<AtomicU64>,
         ff_pb: Option<ProgressBar>,
     ) -> JoinHandle<Result<(), Error>> {
         use std::thread;
@@ -437,7 +436,7 @@ impl WaterBallFilePackArgsRuning {
 
             thread::spawn(move || -> io::Result<()> {
                 let ff = FileFinder;
-                let dir_count = Arc::new(Mutex::new(0));
+                let dir_count = Arc::new(AtomicU64::new(0));
                 //搜索进度
                 let (tx, rx) = mpsc::channel();
                 let (search_stream_handle, stream_results) =
@@ -449,17 +448,18 @@ impl WaterBallFilePackArgsRuning {
                     let dir_count = dir_count.clone();
                     thread::spawn(move || {
                         for (add_file, add_dir) in rx {
-                            let mut file_count = file_count.lock().unwrap();
-                            let mut dir_count = dir_count.lock().unwrap();
+                            file_count.fetch_add(add_file, Ordering::SeqCst);
+                            dir_count.fetch_add(add_dir, Ordering::SeqCst);
 
-                            *file_count += add_file;
-                            *dir_count += add_dir;
-                            let all_count = *file_count + *dir_count;
+                            let all_count = file_count.load(Ordering::SeqCst)
+                                + dir_count.load(Ordering::SeqCst);
                             ff_pb.set_position(all_count);
                             //10的倍数才更新
                             if all_count.is_multiple_of(100) {
                                 ff_pb.set_message(format!(
-                                    "[搜索文件]已发现 {file_count} 文件和 {dir_count} 个目录"
+                                    "[搜索文件]已发现 {} 文件和 {} 个目录",
+                                    file_count.load(Ordering::SeqCst),
+                                    dir_count.load(Ordering::SeqCst),
                                 ));
                             }
                         }
@@ -471,8 +471,11 @@ impl WaterBallFilePackArgsRuning {
                         SearchEvent::Entry(path, info) => {
                             //只有文件才会加入队列
                             if let FileKind::File { .. } = info.file_kind() {
-                                *data_len.lock().unwrap() += info.length();
-                                results.lock().unwrap().push_back((path, info));
+                                data_len.fetch_add(info.length(), Ordering::SeqCst);
+                                results
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .push_back((path, info));
                                 condver.notify_one();
                             }
                         }
@@ -485,13 +488,15 @@ impl WaterBallFilePackArgsRuning {
                     }
                 }
 
-                search_stream_handle.join().unwrap()?;
+                search_stream_handle
+                    .join()
+                    .expect("search_stream_handle join failed")?;
                 info!(
                     "文件搜索已完成: {}个文件，{}个目录",
-                    *file_count.lock().unwrap(),
-                    *dir_count.lock().unwrap()
+                    file_count.load(Ordering::SeqCst),
+                    data_len.load(Ordering::SeqCst)
                 );
-                *ff_end.lock().unwrap() = true;
+                ff_end.store(true, Ordering::SeqCst);
                 //唤醒所有线程，避免死锁
                 condver.notify_all();
                 Ok(())
@@ -504,13 +509,13 @@ impl WaterBallFilePackArgsRuning {
         results: &ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
         in_path: &Path,
         condver: &Arc<Condvar>,
-        ff_end: &ArcMutex<bool>,
+        ff_end: &Arc<AtomicBool>,
         thread_count: usize,
         mp: Option<&MultiProgress>,
         write_optimization: bool,
         wb_pb: Option<ArcMutex<ProgressBar>>,
-        data_len: ArcMutex<u64>,
-        file_count: ArcMutex<u64>,
+        data_len: Arc<AtomicU64>,
+        file_count: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         use std::thread;
         let pack = pack.clone();
@@ -527,7 +532,7 @@ impl WaterBallFilePackArgsRuning {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .unwrap()
+                        .expect("设置进度条模板失败")
                         .progress_chars("=>-"),
                 );
             }
@@ -544,7 +549,9 @@ impl WaterBallFilePackArgsRuning {
                 let files_list = results.clone();
                 let in_dir_path = in_dir_path.clone();
                 let condver = condver.clone();
-                let pb = wb_pbs.pop().unwrap();
+                let pb = wb_pbs
+                    .pop()
+                    .expect("逻辑错误：线程获取线程进度条，进度条不存在");
                 let ff_end = ff_end.clone();
                 if let Some(pb) = &pb {
                     pb.set_prefix(format!("线程{index}"));
@@ -576,17 +583,17 @@ impl WaterBallFilePackArgsRuning {
                 if write_len - last_write_len > 10 * 1024 * 1024
                     && let Some(pb) = &wb_pb
                 {
-                    let pb = pb.lock().unwrap();
+                    let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     //总大小与实际写入量对齐（源文件可能在复制期间增长）
-                    let mut total = data_len.lock().unwrap();
-                    if write_len > *total {
-                        *total = write_len;
+                    let mut total = data_len.load(Ordering::SeqCst);
+                    if write_len > total {
+                        total = write_len;
                     }
-                    pb.set_length(*total);
+                    pb.set_length(total);
                     pb.set_position(write_len);
                     pb.set_message(format!(
                         "[{write_file_count}/{}个文件]",
-                        file_count.lock().expect("获取文件数量")
+                        file_count.load(Ordering::SeqCst),
                     ));
                     last_write_len = write_len;
                 }
@@ -594,7 +601,7 @@ impl WaterBallFilePackArgsRuning {
 
             //等待所有工作线程结束
             for item in thread_handle {
-                item.join().unwrap();
+                item.join().expect("thread join failed");
             }
         })
     }
@@ -617,7 +624,7 @@ impl WaterBallFilePackArgsRuning {
         pb: Option<ProgressBar>,
         files_list: ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
         in_dir_path: &Path,
-        ff_end: ArcMutex<bool>,
+        ff_end: Arc<AtomicBool>,
         condver: Arc<Condvar>,
         main_pb_tx: Sender<(u64, u64)>,
         write_optimization: bool,
@@ -646,13 +653,17 @@ impl WaterBallFilePackArgsRuning {
         };
 
         'write_pack: loop {
-            let (file_path, file_info) = match files_list.lock().unwrap().pop_front() {
+            let (file_path, file_info) = match files_list
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+            {
                 Some(v) => v,
                 None => {
                     //进入挂起
                     loop {
                         //判断搜索是否结束, 确定是否退出线程
-                        if *ff_end.lock().unwrap() {
+                        if ff_end.load(Ordering::SeqCst) {
                             //唤醒所有线程，避免死锁
                             condver.notify_all();
                             break 'write_pack;
@@ -662,13 +673,17 @@ impl WaterBallFilePackArgsRuning {
                             pb.set_style(
                                 ProgressStyle::default_bar()
                                     .template(SPINNER_TEMPLATE)
-                                    .unwrap(),
+                                    .expect("设置进度条模板失败"),
                             );
                             pb.set_message("已挂起");
                         }
 
-                        let mut files_list = files_list.lock().unwrap();
-                        files_list = condver.wait(files_list).unwrap();
+                        let mut files_list = files_list
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        files_list = condver
+                            .wait(files_list)
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                         if let Some(v) = files_list.pop_front() {
                             //恢复进度条样式
@@ -676,7 +691,7 @@ impl WaterBallFilePackArgsRuning {
                                 pb.set_style(
                                     ProgressStyle::default_bar()
                                         .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                                        .unwrap()
+                                        .expect("设置进度条模板失败")
                                         .progress_chars("=>-"),
                                 );
                             }
@@ -687,7 +702,8 @@ impl WaterBallFilePackArgsRuning {
             };
             //写入文件前处理
             //路径处理
-            let pack_path = PathTool::path_remove_head(file_path.as_path(), in_dir_path).unwrap();
+            let pack_path = PathTool::path_remove_head(file_path.as_path(), in_dir_path)
+                .expect("路径去除头部失败");
             Self::copy_file_into_pack(
                 &mut pack_man,
                 &mut run_buf,
@@ -781,7 +797,7 @@ impl WaterBallFilePackArgsRuning {
                         //基于检查修改时间和大小，简单的写入优化判断
                         if write_optimization
                             && (v.get_modified() == info.modified_time()
-                                && v.get_len() == info.length())
+                            && v.get_len() == info.length())
                         {
                             update_pb(
                                 info.length(),
@@ -1024,7 +1040,7 @@ impl WaterBallFilePackArgsRuning {
         }
 
         for h in handles {
-            h.join().unwrap()?;
+            h.join().expect("等待线程错误")?;
         }
 
         info!("操作已完成,文件保存到目录{}", out_dir_path.display());
@@ -1048,16 +1064,15 @@ impl WaterBallFilePackArgsRuning {
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let w_pb = worker_pbs.pop().unwrap();
+        let w_pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
         let out_dir_path = out_dir_path.to_path_buf();
 
         handles.push(thread::spawn(move || -> io::Result<()> {
             let mut run_buf = vec![0u8; BUF_LEN];
 
             loop {
-                let path = match Self::get_queue_path(&queue, &all_done, &w_pb) {
-                    Some(path) => path,
-                    None => return Ok(()),
+                let Some(path) = Self::get_queue_path(&queue, &all_done, w_pb.as_ref()) else {
+                    return Ok(());
                 };
 
                 let item = match pack.get_pack_struct_item(&path) {
@@ -1098,7 +1113,10 @@ impl WaterBallFilePackArgsRuning {
                         let n = children.len();
                         if n > 0 {
                             pending.fetch_add(n, Ordering::SeqCst);
-                            let mut q = queue.0.lock().unwrap();
+                            let mut q = queue
+                                .0
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             for child in children {
                                 q.push_back(path.join(child));
                             }
@@ -1196,10 +1214,12 @@ impl WaterBallFilePackArgsRuning {
     fn get_queue_path(
         queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
         all_done: &Arc<AtomicBool>,
-        w_pb: &Option<ProgressBar>,
+        w_pb: Option<&ProgressBar>,
     ) -> Option<PathBuf> {
         let (lock, cvar) = &**queue;
-        let mut q = lock.lock().unwrap();
+        let mut q = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Some(loop {
             if let Some(p) = q.pop_front() {
                 break p;
@@ -1212,16 +1232,18 @@ impl WaterBallFilePackArgsRuning {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template(SPINNER_TEMPLATE)
-                        .unwrap(),
+                        .expect("设置进度条模板失败"),
                 );
                 pb.set_message("已挂起");
             }
-            q = cvar.wait(q).unwrap();
+            q = cvar
+                .wait(q)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(pb) = &w_pb {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .unwrap()
+                        .expect("设置进度条模板失败")
                         .progress_chars("=>-"),
                 );
             }
@@ -1348,7 +1370,7 @@ impl WaterBallFilePackArgsRuning {
         let pack_path = &args.pack_path;
         let thread_count = args.thread_count.unwrap_or_else(|| {
             let r = thread::available_parallelism()
-                .unwrap_or(NonZero::new(8).unwrap())
+                .unwrap_or(NonZero::new(8).expect("valid parallelism"))
                 .get();
             info!("未指定线程数量，将最多使用{r}个线程");
             r
@@ -1412,7 +1434,7 @@ impl WaterBallFilePackArgsRuning {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .unwrap()
+                    .expect("设置进度条模板失败")
                     .progress_chars("=>-"),
             );
             pb.set_prefix("总进度");
@@ -1426,7 +1448,10 @@ impl WaterBallFilePackArgsRuning {
         let all_done = Arc::new(AtomicBool::new(root_name_list.is_empty()));
 
         {
-            let mut q = queue.0.lock().unwrap();
+            let mut q = queue
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for name in &root_name_list {
                 q.push_back(PathBuf::from(name));
             }
@@ -1440,7 +1465,7 @@ impl WaterBallFilePackArgsRuning {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .unwrap()
+                        .expect("设置进度条模板失败")
                         .progress_chars("=>-"),
                 );
                 pb.set_prefix(format!("线程{i} "));
@@ -1514,13 +1539,13 @@ impl WaterBallFilePackArgsRuning {
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let w_pb = worker_pbs.pop().unwrap();
+        let w_pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
 
         handles.push(thread::spawn(move || -> io::Result<()> {
             loop {
                 // 1. 从队列取路径（空队列时 Condvar 挂起）
                 //    Pop path from queue (Condvar suspend when empty)
-                let path = match Self::get_queue_path(&queue, &all_done, &w_pb) {
+                let path = match Self::get_queue_path(&queue, &all_done, w_pb.as_ref()) {
                     Some(path) => path,
                     None => return Ok(()),
                 };
@@ -1561,7 +1586,10 @@ impl WaterBallFilePackArgsRuning {
                         let n = children.len();
                         if n > 0 {
                             pending.fetch_add(n, Ordering::SeqCst);
-                            let mut q = queue.0.lock().unwrap();
+                            let mut q = queue
+                                .0
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             for child in children {
                                 q.push_back(path.join(child));
                             }
@@ -1626,7 +1654,7 @@ impl WaterBallFilePackArgsRuning {
     fn get_thread_count(thread_count: Option<usize>) -> usize {
         thread_count.unwrap_or_else(|| {
             let r = thread::available_parallelism()
-                .unwrap_or(NonZero::new(8).unwrap())
+                .unwrap_or(NonZero::new(8).expect("逻辑错误"))
                 .get();
             info!("未指定线程数量，将最多使用{r}个线程");
             r

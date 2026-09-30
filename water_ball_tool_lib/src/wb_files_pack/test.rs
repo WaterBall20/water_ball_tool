@@ -190,7 +190,7 @@ fn pack_file_metadata_data_block_save_and_load() {
         ManifestDataBlock::from_block_data_new(b_block_data, 0)
             .expect("从块数据创建ManifestDataBlock失败"),
     )
-    .expect("加载Attribute失败");
+        .expect("加载Attribute失败");
     assert_eq!(b, b_load);
     //Save3
     let b_block_data = b.get_block_data().expect("获取块数据失败").0;
@@ -199,7 +199,7 @@ fn pack_file_metadata_data_block_save_and_load() {
         ManifestDataBlock::from_block_data_new(b_block_data, 0)
             .expect("从块数据创建ManifestDataBlock失败"),
     )
-    .expect("加载Attribute失败");
+        .expect("加载Attribute失败");
     assert_eq!(b, b_load);
 }
 
@@ -251,8 +251,9 @@ fn attribute_load_from_golden_bytes() {
     a.add_file_count(99);
     a.add_dir_count(877);
     a.add_data_len(231);
-    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
-        .expect("从块数据创建ManifestDataBlock失败");
+    let block =
+        ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+            .expect("从块数据创建ManifestDataBlock失败");
     let a_load = Attribute::load(block).expect("加载Attribute失败");
     assert_eq!(a, a_load);
 }
@@ -263,8 +264,9 @@ fn attribute_load_from_golden_bytes() {
 fn attribute_load_version_too_old() {
     let mut a = Attribute::default();
     a.set_version(MANIFEST_VERSION_COMPATIBLE - 1);
-    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
-        .expect("从块数据创建ManifestDataBlock失败");
+    let block =
+        ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+            .expect("从块数据创建ManifestDataBlock失败");
     let err = Attribute::load(block).expect_err("版本过低应加载失败");
     assert!(matches!(err, PackFileError::Version(_)));
 }
@@ -276,8 +278,9 @@ fn attribute_load_version_too_high() {
     let mut a = Attribute::default();
     a.set_version(MANIFEST_VERSION + 1);
     a.set_version_compatible(MANIFEST_VERSION + 1);
-    let block = ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
-        .expect("从块数据创建ManifestDataBlock失败");
+    let block =
+        ManifestDataBlock::from_block_data_new(a.get_block_data().expect("获取块数据失败").0, 0)
+            .expect("从块数据创建ManifestDataBlock失败");
     let err = Attribute::load(block).expect_err("版本过高应加载失败");
     assert!(matches!(err, PackFileError::Version(_)));
 }
@@ -288,7 +291,8 @@ fn attribute_load_version_too_high() {
 fn attribute_load_truncated_payload() {
     // 构造一个远小于 61 字节的 A/B 块负载 / Build an A/B block with a payload far smaller than 61 bytes
     let mut md = ManifestDataBlock::default();
-    md.update(&[0x0a, 0x00, 0x0a, 0x00, 0x00]).expect("更新数据块失败");
+    md.update(&[0x0a, 0x00, 0x0a, 0x00, 0x00])
+        .expect("更新数据块失败");
     let err = Attribute::load(md).expect_err("截断数据应加载失败");
     assert!(matches!(err, PackFileError::Format(_)));
 }
@@ -398,8 +402,7 @@ fn ab_both_corrupted_error() {
     let result = md.get_this_data();
     assert!(
         matches!(result, Err(PackFileError::Integrity(_))),
-        "双块损坏应返回 Integrity 错误，实际: {:?}",
-        result
+        "双块损坏应返回 Integrity 错误，实际: {result:?}"
     );
 }
 
@@ -495,8 +498,7 @@ fn get_ver_rejects_zero() {
     let result = ManifestDataBlock::get_ver(&data);
     assert!(
         matches!(result, Err(PackFileError::Integrity(_))),
-        "版本 0 应返回 Integrity 错误，实际: {:?}",
-        result
+        "版本 0 应返回 Integrity 错误，实际: {result:?}",
     );
 }
 
@@ -512,8 +514,7 @@ fn get_ver_rejects_zero_when_head_tail_match() {
     let result = ManifestDataBlock::get_ver(&data);
     assert!(
         matches!(result, Err(PackFileError::Integrity(_))),
-        "头尾匹配但版本 0 应返回 Integrity 错误，实际: {:?}",
-        result
+        "头尾匹配但版本 0 应返回 Integrity 错误，实际: {result:?}",
     );
 }
 

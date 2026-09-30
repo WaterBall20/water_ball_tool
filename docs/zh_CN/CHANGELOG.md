@@ -23,10 +23,12 @@
 
 ### 包文件管理器重构
 
-- `src/wb_files_pack/manager.rs`: `WBFPManagerRun.write_lock` 重构为独立子结构体 `WBFPManagerRunLock { lock, path, file }`，提升内聚性
+- `src/wb_files_pack/manager.rs`: `WBFPManagerRun.write_lock` 重构为独立子结构体
+  `WBFPManagerRunLock { lock, path, file }`，提升内聚性
 - `WBFPManagerRunLock` 实现 `Clone`（`file` 字段在克隆时置 `None`，避免文件描述符重复）
 - `PackLockInfo.run_lock` 类型从 `bool` 提升为 `WBFPManagerRunLock`，传递完整锁状态
-- `src/wb_files_pack/data.rs`: `WBFilesPackManifest::file()` 返回类型从 `&Option<PackIO>` 改为 `Option<&PackIO>`，更符合 Rust API 惯例
+- `src/wb_files_pack/data.rs`: `WBFilesPackManifest::file()` 返回类型从 `&Option<PackIO>` 改为 `Option<&PackIO>`，更符合
+  Rust API 惯例
 - `WBFPManager::save_all()` 可见性从 `pub(super)` 调整为 `pub(crate)`
 
 ### PackVirtualFile API 简化
@@ -61,7 +63,11 @@
 
 ### 移除警告忽略代码
 
-- 移除代码库中全部 5 处 lint 抑制属性：`src/file_finder/test.rs` 与 `src/wb_files_pack/pack_io/file.rs` 中的 `#![allow(clippy::unwrap_used)]`，以及 `src/file_finder.rs` 中 3 个函数上的 `#[allow(clippy::too_many_arguments)]`
-- `src/tools.rs` 新增 `TestTool::expect_ok()` 测试辅助函数——配合 crate 级 `#![deny(clippy::unwrap_used)]` 的非 panic unwrap 替代方案
-- 测试代码中全部 30 处 `unwrap()`/`expect()` 调用改写为 `TestTool::expect_ok()` 或显式 `match`（线程 `join()` 错误为 `Box<dyn Any + Send>`，非 `Display`）
-- AGENTS.md：新增"禁止忽略警告的属性（FORBIDDEN）"规则——`#[allow(...)]`、`#![allow(...)]`、`#[expect(...)]` 及任何其他 lint 抑制属性不得添加到生产或测试代码中
+- 移除代码库中全部 5 处 lint 抑制属性：`src/file_finder/test.rs` 与 `src/wb_files_pack/pack_io/file.rs` 中的
+  `#![allow(clippy::unwrap_used)]`，以及 `src/file_finder.rs` 中 3 个函数上的 `#[allow(clippy::too_many_arguments)]`
+- `src/tools.rs` 新增 `TestTool::expect_ok()` 测试辅助函数——配合 crate 级 `#![deny(clippy::unwrap_used)]` 的非 panic
+  unwrap 替代方案
+- 测试代码中全部 30 处 `unwrap()`/`expect()` 调用改写为 `TestTool::expect_ok()` 或显式 `match`（线程 `join()` 错误为
+  `Box<dyn Any + Send>`，非 `Display`）
+- AGENTS.md：新增"禁止忽略警告的属性（FORBIDDEN）"规则——`#[allow(...)]`、`#![allow(...)]`、`#[expect(...)]` 及任何其他 lint
+  抑制属性不得添加到生产或测试代码中

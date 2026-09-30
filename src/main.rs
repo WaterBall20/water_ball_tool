@@ -7,6 +7,7 @@
 //! Parses CLI arguments and routes them to subcommands via `command::cli()`.
 //! Initializes the global logging system (tracing), routing log output
 //! through a `MultiProgressWriter` adapter to coexist with the indicatif progress bar.
+#![deny(clippy::unwrap_used)]
 
 use crate::command::Cli;
 use clap::Parser;

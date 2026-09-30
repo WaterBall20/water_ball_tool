@@ -8,26 +8,26 @@ use std::path::{Path, PathBuf};
 pub struct PathTool;
 
 impl PathTool {
-/// 将文件路径分割为字符串数组，排除根目录分隔符。
-///
-/// Split a file path into a vector of string segments, excluding root separators.
-///
-/// # 算法 / Algorithm
-///
-/// 遍历 `Path` 的 `Components` 迭代器，将每个非根段转换为 `String` 并收集到 `Vec` 中。
-/// 根目录 `/` 被自动排除。
-///
-/// Iterates over the `Path` `Components` iterator, converts each non-root segment to a `String`,
-/// and collects them into a `Vec`. The root `/` is automatically excluded.
-///
-/// # 示例 / Example
-///
-/// ```rust
-/// use water_ball_tool::tools::PathTool;
-/// let segments = PathTool::path_to_string_vec("a/b/c");
-/// assert_eq!(segments, vec!["a", "b", "c"]);
-/// ```
-pub fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
+    /// 将文件路径分割为字符串数组，排除根目录分隔符。
+    ///
+    /// Split a file path into a vector of string segments, excluding root separators.
+    ///
+    /// # 算法 / Algorithm
+    ///
+    /// 遍历 `Path` 的 `Components` 迭代器，将每个非根段转换为 `String` 并收集到 `Vec` 中。
+    /// 根目录 `/` 被自动排除。
+    ///
+    /// Iterates over the `Path` `Components` iterator, converts each non-root segment to a `String`,
+    /// and collects them into a `Vec`. The root `/` is automatically excluded.
+    ///
+    /// # 示例 / Example
+    ///
+    /// ```rust
+    /// use water_ball_tool_lib::tools::PathTool;
+    /// let segments = PathTool::path_to_string_vec("a/b/c");
+    /// assert_eq!(segments, vec!["a", "b", "c"]);
+    /// ```
+    pub fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         let path = path.as_ref();
         /*TODO:路径前部处理
         let path = path
@@ -47,29 +47,29 @@ pub fn path_to_string_vec<P: AsRef<Path>>(path: P) -> Vec<String> {
         path_list
     }
 
-/// 从完整路径中移除头部部分，得到相对路径。
-///
-/// Strip head prefix from a full path to obtain a relative path.
-///
-/// # 算法 / Algorithm
-///
-/// 先将 `path` 和 `head` 分别通过 `path_to_string_vec` 转为段数组。
-/// 如果 `path` 的段数组长度大于 `head` 的段数组，则拼接 `path[head.len()..]` 段并返回。
-/// 否则返回 `None`，表示 `path` 不以 `head` 开头。
-///
-/// Converts both `path` and `head` to segment arrays via `path_to_string_vec`.
-/// If `path` has more segments than `head`, joins `path[head.len()..]` and returns it.
-/// Otherwise returns `None`, meaning `path` does not start with `head`.
-///
-/// # 示例 / Example
-///
-/// ```rust
-/// use water_ball_tool::tools::PathTool;
-/// let relative = PathTool::path_remove_head("a/b/c/d", "a/b");
-/// assert_eq!(relative, Some(std::path::PathBuf::from("c/d")));
-/// assert!(PathTool::path_remove_head("x/y", "a/b").is_none());
-/// ```
-pub fn path_remove_head<P: AsRef<Path>>(path: P, head: P) -> Option<PathBuf> {
+    /// 从完整路径中移除头部部分，得到相对路径。
+    ///
+    /// Strip head prefix from a full path to obtain a relative path.
+    ///
+    /// # 算法 / Algorithm
+    ///
+    /// 先将 `path` 和 `head` 分别通过 `path_to_string_vec` 转为段数组。
+    /// 如果 `path` 的段数组长度大于 `head` 的段数组，则拼接 `path[head.len()..]` 段并返回。
+    /// 否则返回 `None`，表示 `path` 不以 `head` 开头。
+    ///
+    /// Converts both `path` and `head` to segment arrays via `path_to_string_vec`.
+    /// If `path` has more segments than `head`, joins `path[head.len()..]` and returns it.
+    /// Otherwise returns `None`, meaning `path` does not start with `head`.
+    ///
+    /// # 示例 / Example
+    ///
+    /// ```rust
+    /// use water_ball_tool_lib::tools::PathTool;
+    /// let relative = PathTool::path_remove_head("a/b/c/d", "a/b");
+    /// assert_eq!(relative, Some(std::path::PathBuf::from("c/d")));
+    /// assert!(PathTool::path_remove_head("x/y", "a/b").is_none());
+    /// ```
+    pub fn path_remove_head<P: AsRef<Path>>(path: P, head: P) -> Option<PathBuf> {
         let head_vec = PathTool::path_to_string_vec(head);
         let path_vec = PathTool::path_to_string_vec(path);
         let mut new_path = PathBuf::new();
@@ -110,7 +110,7 @@ pub fn path_remove_head<P: AsRef<Path>>(path: P, head: P) -> Option<PathBuf> {
 /// # 示例 / Example
 ///
 /// ```rust
-/// use water_ball_tool::tools::bytes_len_to_string;
+/// use water_ball_tool_lib::tools::bytes_len_to_string;
 /// assert_eq!(bytes_len_to_string(0), "0B");
 /// assert_eq!(bytes_len_to_string(500), "500B");
 /// assert_eq!(bytes_len_to_string(2048), "2.00KiB");

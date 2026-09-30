@@ -31,7 +31,7 @@ impl WBFPManager {
         if pack_file.run_data.all_write_len - pack_file.run_data.last_all_write_len
             > PROGRESSIVE_SAVE_WRITE_THRESHOLD
             || pack_file.run_data.all_cr_file_count - pack_file.run_data.last_all_cr_file_count
-                > 10_000
+            > 10_000
         {
             pack_file.run_data.last_all_write_len = pack_file.run_data.all_write_len;
             pack_file.run_data.last_all_cr_file_count = pack_file.run_data.all_cr_file_count;

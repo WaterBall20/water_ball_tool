@@ -1,11 +1,11 @@
 use crate::wb_files_pack::pack_io::PackIO;
 
-//AI=== binrw 序列化 trait / binrw serialization traits
-use binrw::{BinRead, BinWrite};
 //AI_END===
 use super::error::{PackFileError, Result};
 use super::manager::DEFAULT_COW;
 use super::pack_io::file_handle::PackFileHandle;
+//AI=== binrw 序列化 trait / binrw serialization traits
+use binrw::{BinRead, BinWrite};
 use std::collections::HashMap;
 use std::sync::{Mutex, Weak};
 
@@ -304,9 +304,9 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                            + a_data_len]
+                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                        + a_data_len]
                 } else {
                     let b_data_len = usize::try_from(Self::get_data_len(b_data)?)
                         .map_err(|_| PackFileError::Format("数据长度转换失败".into()))?;
@@ -314,9 +314,9 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                            + b_data_len]
+                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                        + b_data_len]
                 },
             ))
         } else {
@@ -409,8 +409,8 @@ impl ManifestDataBlock {
             Ok(
                 &block_data[b_data_index + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
                     ..b_data_index
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
+                    + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
+                    + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
             )
         }
     }
@@ -499,7 +499,7 @@ impl AttributeData {
 ///
 /// 存储包文件的全局属性信息，包括版本、文件计数、数据位置等。
 /// Stores global attribute information for the pack file, including version, file counts, data positions, etc.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Attribute {
     /// binrw 属性 IO 数据（on-disk 字段）/ binrw attribute IO data (on-disk fields)
     attr_data: AttributeData,
@@ -512,16 +512,6 @@ pub struct Attribute {
 impl PartialEq for Attribute {
     fn eq(&self, other: &Self) -> bool {
         self.attr_data == other.attr_data && self.data_block == other.data_block
-    }
-}
-
-impl Default for Attribute {
-    fn default() -> Self {
-        Self {
-            attr_data: AttributeData::default(),
-            data_block: ManifestDataBlock::default(),
-            dirty: false,
-        }
     }
 }
 
@@ -686,7 +676,7 @@ impl ManifestDataBlockTrait for Attribute {
             Ok(()) => cursor.into_inner(),
             // 写入内存 Vec 缓冲区不会失败：Vec<u8> 的 Write 实现是惰性的
             // Writing to an in-memory Vec cannot fail: Vec<u8>'s Write impl is infallible
-            Err(err) => unreachable!("binrw 写入属性数据到内存失败: {err}"),
+            Err(err) => unreachable!("binrw 写入属性数据到内存失败: {}", err),
         }
         //AI_END===
     }
@@ -1037,7 +1027,7 @@ impl PartialEq for PackStructItemType {
 ///
 /// 代表包文件中的一个目录节点，包含子文件和子目录的映射表。
 /// Represents a directory node in the pack file, containing a map of child files and subdirectories.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PackStruct {
     /// 子项映射表（名称 → 项）/ Children map (name → item)
     items: HashMap<String, PackStructItem>,
@@ -1049,17 +1039,6 @@ pub struct PackStruct {
     /// 不持久化到磁盘；包文件打开时初始化为 0。
     /// Not persisted to disk; initialized to 0 when pack file opens.
     child_locked_count: u64,
-}
-
-impl Default for PackStruct {
-    fn default() -> Self {
-        Self {
-            items: HashMap::default(),
-            data_block: ManifestDataBlock::default(),
-            dirty: false,
-            child_locked_count: 0,
-        }
-    }
 }
 
 impl PartialEq for PackStruct {
@@ -1756,14 +1735,14 @@ impl WBFilesPackManifest {
         }
     }
 
-    pub(crate) fn file_mut(&mut self) -> &mut Option<crate::wb_files_pack::pack_io::PackIO> {
+    pub(crate) fn file_mut(&mut self) -> &mut Option<PackIO> {
         &mut self.file
     }
 
     pub(crate) fn new(
         attribute: Attribute,
         root_struct: PackStruct,
-        file: Option<crate::wb_files_pack::pack_io::PackIO>,
+        file: Option<PackIO>,
     ) -> Self {
         Self {
             attribute,

@@ -1,8 +1,8 @@
 /*
 开始时间：26/02/13 11：31
  */
-use crate::wb_files_pack::manager_sync::{PackAccessMode, ManagerSync};
 use crate::wb_files_pack::error::Result;
+use crate::wb_files_pack::manager_sync::{ManagerSync, PackAccessMode};
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -227,7 +227,7 @@ impl Write for PackVirtualFile {
 /// Provides a builder pattern for configuring virtual file open options,
 /// supporting read-only / write-only / read-write and create-new modes.
 pub struct VirtualFileOpenOptions<'a> {
-    sync: &'a mut ManagerSync, 
+    sync: &'a mut ManagerSync,
     read: bool,
     write: bool,
     create_new: bool,
@@ -241,7 +241,7 @@ pub struct VirtualFileOpenOptions<'a> {
     alloc_size: Option<u64>,
 }
 
-impl <'a>VirtualFileOpenOptions<'a> {
+impl<'a> VirtualFileOpenOptions<'a> {
     /// 创建默认选项（所有标志为 false）。
     /// Create default options (all flags false).
     pub fn new(sync: &'a mut ManagerSync) -> Self {

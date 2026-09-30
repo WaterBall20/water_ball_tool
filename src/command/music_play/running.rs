@@ -1,5 +1,5 @@
 use crate::command::music_play::LoopMode;
-use crate::command::music_play::data::{NextTrack, PlayList};
+use crate::command::music_play::play_list::{NextTrack, PlayList};
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
 use rodio::source::SeekError;
@@ -108,7 +108,7 @@ impl Running {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] {percent:>3.bold.magenta}%  {msg}")
-                        .unwrap()
+                        .expect("设置进度条模板失败")
                         .progress_chars("█▉▊▋▌▍▎▏ ")
                 );
                 pb.set_prefix("暂停中");
@@ -133,14 +133,17 @@ impl Running {
                     //次数检查和超时检查
                     if play_object.last_play_pos_eq_count > 3
                         && SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .checked_sub(play_object.last_pos_eq_start_time)
-                            .unwrap_or_default()
-                            > Duration::from_secs(10)
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .checked_sub(play_object.last_pos_eq_start_time)
+                        .unwrap_or_default()
+                        > Duration::from_secs(10)
                     {
                         condvar.notify_all(); //唤醒所有线程
                     }
+                } else {
+                    //重置数量
+                    play_object.last_play_pos_eq_count = 0;
                 }
                 play_object.last_play_pos = play_pos;
                 if let Some(track) = play_object.play_list.get_current_track() {
@@ -163,7 +166,7 @@ impl Running {
                             track_dur_minutes,
                             track_dur_secs % 60,
                         )
-                        .cyan(); // 时间: 青色
+                            .cyan(); // 时间: 青色
 
                         let volume_str =
                             format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow(); // 音量: 黄色
@@ -187,30 +190,23 @@ impl Running {
                         .wait_timeout(play_object, Duration::from_millis(50))
                         .expect("Condvar won't fail")
                         .0;
-                    if play_object.run_stop {
-                        break; // 如果正在释放就退出线程
-                    }
                 } else {
                     if let Some(pb) = &pb {
                         pb.set_prefix("异常暂停中");
                     }
-                    info!("[UI线程]无法获取当前播放音轨，线程挂起");
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                    info!("[UI线程]线程唤醒");
                 }
                 //暂停时挂起
                 if !play_object.is_playing {
                     if let Some(pb) = &pb {
                         pb.set_prefix("暂停中");
                     }
-                    debug!("[UI线程]播放暂停，线程挂起");
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                    debug!("[UI线程]线程唤醒");
-                    if let Some(pb) = &pb {
-                        pb.set_prefix("播放中");
-                    }
                     if play_object.run_stop {
                         break; // 如果正在释放就退出线程
+                    }
+                    if let Some(pb) = &pb {
+                        pb.set_prefix("播放中");
                     }
                 }
             }
@@ -231,108 +227,102 @@ impl Running {
                     if let Some(o) = o {
                         let track = o.track();
                         info!(
-                            "[换曲线程]自动换曲为, Title: {}, Artist: {}, \
-                                                    \n Path: {}",
-                            track.title(),
-                            track.artist(),
+                            "自动换曲为, Title: {}, Artist: {}, \
+                            \n Path: {}",
+                            track.title().bright_white().bold(),
+                            track.artist().bright_blue(),
                             track.path().display()
                         );
-                    } else {
-                        debug!("[换曲线程]自动换曲，没有换曲");
-                        if let LoopMode::Sequential = play_object.play_list.loop_mod() {
-                            info!("[换曲线程]自动换曲，顺序播放已结束，暂停播放");
-                            play_object.pause();
-                        }
+                    } else if let LoopMode::Sequential = play_object.play_list.loop_mod() {
+                        info!("自动换曲，顺序播放已结束，暂停播放");
+                        play_object.pause();
                     }
                 }
                 Err(e) => {
-                    error!("[换曲线程]自动换曲发生错误 {e:?}");
+                    error!("自动换曲发生错误 {e:?}");
                 }
             }
         }
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_millis(10));
-                let mut play_object = play_object
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if !play_object.is_playing {
-                    debug!("[换曲线程]播放暂停，线程挂起");
-                    play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                    debug!("[换曲线程]线程唤醒");
-                    if play_object.run_stop {
-                        break; // 如果正在释放就退出线程
-                    }
-                    continue;
-                }
-                // 如果运行时退出就退出线程
-                if play_object.run_stop {
-                    break;
-                }
-                //如果正在播放
-                let play_pos = play_object.player.get_pos();
-                // 挂起检查、次数检查和超时检查
-                if play_object.last_play_pos == play_pos && play_object.last_play_pos_eq_count > 3 {
-                    let last_eq_dt = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .checked_sub(play_object.last_pos_eq_start_time)
-                        .unwrap_or_default();
-                    if last_eq_dt > Duration::from_secs(10) {
-                        warn!("检测到播放挂起，将换曲，超时: {last_eq_dt:?}",);
-                        let next_id = play_object.next_id;
-                        next_inner(&mut play_object, next_id);
-                        //复位
-                        play_object.last_play_pos_eq_count = 0;
+        thread::Builder::new()
+            .name("next_thread".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(10));
+                    let mut play_object = play_object
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !play_object.is_playing {
+                        play_object = condvar.wait(play_object).expect("Condvar won't fail");
+                        if play_object.run_stop {
+                            break; // 如果正在释放就退出线程
+                        }
                         continue;
                     }
-                }
-                if let Some(track) = play_object.play_list.get_current_track() {
-                    let track_dur = *track.duration();
-                    let next_id = play_object.next_id;
-                    let wait_dur = track_dur
-                        .checked_sub(play_pos)
-                        .unwrap_or(Duration::default());
-                    // 判断是否需要挂起
-                    if wait_dur.as_millis() > 0 {
-                        debug!("[换曲线程]线程指定超时挂起，超时： {wait_dur:?}");
-                        let (guard, timeout_result) = condvar
-                            .wait_timeout(play_object, wait_dur)
-                            .expect("Condvar won't fail");
-                        play_object = guard;
-
-                        // 如果运行时退出就退出线程
-                        if play_object.run_stop {
-                            break;
+                    // 如果运行时退出就退出线程
+                    if play_object.run_stop {
+                        break;
+                    }
+                    //如果正在播放
+                    let play_pos = play_object.player.get_pos();
+                    // 挂起检查、次数检查和超时检查
+                    if play_object.last_play_pos == play_pos
+                        && play_object.last_play_pos_eq_count > 3
+                    {
+                        let last_eq_dt = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .checked_sub(play_object.last_pos_eq_start_time)
+                            .unwrap_or_default();
+                        if last_eq_dt > Duration::from_secs(10) {
+                            warn!("检测到播放挂起，将换曲，超时: {last_eq_dt:?}",);
+                            let next_id = play_object.next_id;
+                            next_inner(&mut play_object, next_id);
+                            //复位
+                            play_object.last_play_pos_eq_count = 0;
+                            continue;
                         }
-                        if timeout_result.timed_out() {
-                            debug!("[换曲线程]线程唤醒，已超时");
-                            // 检查是否播放和时间
-                            if play_object.is_playing
-                                && track_dur
+                    }
+                    if let Some(track) = play_object.play_list.get_current_track() {
+                        let track_dur = *track.duration();
+                        let next_id = play_object.next_id;
+                        let wait_dur = track_dur
+                            .checked_sub(play_pos)
+                            .unwrap_or(Duration::default());
+                        // 判断是否需要挂起
+                        if wait_dur.as_millis() > 0 {
+                            let (guard, timeout_result) = condvar
+                                .wait_timeout(play_object, wait_dur)
+                                .expect("Condvar won't fail");
+                            play_object = guard;
+
+                            // 如果运行时退出就退出线程
+                            if play_object.run_stop {
+                                break;
+                            }
+                            if timeout_result.timed_out() {
+                                // 检查是否播放和时间
+                                if play_object.is_playing
+                                    && track_dur
                                     .checked_sub(play_pos)
                                     .unwrap_or(Duration::default())
                                     .as_millis()
                                     <= 10
-                            {
-                                //执行换曲
-                                next_inner(&mut play_object, next_id);
+                                {
+                                    //执行换曲
+                                    next_inner(&mut play_object, next_id);
+                                }
                             }
                         } else {
-                            debug!("[换曲线程]线程唤醒，非超时");
+                            //执行换曲
+                            next_inner(&mut play_object, next_id);
                         }
                     } else {
-                        //执行换曲
-                        next_inner(&mut play_object, next_id);
+                        warn!("[换曲线程]无法获取当前播放音轨，线程挂起");
+                        play_object = condvar.wait(play_object).expect("Condvar won't fail");
                     }
-                } else {
-                    info!("[换曲线程]无法获取当前播放音轨，线程挂起");
-                    play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                    info!("[换曲线程]线程唤醒");
                 }
-            }
-            debug!("[换曲线程]线程正在退出");
-        })
+            })
+            .expect("无法创建线程")
     }
 
     /// 播放

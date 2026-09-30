@@ -20,6 +20,7 @@ mod music_play;
 #[cfg(test)]
 mod test;
 mod wbfp;
+pub mod music_play_test;
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -34,9 +35,10 @@ enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
     MP(MusicPlayArgs),
+    Mpt(MusicPlayArgs),
 }
 
-static BUF_LEN: usize = 1024 * 1024;
+static BUF_LEN: usize = 10 * 1024 * 1024;
 
 /// 打包进度条样式模板 / Pack progress bar style template
 ///
@@ -79,5 +81,6 @@ pub(crate) fn cli(cli: Cli, mp: Option<MultiProgress>) -> Result<(), Box<dyn std
         Commands::Ff(args) => ff::args(args, mp),
         Commands::Wbfp(commands) => wbfp::commands(commands, mp),
         Commands::MP(args) => music_play::args(args, mp),
+        Commands::Mpt(args) => music_play_test::args(args, mp),
     }
 }

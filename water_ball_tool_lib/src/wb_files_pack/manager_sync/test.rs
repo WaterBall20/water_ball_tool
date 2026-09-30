@@ -1,5 +1,5 @@
-use crate::wb_files_pack::{OverwriteStrategy, PackFileError};
 use crate::wb_files_pack::pack_io::file::PackVirtualFile;
+use crate::wb_files_pack::{OverwriteStrategy, PackFileError};
 use crate::{tools::TestTool, wb_files_pack::manager_sync::ManagerSync};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -678,8 +678,8 @@ fn multi_instance_write_non_overlapping() {
             wr.write_all(&[0u8; 12]).expect("写入数据失败");
         }
 
-// 克隆同步管理器，创建两个"独立"的实例入口
-// Clone synchronized manager to create two "independent" instance entry points
+        // 克隆同步管理器，创建两个"独立"的实例入口
+        // Clone synchronized manager to create two "independent" instance entry points
         let mut alloc2 = alloc.clone();
         let mut alloc3 = alloc.clone();
 
@@ -1153,8 +1153,7 @@ fn delete_dir_all_nonempty() {
             .expect("获取根目录项列表失败");
         assert!(
             root_items.is_empty(),
-            "删除 data 后根目录应为空，实际: {:?}",
-            root_items
+            "删除 data 后根目录应为空，实际: {root_items:?}",
         );
     }
     TestTool::cleanup_test_dir(&dir);
@@ -1267,14 +1266,12 @@ fn delete_nonexistent() {
         let result = alloc.delete_file(&"nonexistent.txt");
         assert!(
             matches!(result, Err(PackFileError::NotFound(_))),
-            "删除不存在的文件应返回 NotFound，实际: {:?}",
-            result
+            "删除不存在的文件应返回 NotFound，实际: {result:?}",
         );
         let result = alloc.delete_dir_all(&"nonexistent_dir");
         assert!(
             matches!(result, Err(PackFileError::NotFound(_))),
-            "删除不存在的目录应返回 NotFound，实际: {:?}",
-            result
+            "删除不存在的目录应返回 NotFound，实际: {result:?}",
         );
     }
     TestTool::cleanup_test_dir(&dir);
