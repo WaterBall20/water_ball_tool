@@ -1,11 +1,17 @@
 use crate::command::music_play::MusicPlayArgs;
 use crate::command::music_play::ring_buffer_wait::RingBufferWait;
+use cpal::SAMPLE_RATE_48K;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use indicatif::MultiProgress;
 use std::error;
-use tracing::{debug, error, info};
+use std::time::{Duration, SystemTime};
+use tracing::{error, info};
 
 pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
+    const RING_CAPACITY: usize = 4096 * 2; // 4096 帧 * 2 声道（f32 样本数）
+    const BUF_LEN_U32: u32 = 512;
+    const BUF_LEN: usize = BUF_LEN_U32 as usize;
+    const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
     // 只做这一件事：往 cpal 回调里填一段正弦波
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
@@ -14,12 +20,12 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
 
     let config = cpal::StreamConfig {
         channels: 2,
-        sample_rate: 48000,
-        buffer_size: cpal::BufferSize::Fixed(512), // 先试 512
+        sample_rate: SAMPLE_RATE,
+        buffer_size: cpal::BufferSize::Fixed(BUF_LEN_U32), // 先试 512
     };
     // 在你的播放器初始化阶段
-    const RING_CAPACITY: usize = 4096 * 2; // 4096 帧 * 2 声道（f32 样本数）
-    let mut ring_buf = RingBufferWait::new_max_len(RING_CAPACITY);
+
+    let mut ring_buf = RingBufferWait::new_max_len(RING_CAPACITY).expect("创建缓冲区失败");
     let p = 0.1;
 
     // producer 交给解码线程
@@ -29,10 +35,14 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         let r = device.build_output_stream(
             config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                ring_buf.read(data).expect("读取缓冲区失败");
+                data.fill(0.0);
+                let read_len = ring_buf.read(data).expect("读取缓冲区失败");
                 // 先填一段 440 Hz 正弦波验证连通性
                 // 用 info.timestamp() 检查实际回调周期
-                info!("info: {info:?}");
+                info!(
+                    "从缓冲区读取， data len: {}, read len : {read_len}, info: {info:?}",
+                    data.len()
+                );
             },
             |err| error!("流错误: {err}"),
             None,
@@ -40,14 +50,22 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         r
     }?;
     stream.play()?;
-    const BUF_LEN: usize = 512;
+    let start_time = SystemTime::now();
+    let time = Duration::from_secs(5);
     let mut buf_vec = vec![0.0; BUF_LEN];
-    for _ in 0..1024 {
-        for j in 0..BUF_LEN {
-            buf_vec[j] = rand::random_range(-p..p);
+    while SystemTime::now()
+        .duration_since(start_time)
+        .expect("时间转换失败")
+        < time
+    {
+        for v in &mut buf_vec {
+            *v = rand::random_range(-p..p);
         }
-        ring_buf.write(&buf_vec).expect("写入缓冲区失败");
+        let len = ring_buf.write(&buf_vec).expect("写入缓冲区失败");
+        info!("写入缓冲区, len: {len}");
     }
+    let end_time = SystemTime::now();
+    info!("start_time: {start_time:?}, end_time: {end_time:?}");
     drop(ring_buf);
     Ok(())
 }
