@@ -3,8 +3,9 @@ use std::error::Error;
 use std::fmt::Debug;
 use std::io;
 use std::io::{Read, Write};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 // 等待版本的环形缓冲区
 pub struct RingBufferWait<T> {
@@ -167,6 +168,37 @@ impl<T> RingBufferWait<T> {
         r
     }
 }
+impl<T> RingBufferWait<T> /*VecDeque*/ {
+    pub fn pop_front(&mut self) -> RingBufferWaitResult<T, ()> {
+        self.pop_inner_fn(VecDeque::pop_front)
+    }
+
+    pub fn pop_back(&mut self) -> RingBufferWaitResult<T, ()> {
+        self.pop_inner_fn(VecDeque::pop_back)
+    }
+    pub fn push_back(&mut self, value: T) -> RingBufferWaitResult<(), T> {
+        self.push_inner_fn(value, VecDeque::push_back)
+    }
+
+    pub fn push_front(&mut self, value: T) -> RingBufferWaitResult<(), T> {
+        self.push_inner_fn(value, VecDeque::push_front)
+    }
+
+    pub fn get_item(&self, index: usize) -> Option<RingBufferWaitItemGuard<'_, T>> {
+        let buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if index >= buffer.len() {
+            None
+        } else {
+            Some(RingBufferWaitItemGuard {
+                guard: buffer,
+                index,
+            })
+        }
+    }
+}
 
 impl<T> RingBufferWait<T> {
     pub fn new() -> Self {
@@ -181,21 +213,6 @@ impl<T> RingBufferWait<T> {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self::new_inner(VecDeque::with_capacity(capacity), 0)
-    }
-
-    pub fn pop_front(&mut self) -> RingBufferWaitResult<T, ()> {
-        self.pop_inner_fn(VecDeque::pop_front)
-    }
-
-    pub fn pop_back(&mut self) -> RingBufferWaitResult<T, ()> {
-        self.pop_inner_fn(VecDeque::pop_back)
-    }
-    pub fn push_back(&mut self, value: T) -> RingBufferWaitResult<(), T> {
-        self.push_inner_fn(value, VecDeque::push_back)
-    }
-
-    pub fn push_front(&mut self, value: T) -> RingBufferWaitResult<(), T> {
-        self.push_inner_fn(value, VecDeque::push_front)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -261,16 +278,6 @@ impl<T: Copy> RingBufferWait<T> /*Write*/ {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         while self.is_max_len.load(Ordering::Relaxed) {
-            let total = buffer.len().checked_add(buf.len()).ok_or_else(|| {
-                RingBufferWaitError::new(
-                    RingBufferWaitErrorKind::LenOverflow {
-                        buffer_len: buffer.len(),
-                        buf_len: buf.len(),
-                    },
-                    "buffer.len() + buf.len() 溢出 usize",
-                    None,
-                )
-            })?;
             if buffer.len() >= self.max_len.load(Ordering::Relaxed) {
                 // 可挂起检查
                 if self.object_size.load(Ordering::Acquire) == 1 {
@@ -309,7 +316,7 @@ impl<T: Copy> RingBufferWait<T> /*Write*/ {
         Ok(write_len)
     }
 
-    fn write_all(&mut self, buf: &[T]) -> RingBufferWaitResult<(), T> {
+    pub(crate) fn write_all(&mut self, buf: &[T]) -> RingBufferWaitResult<(), T> {
         let mut buffer = self
             .buffer
             .lock()
@@ -566,4 +573,31 @@ pub enum RingBufferWaitErrorKind {
     WriteSizeTooLarge,
     TryReserveError(TryReserveError),
     LenOverflow { buffer_len: usize, buf_len: usize },
+}
+
+pub struct RingBufferWaitItemGuard<'a, T> {
+    guard: MutexGuard<'a, VecDeque<T>>,
+    index: usize,
+}
+
+impl<T> Deref for RingBufferWaitItemGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        if let Some(value) = self.guard.get(self.index) {
+            value
+        } else {
+            unreachable!("逻辑错误：创建了下标不存在对象的RingBufferWaitItemGuard")
+        }
+    }
+}
+
+impl<'a, T> DerefMut for RingBufferWaitItemGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        if let Some(value) = self.guard.get_mut(self.index) {
+            value
+        } else {
+            unreachable!("逻辑错误：创建了下标不存在对象的RingBufferWaitItemGuard")
+        }
+    }
 }

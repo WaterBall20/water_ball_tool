@@ -9,7 +9,7 @@ use tracing::{error, info};
 
 pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
     const RING_CAPACITY: usize = 4096 * 2; // 4096 帧 * 2 声道（f32 样本数）
-    const BUF_LEN_U32: u32 = 512;
+    const BUF_LEN_U32: u32 = 1024;
     const BUF_LEN: usize = BUF_LEN_U32 as usize;
     const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
     // 只做这一件事：往 cpal 回调里填一段正弦波
@@ -51,7 +51,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     }?;
     stream.play()?;
     let start_time = SystemTime::now();
-    let time = Duration::from_secs(5);
+    let time = Duration::from_secs(10);
     let mut buf_vec = vec![0.0; BUF_LEN];
     while SystemTime::now()
         .duration_since(start_time)

@@ -17,10 +17,11 @@ use std::time::Duration;
 
 mod ff;
 mod music_play;
+#[cfg(debug_assertions)]
+pub mod music_play_test;
 #[cfg(test)]
 mod test;
 mod wbfp;
-pub mod music_play_test;
 
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
@@ -35,6 +36,7 @@ enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
     MP(MusicPlayArgs),
+    #[cfg(debug_assertions)]
     Mpt(MusicPlayArgs),
 }
 
@@ -81,6 +83,7 @@ pub(crate) fn cli(cli: Cli, mp: Option<MultiProgress>) -> Result<(), Box<dyn std
         Commands::Ff(args) => ff::args(args, mp),
         Commands::Wbfp(commands) => wbfp::commands(commands, mp),
         Commands::MP(args) => music_play::args(args, mp),
+        #[cfg(debug_assertions)]
         Commands::Mpt(args) => music_play_test::args(args, mp),
     }
 }

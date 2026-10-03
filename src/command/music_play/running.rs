@@ -133,11 +133,11 @@ impl Running {
                     //次数检查和超时检查
                     if play_object.last_play_pos_eq_count > 3
                         && SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .checked_sub(play_object.last_pos_eq_start_time)
-                        .unwrap_or_default()
-                        > Duration::from_secs(10)
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .checked_sub(play_object.last_pos_eq_start_time)
+                            .unwrap_or_default()
+                            > Duration::from_secs(10)
                     {
                         condvar.notify_all(); //唤醒所有线程
                     }
@@ -166,7 +166,7 @@ impl Running {
                             track_dur_minutes,
                             track_dur_secs % 60,
                         )
-                            .cyan(); // 时间: 青色
+                        .cyan(); // 时间: 青色
 
                         let volume_str =
                             format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow(); // 音量: 黄色
@@ -229,8 +229,8 @@ impl Running {
                         info!(
                             "自动换曲为, Title: {}, Artist: {}, \
                             \n Path: {}",
-                            track.title().bright_white().bold(),
-                            track.artist().bright_blue(),
+                            track.title(),
+                            track.artist(),
                             track.path().display()
                         );
                     } else if let LoopMode::Sequential = play_object.play_list.loop_mod() {
@@ -303,10 +303,10 @@ impl Running {
                                 // 检查是否播放和时间
                                 if play_object.is_playing
                                     && track_dur
-                                    .checked_sub(play_pos)
-                                    .unwrap_or(Duration::default())
-                                    .as_millis()
-                                    <= 10
+                                        .checked_sub(play_pos)
+                                        .unwrap_or(Duration::default())
+                                        .as_millis()
+                                        <= 10
                                 {
                                     //执行换曲
                                     next_inner(&mut play_object, next_id);
