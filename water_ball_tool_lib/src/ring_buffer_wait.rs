@@ -259,6 +259,10 @@ impl<T> RingBufferWait<T> {
         }
     }
 
+    pub fn max_len(&self) -> usize {
+        self.max_len.load(Ordering::Acquire)
+    }
+
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
     }
@@ -799,7 +803,7 @@ impl Read for RingBufferWaitGuard<'_, u8> {
 
 type RingBufferWaitResult<T, O> = Result<T, RingBufferWaitError<O>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RingBufferWaitError<T> {
     error_kind: RingBufferWaitErrorKind,
     message: String,
@@ -876,7 +880,7 @@ impl<T> From<TryReserveError> for RingBufferWaitError<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RingBufferWaitErrorKind {
     Other,
     Full,

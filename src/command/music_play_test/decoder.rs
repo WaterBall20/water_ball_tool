@@ -1,16 +1,16 @@
 use std::any::Any;
 use std::fs::File;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, mpsc};
 use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use tracing::{debug, error};
-use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
+use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
 
 pub(super) struct Decoder {
     thread_handle: Option<std::thread::JoinHandle<DecoderResult<()>>>, //
@@ -19,11 +19,7 @@ pub(super) struct Decoder {
     format: Option<Box<dyn FormatReader>>,
     track_id: u32,
     decoder: Option<Box<dyn AudioDecoder>>,
-}
-impl Drop for Decoder {
-    fn drop(&mut self) {
-        _ = self.stop_inner();
-    }
+    event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
 }
 impl Decoder {
     pub fn new(ring_buf: RingBufferWait<f32>, path: PathBuf) -> DecoderResult<Self> {
@@ -77,29 +73,33 @@ impl Decoder {
             format: Some(format),
             track_id,
             decoder: Some(decoder),
+            event_list: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
-    pub fn run<F>(&mut self, mut f: Option<F>) -> DecoderResult<()>
-    where
-        F: FnMut(DecoderEvent) + Send + 'static,
-    {
+    pub fn run(&mut self) -> DecoderResult<()> {
+        fn emit(event: DecoderEvent, list: &mut Vec<Box<dyn DecoderEventSink>>) {
+            for sink in list.iter_mut() {
+                sink.emit(event.clone());
+            }
+        }
         if self.thread_handle.is_none() {
-            let ring_buf = self.ring_buf.clone();
             let stop = self.stop.clone();
             let mut format = self.format.take().expect("self.format is None");
             let track_id = self.track_id;
             let mut decoder = self.decoder.take().expect("decoder is None");
+            let event_list = self.event_list.clone();
             // 4. 解码循环
-            let mut buf = Vec::with_capacity(ring_buf.len());
+            let write_len = self.ring_buf.max_len() / 4;
+            let mut buf = Vec::with_capacity(self.ring_buf.max_len());
             let thread_handle = {
-                let mut ring_buf = ring_buf.clone();
+                let mut ring_buf = self.ring_buf.clone();
                 let stop = stop.clone();
                 std::thread::Builder::new()
                     .name("decoder".to_string())
                     .spawn(move || -> DecoderResult<()> {
+                        debug!("decoder run thread loop start");
                         loop {
-                            debug!("decoder run thread loop");
                             // 检查停止信号
                             if stop.load(Ordering::Acquire) {
                                 break;
@@ -108,15 +108,19 @@ impl Decoder {
                             let packet = match format.next_packet() {
                                 Ok(Some(p)) => p,
                                 Ok(None) => {
-                                    if let Some(f) = &mut f {
-                                        f(DecoderEvent {
-                                            result: Ok(DecoderEventType::EOF),
-                                        });
-                                    }
+                                    let mut event_list = event_list
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    emit(
+                                        DecoderEvent {
+                                            result: Ok(DecoderEventType::Eof),
+                                        },
+                                        &mut event_list,
+                                    );
                                     break;
                                 }
                                 Err(e) => {
-                                    eprintln!("Error reading packet: {e}");
+                                    error!("Error reading packet: {e}");
                                     break;
                                 }
                             };
@@ -131,7 +135,28 @@ impl Decoder {
                                     decoded.copy_to_vec_interleaved(&mut buf);
 
                                     // 写入环形缓冲区
-                                    ring_buf.write_all(&buf).expect("Ring buffer write failed");
+                                    for chunk in buf.chunks(write_len) {
+                                        // 检查停止信号
+                                        if stop.load(Ordering::Acquire) {
+                                            break;
+                                        }
+                                        // 分块后，每一块的长度都 ≤ CHUNK_SIZE ≤ ring 容量
+                                        // 因此 write_all 不会返回 WriteSizeTooLarge
+                                        if let Err(e) = ring_buf.write_all(chunk) {
+                                            // 只可能是致命错误（锁异常、溢出等），上报后退出
+                                            let event = DecoderEvent {
+                                                result: Err(DecoderEventError {
+                                                    message: format!("write_all failed: {e}"),
+                                                    kind: DecoderEventErrorKind::RingBufferError(e),
+                                                }),
+                                            };
+                                            let mut list = event_list
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                            emit(event, &mut list);
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                                 Err(symphonia::core::errors::Error::DecodeError(e)) => {
                                     error!("Decode error (skipping frame): {e}");
@@ -143,6 +168,7 @@ impl Decoder {
                                 }
                             }
                         }
+                        debug!("decoder run thread loop end");
                         Ok(())
                     })
             }?;
@@ -153,9 +179,16 @@ impl Decoder {
         }
     }
 
+    pub fn add_event(&mut self, event: Box<dyn DecoderEventSink>) {
+        self.event_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event);
+    }
+
     fn stop_inner(&mut self) -> DecoderResult<()> {
-        self.ring_buf.clear();
         self.stop.store(true, Ordering::Release);
+        self.ring_buf.clear();
         self.join()
     }
 
@@ -180,17 +213,79 @@ impl Decoder {
     }
 }
 
-struct DecoderEventItem {
-    event_tx: Sender<DecoderEvent>,
-    thread_join_handle: std::thread::JoinHandle<()>,
+pub trait DecoderEventSink: Send + 'static {
+    fn emit(&mut self, event: DecoderEvent);
+    fn new<F>(f: F) -> Box<Self>
+    where
+        F: Fn(DecoderEvent) + Send + 'static,
+        Self: Sized;
 }
 
+pub struct DecoderEventChannelSink(Sender<DecoderEvent>);
+
+impl DecoderEventSink for DecoderEventChannelSink {
+    fn emit(&mut self, event: DecoderEvent) {
+        // send 非阻塞；满了就丢弃（或 try_send + 计数）
+        let _ = self.0.send(event);
+    }
+
+    fn new<F>(f: F) -> Box<Self>
+    where
+        F: Fn(DecoderEvent) + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            for event in receiver {
+                f(event);
+            }
+        });
+        Box::new(Self(sender))
+    }
+}
+
+pub struct DecoderEventDirectSink(Box<dyn Fn(DecoderEvent) + Send + 'static>);
+
+impl DecoderEventSink for DecoderEventDirectSink {
+    fn emit(&mut self, event: DecoderEvent) {
+        self.0(event); // 就在解码线程里跑
+    }
+
+    fn new<F>(f: F) -> Box<Self>
+    where
+        F: Fn(DecoderEvent) + Send + 'static,
+    {
+        Box::new(Self(Box::new(f)))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct DecoderEvent {
-    result: DecoderResult<DecoderEventType>,
+    result: Result<DecoderEventType, DecoderEventError>,
 }
 
+impl DecoderEvent {
+    pub fn result(&self) -> &Result<DecoderEventType, DecoderEventError> {
+        &self.result
+    }
+    pub fn get_result(self) -> Result<DecoderEventType, DecoderEventError> {
+        self.result
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) enum DecoderEventType {
-    EOF,
+    Eof,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DecoderEventError {
+    message: String,
+    kind: DecoderEventErrorKind,
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum DecoderEventErrorKind {
+    RingBufferError(RingBufferWaitError<f32>),
 }
 
 pub(super) type DecoderResult<T> = Result<T, DecoderError>;

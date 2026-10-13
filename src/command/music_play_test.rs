@@ -1,3 +1,6 @@
+use crate::command::music_play_test::decoder::{
+    DecoderEventChannelSink, DecoderEventSink, DecoderEventType,
+};
 use crate::command::music_play_test::play_list::{PlayList, Track};
 use clap::{Args, ValueEnum};
 use cpal::SAMPLE_RATE_48K;
@@ -7,6 +10,8 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use std::error;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
 
@@ -21,7 +26,7 @@ pub(crate) struct MusicPlayArgs {
     files: Vec<PathBuf>,
     ///初始音量 (0到<1的小数或0-100的数，大于或等于1视为0-100)
     #[arg(short, long, default_value_t = 0.75)]
-    volume: f64,
+    volume: f32,
     ///详细输出
     #[arg(long)]
     verbose: bool,
@@ -44,73 +49,12 @@ pub(crate) enum LoopMode {
     PeriodicShuffle,
 }
 
-pub fn args1(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
-    let files = args.files;
-    let volume = {
-        if args.volume < 0.0 {
-            panic!("参数错误：声音参数不能小于0")
-        } else if args.volume > 100.0 {
-            panic!("参数错误：声音参数不能大于100")
-        }
-        args.volume
-    };
-    let loop_mode = args.mode;
-    info!("开始搜集音频信息");
-    let play_list = create_play_list(&files, loop_mode)?;
-    let mut running = running::Running::create(play_list, mp.as_ref())?;
-    debug!("创建运行时");
-    running.set_volume(volume);
-    debug!("设置音量");
-    if let Err(e) = running.next() {
-        error!("切换下一曲发生错误, err: {e}");
-    }
-
-    info!("收集音频信息完成");
-    info!("进入交互模式");
-    info!(
-        "命令（不含括号，括号表示短命令）：\
-    \n|command |作用\
-    \n|exit    |退出程序\
-    \n|(n)ext  |下一首\
-    \n|(P)lay  |播放\
-    \n|(p)ause |暂停"
-    );
-
-    //交互处理
-    loop {
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        match input.trim() {
-            "exit" => {
-                running.run_stop().expect("退出发生错误");
-                break;
-            }
-            "next" | "n" => {
-                debug!("开始执行换曲");
-                let r = running.next();
-                if let Err(e) = r {
-                    error!("切换下一曲发生错误, err: {e}");
-                }
-            }
-            "Play" | "P" => {
-                running.play();
-            }
-            "pause" | "p" => {
-                running.pause();
-            }
-            _ => warn!("未知命令： {input}"),
-        }
-    }
-
-    Ok(())
-}
-
 pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
     const BUF_LEN_U32: u32 = 1024;
     const BUF_LEN: usize = BUF_LEN_U32 as usize;
     const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
     const SAMPLE_RATE_F64: f64 = SAMPLE_RATE as f64;
-    // 只做这一件事：往 cpal 回调里填一段正弦波
+
     let host = cpal::default_host();
     let Some(device) = host.default_output_device() else {
         panic!("No output device available");
@@ -124,8 +68,31 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         buffer_size: cpal::BufferSize::Fixed(BUF_LEN_U32), // 先试 512
     };
     // 在你的播放器初始化阶段
-    let ring_capacity = SAMPLE_RATE as usize * channels as usize;
-    let mut ring_buf = RingBufferWait::new_max_len(ring_capacity).expect("创建缓冲区失败");
+    let ring_capacity = SAMPLE_RATE as usize * channels as usize * 4;
+    let ring_buf = RingBufferWait::new_max_len(ring_capacity).expect("创建缓冲区失败");
+
+    let files = args.files;
+    let volume = {
+        if args.volume < 0.0 {
+            panic!("参数错误：声音参数不能小于0")
+        } else if args.volume > 100.0 {
+            panic!("参数错误：声音参数不能大于100")
+        }
+        Arc::new(AtomicU32::new(args.volume.to_bits()))
+    };
+    let loop_mode = args.mode;
+    info!("开始搜集音频信息");
+    let next_id = Arc::new(AtomicUsize::new(0));
+    let play_list = create_play_list(&files, loop_mode)?;
+    let play_list = Arc::new(Mutex::new(play_list));
+    let decoder = Arc::new(Mutex::new(None));
+    next_inner(
+        play_list.clone(),
+        decoder.clone(),
+        false,
+        next_id.clone(),
+        ring_buf.clone(),
+    );
 
     // producer 交给解码线程
     // consumer 交给 cpal 回调（需要 move 进闭包）
@@ -135,6 +102,9 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
             config,
             move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                 let len = ring_buf.try_read(data).unwrap_or(0);
+                for datum in &mut data[..len] {
+                    *datum *= f32::from_bits(volume.load(Ordering::Relaxed));
+                }
                 data[len..].fill(0.0);
             },
             |err| error!("流错误: {err}"),
@@ -142,48 +112,61 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         );
         r
     }?;
-    /*let start_time = SystemTime::now();
-    let time = Duration::from_secs(10);
-    let p = 0.1;
-
-    let mut buf_vec = vec![0.0; BUF_LEN];
-    while SystemTime::now()
-        .duration_since(start_time)
-        .expect("时间转换失败")
-        < time
-    {
-        for i in buf_vec.chunks_mut(channels as usize) {
-            let v = rand::random_range(-p..p);
-            for i in i {
-                *i = v;
+    //交互处理
+    loop {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        match input.trim() {
+            "next" | "n" => {
+                debug!("开始执行换曲");
+                next_inner(
+                    play_list.clone(),
+                    decoder.clone(),
+                    false,
+                    next_id.clone(),
+                    ring_buf.clone(),
+                );
             }
+            "Play" | "P" => {
+                debug!("播放");
+                stream.play().expect("播放失败");
+            }
+            "pause" | "p" => {
+                debug!("暂停");
+                stream.pause().expect("暂停失败");
+            }
+            "exit" => {
+                debug!("退出");
+                if let Some(decoder) = decoder.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    decoder.stop().expect("停止解码发生错误");
+                }
+                break;
+            }
+            _ => warn!("未知命令： {input}"),
         }
-        ring_buf.write_all(&buf_vec).expect("写入缓冲区失败");
-        info!("写入缓冲区");
     }
-    let end_time = SystemTime::now();
-    info!("start_time: {start_time:?}, end_time: {end_time:?}");
-    drop(ring_buf);*/
-    let files = args.files;
-    let volume = {
-        if args.volume < 0.0 {
-            panic!("参数错误：声音参数不能小于0")
-        } else if args.volume > 100.0 {
-            panic!("参数错误：声音参数不能大于100")
-        }
-        args.volume
-    };
-    let loop_mode = args.mode;
-    info!("开始搜集音频信息");
-    let mut next_id = 0;
-    let mut play_list = create_play_list(&files, loop_mode)?;
-    let track = play_list.next(false, next_id);
+    Ok(())
+}
+
+fn next_inner(
+    play_list: Arc<Mutex<PlayList>>,
+    decoder: Arc<Mutex<Option<decoder::Decoder>>>,
+    play_end: bool,
+    next_id: Arc<AtomicUsize>,
+    ring_buf: RingBufferWait<f32>,
+) {
+    let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
+    let mut decoder_lock = decoder.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(decoder) = decoder_lock.take() {
+        decoder.stop().expect("停止解码发生错误");
+    }
+    let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
     if track.is_none() {
         error!("切换下一曲发生错误, 不存在");
     }
-    let mut decoder = if let Some(t) = track {
-        //info!("换曲： {:?}", t.track());
-        next_id = t.next_id();
+    *decoder_lock = if let Some(t) = track {
+        info!("换曲： {:?}", t.track());
+        next_id.store(t.next_id(), Ordering::Release);
         Some(
             decoder::Decoder::new(ring_buf.clone(), t.track().path().to_path_buf())
                 .expect("创建解码器失败"),
@@ -191,55 +174,32 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     } else {
         None
     };
-    let next_fn =
-    if let Some(decoder) = &mut decoder {
-        decoder.run().expect("解码运行失败");
+    if let Some(decoder_lock) = &mut *decoder_lock {
+        decoder_lock.run().expect("解码运行失败");
+        let play_list = play_list.clone();
+        let decoder = decoder.clone();
+        let next_id = next_id.clone();
+        let ring_buf = ring_buf.clone();
+        decoder_lock.add_event(DecoderEventChannelSink::new(move |e| {
+            debug!("解码器事件触发：{e:?}");
+            match e.result() {
+                Ok(decoder_event) => match decoder_event {
+                    DecoderEventType::Eof => {
+                        next_inner(
+                            play_list.clone(),
+                            decoder.clone(),
+                            true,
+                            next_id.clone(),
+                            ring_buf.clone(),
+                        );
+                    }
+                },
+                Err(err) => {
+                    todo!()
+                }
+            }
+        }));
     }
-
-    //交互处理
-    loop {
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        match input.trim() {
-            "exit" => {
-                if let Some(decoder) = decoder.take() {
-                    decoder.stop().expect("停止解码发生错误");
-                }
-                break;
-            }
-            "next" | "n" => {
-                debug!("开始执行换曲");
-                if let Some(decoder) = decoder.take() {
-                    decoder.stop().expect("停止解码发生错误");
-                }
-                let track = play_list.next(false, next_id);
-                if track.is_none() {
-                    error!("切换下一曲发生错误, 不存在");
-                }
-                decoder = if let Some(t) = track {
-                    //info!("换曲： {:?}", t.track());
-                    next_id = t.next_id();
-                    Some(
-                        decoder::Decoder::new(ring_buf.clone(), t.track().path().to_path_buf())
-                            .expect("创建解码器失败"),
-                    )
-                } else {
-                    None
-                };
-                if let Some(decoder) = &mut decoder {
-                    decoder.run().expect("解码运行失败");
-                }
-            }
-            "Play" | "P" => {
-                stream.play().expect("播放失败");
-            }
-            "pause" | "p" => {
-                stream.pause().expect("暂停失败");
-            }
-            _ => warn!("未知命令： {input}"),
-        }
-    }
-    Ok(())
 }
 
 fn create_play_list(
