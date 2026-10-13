@@ -8,7 +8,6 @@
 //! updating progress bars with consistent styling.
 
 use crate::command::ff::FileFinderArgs;
-use crate::command::music_play::MusicPlayArgs;
 use crate::command::wbfp::WaterBallFilePackCommand;
 use clap::error::Result;
 use clap::{Parser, Subcommand};
@@ -35,9 +34,9 @@ pub(crate) struct Cli {
 enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
-    MP(MusicPlayArgs),
+    MP(music_play::MusicPlayArgs),
     #[cfg(debug_assertions)]
-    Mpt(MusicPlayArgs),
+    Mpt(music_play_test::MusicPlayArgs),
 }
 
 static BUF_LEN: usize = 10 * 1024 * 1024;

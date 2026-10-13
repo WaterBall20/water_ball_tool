@@ -69,6 +69,18 @@ impl<T> RingBufferWait<T> {
             .unwrap_or_else(|e| self.buffer_poison_sync_inner(e))
     }
 
+    fn try_lock_inner(&self) -> RingBufferWaitResult<MutexGuard<'_, VecDeque<T>>, T> {
+        let r = self.buffer.try_lock();
+        match r {
+            Ok(r) => Ok(r),
+            Err(_) => Err(RingBufferWaitError::new(
+                RingBufferWaitErrorKind::Locked,
+                "缓冲区正在被锁定",
+                None,
+            )),
+        }
+    }
+
     fn push_wait_inner<'a>(
         &self,
         buffer: MutexGuard<'a, VecDeque<T>>,
@@ -239,12 +251,16 @@ impl<T> RingBufferWait<T> {
         }
         let buffer = self.buffer.lock();
         match buffer {
-            Ok((guard)) => Ok(guard_new(self, guard)),
+            Ok(guard) => Ok(guard_new(self, guard)),
             Err(e) => {
                 let guard = self.buffer_poison_sync_inner(e);
                 Err(PoisonError::new(guard_new(self, guard)))
             }
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -301,7 +317,37 @@ impl<T> RingBufferWait<T> {
 }
 
 impl<T: Copy> RingBufferWait<T> /*Write*/ {
-    pub fn write(&mut self, buf: &[T]) -> RingBufferWaitResult<usize, T> {
+    fn write_inner(&self, mut buffer: MutexGuard<'_, VecDeque<T>>, buf: &[T]) -> usize {
+        let write_len = if self.is_max_len.load(Ordering::Relaxed) {
+            self.max_len
+                .load(Ordering::Relaxed)
+                .checked_sub(buffer.len())
+                .map(|n| n.min(buf.len()))
+        } else {
+            Some(buf.len())
+        };
+        let Some(write_len) = write_len else {
+            unreachable!("逻辑错误，或发生竟态")
+        };
+        for v in &buf[..write_len] {
+            buffer.push_back(*v);
+        }
+        self.pop_condvar.notify_one();
+        self.len.store(buffer.len(), Ordering::Release);
+        write_len
+    }
+
+    pub fn write(&mut self, buf: &[T]) -> usize {
+        let buffer = self.lock_inner();
+        self.write_inner(buffer, buf)
+    }
+
+    pub fn try_write(&mut self, buf: &[T]) -> RingBufferWaitResult<usize, T> {
+        let buffer = self.try_lock_inner()?;
+        Ok(self.write_inner(buffer, buf))
+    }
+
+    pub fn write_wait(&mut self, buf: &[T]) -> RingBufferWaitResult<usize, T> {
         let mut buffer = self.lock_inner();
         while self.is_max_len.load(Ordering::Relaxed) {
             if buffer.len() >= self.max_len.load(Ordering::Relaxed) {
@@ -320,23 +366,7 @@ impl<T: Copy> RingBufferWait<T> /*Write*/ {
             break;
         }
 
-        let write_len = if self.is_max_len.load(Ordering::Relaxed) {
-            self.max_len
-                .load(Ordering::Relaxed)
-                .checked_sub(buffer.len())
-                .map(|n| n.min(buf.len()))
-        } else {
-            Some(buf.len())
-        };
-        let Some(write_len) = write_len else {
-            unreachable!("逻辑错误，或发生竟态")
-        };
-        for v in &buf[..write_len] {
-            buffer.push_back(*v);
-        }
-        self.pop_condvar.notify_one();
-        self.len.store(buffer.len(), Ordering::Release);
-        Ok(write_len)
+        Ok(self.write_inner(buffer, buf))
     }
 
     pub fn write_all(&mut self, buf: &[T]) -> RingBufferWaitResult<(), T> {
@@ -388,7 +418,35 @@ impl<T: Copy> RingBufferWait<T> /*Write*/ {
 }
 
 impl<T: Copy> RingBufferWait<T> /*Read*/ {
-    pub fn read(&mut self, buf: &mut [T]) -> RingBufferWaitResult<usize, T> {
+    fn read_inner(&self, mut buffer: MutexGuard<'_, VecDeque<T>>, buf: &mut [T]) -> usize {
+        if buffer.is_empty() {
+            return 0;
+        }
+        let read_len = buf.len().min(buffer.len());
+        for i in buf.iter_mut().take(read_len) {
+            if let Some(v) = buffer.pop_front() {
+                *i = v;
+            } else {
+                unreachable!("逻辑错误，或发生不当的竟态");
+            }
+        }
+        self.len.store(buffer.len(), Ordering::Release);
+        self.push_condvar.notify_one();
+        read_len
+    }
+
+    pub fn read(&mut self, buf: &mut [T]) -> usize {
+        let buffer = self.lock_inner();
+        self.read_inner(buffer, buf)
+    }
+    pub fn try_read(&mut self, buf: &mut [T]) -> RingBufferWaitResult<usize, T> {
+        let buffer = self.try_lock_inner()?;
+        Ok(self.read_inner(buffer, buf))
+    }
+
+    //
+
+    pub fn read_wait(&mut self, buf: &mut [T]) -> RingBufferWaitResult<usize, T> {
         let mut buffer = self.lock_inner();
         loop {
             // 为空挂起
@@ -407,36 +465,24 @@ impl<T: Copy> RingBufferWait<T> /*Read*/ {
             }
             break;
         }
-        let read_len = buf.len().min(buffer.len());
-        for i in buf.iter_mut().take(read_len) {
-            if let Some(v) = buffer.pop_front() {
-                *i = v;
-            } else {
-                unreachable!("逻辑错误，或发生不当的竟态");
-            }
-        }
-        self.len.store(buffer.len(), Ordering::Release);
-        self.push_condvar.notify_one();
-        Ok(read_len)
+        Ok(self.read_inner(buffer, buf))
     }
 
     pub fn read_exact(&mut self, buf: &mut [T]) -> RingBufferWaitResult<(), T> {
         let mut buffer = self.lock_inner();
-        if self.is_max_len.load(Ordering::Relaxed)
-            && buf.len() > self.max_len.load(Ordering::Relaxed)
-        {
-            return Err(RingBufferWaitError::new(
-                RingBufferWaitErrorKind::ReadSizeTooLarge,
-                &format!(
-                    "读取的大小过大, buffer max len: {}, buf len: {}",
-                    self.max_len.load(Ordering::Relaxed),
-                    buf.len()
-                ),
-                None,
-            ));
-        }
         //不满足挂起直到满足
-        loop {
+        while self.is_max_len.load(Ordering::Relaxed) {
+            if buf.len() > self.max_len.load(Ordering::Relaxed) {
+                return Err(RingBufferWaitError::new(
+                    RingBufferWaitErrorKind::ReadSizeTooLarge,
+                    &format!(
+                        "读取的大小过大, buffer max len: {}, buf len: {}",
+                        self.max_len.load(Ordering::Relaxed),
+                        buf.len()
+                    ),
+                    None,
+                ));
+            }
             if buffer.len() < buf.len() {
                 // 可挂起检查
                 if self.object_size.load(Ordering::Acquire) == 1 {
@@ -468,7 +514,7 @@ impl<T: Copy> RingBufferWait<T> /*Read*/ {
 
 impl Write for RingBufferWait<u8> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        Ok(self.write(buf)?)
+        Ok(Self::write(self, buf))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -476,17 +522,17 @@ impl Write for RingBufferWait<u8> {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        Ok(self.write_all(buf)?)
+        Ok(Self::write_all(self, buf)?)
     }
 }
 
 impl Read for RingBufferWait<u8> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        Ok(self.read(buf)?)
+        Ok(Self::read(self, buf))
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        Ok(self.read_exact(buf)?)
+        Ok(Self::read_exact(self, buf)?)
     }
 }
 
@@ -609,15 +655,9 @@ impl<T> IndexMut<usize> for RingBufferWaitGuard<'_, T> {
     }
 }
 
-impl<T: Copy> RingBufferWaitGuard<'_, T> {
-    pub fn write(&mut self, buf: &[T]) -> RingBufferWaitResult<usize, ()> {
-        let buffer = &mut *self.guard;
-        if self.is_max_len.load(Ordering::Relaxed)
-            && buffer.len() >= self.max_len.load(Ordering::Relaxed)
-        {
-            return Ok(0);
-        }
-
+impl<T: Copy> RingBufferWaitGuard<'_, T> /*Write*/ {
+    pub fn write(&mut self, buf: &[T]) -> usize {
+        let buffer = &mut self.guard;
         let write_len = if self.is_max_len.load(Ordering::Relaxed) {
             self.max_len
                 .load(Ordering::Relaxed)
@@ -632,12 +672,13 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> {
         for v in &buf[..write_len] {
             buffer.push_back(*v);
         }
+        self.pop_condvar.notify_one();
         self.len.store(buffer.len(), Ordering::Release);
-        Ok(write_len)
+        write_len
     }
 
     pub fn write_all(&mut self, buf: &[T]) -> RingBufferWaitResult<(), T> {
-        let buffer = &mut *self.guard;
+        let mut buffer = &mut self.guard;
         if self.is_max_len.load(Ordering::Relaxed) {
             if buf.len() > self.max_len.load(Ordering::Relaxed) {
                 return Err(RingBufferWaitError::new(
@@ -672,16 +713,16 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> {
             buffer.push_back(*v);
         }
         self.len.store(buffer.len(), Ordering::Release);
+        self.pop_condvar.notify_all();
         Ok(())
     }
 }
 
-impl<T: Copy> RingBufferWaitGuard<'_, T> {
-    pub fn read(&mut self, buf: &mut [T]) -> RingBufferWaitResult<usize, T> {
-        let buffer = &mut *self.guard;
-        // 为空挂起
+impl<T: Copy> RingBufferWaitGuard<'_, T> /*Read*/ {
+    pub fn read(&mut self, buf: &mut [T]) -> usize {
+        let buffer = &mut self.guard;
         if buffer.is_empty() {
-            return Ok(0);
+            return 0;
         }
         let read_len = buf.len().min(buffer.len());
         for i in buf.iter_mut().take(read_len) {
@@ -692,11 +733,12 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> {
             }
         }
         self.len.store(buffer.len(), Ordering::Release);
-        Ok(read_len)
+        self.push_condvar.notify_one();
+        read_len
     }
 
     pub fn read_exact(&mut self, buf: &mut [T]) -> RingBufferWaitResult<(), T> {
-        let buffer = &mut *self.guard;
+        let buffer = &mut self.guard;
         if self.is_max_len.load(Ordering::Relaxed)
             && buf.len() > self.max_len.load(Ordering::Relaxed)
         {
@@ -710,15 +752,13 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> {
                 None,
             ));
         }
-        //不满足挂起直到满足
         if buffer.len() < buf.len() {
             return Err(RingBufferWaitError::new(
-                RingBufferWaitErrorKind::Empty,
-                "缓冲区为空",
+                RingBufferWaitErrorKind::Other,
+                "当前缓冲区大小小于所需大小",
                 None,
             ));
         }
-
         for i in buf {
             match buffer.pop_front() {
                 Some(v) => {
@@ -728,13 +768,14 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> {
             }
         }
         self.len.store(buffer.len(), Ordering::Release);
+        self.push_condvar.notify_all();
         Ok(())
     }
 }
 
 impl Write for RingBufferWaitGuard<'_, u8> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        Ok(self.write(buf)?)
+        Ok(Self::write(self, buf))
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -742,17 +783,17 @@ impl Write for RingBufferWaitGuard<'_, u8> {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        Ok(self.write_all(buf)?)
+        Ok(Self::write_all(self, buf)?)
     }
 }
 
 impl Read for RingBufferWaitGuard<'_, u8> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        Ok(self.read(buf)?)
+        Ok(Self::read(self, buf))
     }
 
     fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        Ok(self.read_exact(buf)?)
+        Ok(Self::read_exact(self, buf)?)
     }
 }
 
@@ -771,6 +812,10 @@ impl<T> RingBufferWaitError<T> {
             message: message.to_string(),
             value,
         }
+    }
+
+    fn other(message: &str, value: Option<T>) -> Self {
+        Self::new(RingBufferWaitErrorKind::Other, message, value)
     }
 }
 impl<T> RingBufferWaitError<T> {
@@ -792,6 +837,7 @@ impl<T: std::fmt::Debug> Error for RingBufferWaitError<T> {}
 impl<T> std::fmt::Display for RingBufferWaitError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match &self.error_kind {
+            RingBufferWaitErrorKind::Other => "Other",
             RingBufferWaitErrorKind::Full => "Full",
             RingBufferWaitErrorKind::Empty => "Empty",
             RingBufferWaitErrorKind::MaxLenZero => "MaxLenZero",
@@ -832,6 +878,7 @@ impl<T> From<TryReserveError> for RingBufferWaitError<T> {
 
 #[derive(Debug)]
 pub enum RingBufferWaitErrorKind {
+    Other,
     Full,
     Empty,
     MaxLenZero,

@@ -1,4 +1,5 @@
 use crate::command::music_play::LoopMode;
+use lofty::file::FileType;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
@@ -9,15 +10,23 @@ pub(super) struct Track {
     title: String,
     artist: String,
     duration: Duration, // 来自 lofty
+    file_type: FileType,
 }
 
 impl Track {
-    pub(super) fn new(path: PathBuf, title: String, artist: String, duration: Duration) -> Self {
+    pub(super) fn new(
+        path: PathBuf,
+        title: String,
+        artist: String,
+        duration: Duration,
+        file_type: FileType,
+    ) -> Self {
         Self {
             path,
             title,
             artist,
             duration,
+            file_type,
         }
     }
 

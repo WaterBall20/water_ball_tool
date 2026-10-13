@@ -15,3 +15,4 @@ pub mod tools;
 /// 游戏模拟器模块（开发中）/ Game simulator module (WIP)
 #[cfg(debug_assertions)]
 pub mod gakumasu;
+pub mod ring_buffer_wait;

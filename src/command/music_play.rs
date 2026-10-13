@@ -4,7 +4,6 @@ use std::{error, path::PathBuf};
 mod audio;
 mod decoder;
 mod play_list;
-pub mod ring_buffer_wait;
 mod running;
 
 use crate::command::music_play::play_list::{PlayList, Track};
@@ -29,7 +28,7 @@ pub(crate) struct MusicPlayArgs {
 }
 
 #[derive(ValueEnum, Clone, Debug)]
-enum LoopMode {
+pub(crate) enum LoopMode {
     /// 顺序循环
     SequentialLoop,
     /// 顺序播放
@@ -190,7 +189,13 @@ fn create_track(path: &Path) -> Result<Track, Box<dyn error::Error>> {
 
                 // 5. 读取艺术家，缺失则标记为 Unknown
                 let artist = tag.artist().as_deref().unwrap_or("Unknown").to_string();
-                Ok(Track::new(path.to_path_buf(), title, artist, duration))
+                Ok(Track::new(
+                    path.to_path_buf(),
+                    title,
+                    artist,
+                    duration,
+                    tagged.file_type(),
+                ))
             } else {
                 Ok(Track::new(
                     path.to_path_buf(),
@@ -200,6 +205,7 @@ fn create_track(path: &Path) -> Result<Track, Box<dyn error::Error>> {
                         .to_string(),
                     "Unknown".to_string(),
                     duration,
+                    tagged.file_type(),
                 ))
             }
         }
