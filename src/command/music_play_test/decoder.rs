@@ -3,6 +3,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use symphonia::core::codecs::audio::AudioDecoder;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
@@ -79,7 +80,10 @@ impl Decoder {
         })
     }
 
-    pub fn run(&mut self) -> DecoderResult<()> {
+    pub fn run<F>(&mut self, mut f: Option<F>) -> DecoderResult<()>
+    where
+        F: FnMut(DecoderEvent) + Send + 'static,
+    {
         if self.thread_handle.is_none() {
             let ring_buf = self.ring_buf.clone();
             let stop = self.stop.clone();
@@ -100,12 +104,17 @@ impl Decoder {
                             if stop.load(Ordering::Acquire) {
                                 break;
                             }
-                            // 检查暂停信号，若暂停则等待
-                            // while paused.load(Ordering::Relaxed) { std::thread::yield_now(); }
 
                             let packet = match format.next_packet() {
                                 Ok(Some(p)) => p,
-                                Ok(None) => break,
+                                Ok(None) => {
+                                    if let Some(f) = &mut f {
+                                        f(DecoderEvent {
+                                            result: Ok(DecoderEventType::EOF),
+                                        });
+                                    }
+                                    break;
+                                }
                                 Err(e) => {
                                     eprintln!("Error reading packet: {e}");
                                     break;
@@ -121,7 +130,7 @@ impl Decoder {
                                     // 使用新方法进行交错转换
                                     decoded.copy_to_vec_interleaved(&mut buf);
 
-                                    // 写入环形缓冲区（你的 write_all 会阻塞等待空间）
+                                    // 写入环形缓冲区
                                     ring_buf.write_all(&buf).expect("Ring buffer write failed");
                                 }
                                 Err(symphonia::core::errors::Error::DecodeError(e)) => {
@@ -169,6 +178,19 @@ impl Decoder {
         }
         Ok(())
     }
+}
+
+struct DecoderEventItem {
+    event_tx: Sender<DecoderEvent>,
+    thread_join_handle: std::thread::JoinHandle<()>,
+}
+
+pub(super) struct DecoderEvent {
+    result: DecoderResult<DecoderEventType>,
+}
+
+pub(super) enum DecoderEventType {
+    EOF,
 }
 
 pub(super) type DecoderResult<T> = Result<T, DecoderError>;

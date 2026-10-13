@@ -182,7 +182,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         error!("切换下一曲发生错误, 不存在");
     }
     let mut decoder = if let Some(t) = track {
-        info!("换曲： {:?}", t.track());
+        //info!("换曲： {:?}", t.track());
         next_id = t.next_id();
         Some(
             decoder::Decoder::new(ring_buf.clone(), t.track().path().to_path_buf())
@@ -191,6 +191,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     } else {
         None
     };
+    let next_fn =
     if let Some(decoder) = &mut decoder {
         decoder.run().expect("解码运行失败");
     }
@@ -215,8 +216,8 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
                 if track.is_none() {
                     error!("切换下一曲发生错误, 不存在");
                 }
-                let mut decoder = if let Some(t) = track {
-                    info!("换曲： {:?}", t.track());
+                decoder = if let Some(t) = track {
+                    //info!("换曲： {:?}", t.track());
                     next_id = t.next_id();
                     Some(
                         decoder::Decoder::new(ring_buf.clone(), t.track().path().to_path_buf())
