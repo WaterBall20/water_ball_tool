@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -258,11 +259,14 @@ impl DecoderEventSink for DecoderEventChannelSink {
         F: Fn(DecoderEvent) + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            for event in receiver {
-                f(event);
-            }
-        });
+        std::thread::Builder::new()
+            .name("decoder_event_channel_sink".to_string())
+            .spawn(move || {
+                for event in receiver {
+                    f(event);
+                }
+            })
+            .expect("创建线程失败");
         Self(sender)
     }
 }
@@ -352,6 +356,22 @@ pub(super) struct DecoderError {
     kind: DecoderErrorKind,
 }
 
+impl Display for DecoderError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.kind {
+            DecoderErrorKind::Running => "Running",
+            DecoderErrorKind::IOError(e) => &format!("IOError({e})"),
+            DecoderErrorKind::ThreadJoinError(e) => &format!("ThreadJoinError({e:?})"),
+            DecoderErrorKind::NoAudioTrack => "NoAudioTrack",
+            DecoderErrorKind::NoAudioCodecParams => "NoAudioCodecParams",
+            DecoderErrorKind::MakeAudioDecoderError(e) => &format!("MakeAudioDecoderError({e})"),
+            DecoderErrorKind::GetProbeError(e) => &format!("GetProbeError({e})"),
+        };
+        write!(f, "DecoderError: Kind: {kind}, message: {}", self.message)
+    }
+}
+
+impl std::error::Error for DecoderError {}
 impl DecoderError {
     fn new(message: &str, kind: DecoderErrorKind) -> Self {
         Self {

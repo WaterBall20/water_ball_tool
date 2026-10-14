@@ -1,16 +1,13 @@
-use crate::command::music_play_test::decoder::{
-    DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
-};
 use crate::command::music_play_test::play_list::{PlayList, Track};
-use crate::command::music_play_test::player::Player;
+use crate::command::music_play_test::running::Running;
 use clap::{Args, ValueEnum};
 use indicatif::MultiProgress;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use std::error;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize};
 use tracing::{debug, error, info, warn};
 
 mod decoder;
@@ -61,12 +58,10 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     info!("开始搜集音频信息");
     let next_id = Arc::new(AtomicUsize::new(0));
     let play_list = create_play_list(&files, loop_mode)?;
-    let play_list = Arc::new(Mutex::new(play_list));
-
-    let mut audio = Player::new()?;
-    next_inner(&play_list, false, &next_id, audio.clone()).unwrap_or_else(|e| {
-        error!("初始化歌曲播放失败： {e:?}");
-    });
+    let mut running = Running::create(play_list, mp.as_ref())?;
+    running
+        .next()
+        .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));
 
     //交互处理
     loop {
@@ -75,25 +70,25 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         match input.trim() {
             "next" | "n" => {
                 debug!("开始执行换曲");
-                next_inner(&play_list, false, &next_id, audio.clone()).unwrap_or_else(|e| {
+                running.next().unwrap_or_else(|e| {
                     error!("换曲发生错误");
                 });
             }
             "Play" | "P" => {
                 debug!("播放");
-                if let Err(e) = audio.play() {
-                    error!("播放失败：err: {e}");
-                }
+                running.play().unwrap_or_else(|e| {
+                    error!("播放发生错误：err: {e}");
+                });
             }
             "pause" | "p" => {
                 debug!("暂停");
-                if let Err(e) = audio.pause() {
-                    error!("暂停失败: err: {e}");
-                }
+                running.pause().unwrap_or_else(|e| {
+                    error!("暂停发生错误: err: {e}");
+                });
             }
             "exit" => {
                 debug!("退出");
-                audio.stop().unwrap_or_else(|e| {
+                running.run_stop().unwrap_or_else(|e| {
                     error!("停止播放发生错误");
                 });
                 break;

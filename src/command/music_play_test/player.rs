@@ -108,8 +108,8 @@ impl Player {
 
     pub fn get_pos(&self) -> Duration {
         Duration::from_millis(
-            self.played_samples.load(Ordering::Relaxed)
-                / self.sound_engine.stream_config.channels as u64
+            self.played_samples.load(Ordering::Relaxed) * 1000
+                / u64::from(self.sound_engine.stream_config.channels)
                 / u64::from(self.sound_engine.stream_config.sample_rate),
         )
     }
@@ -138,7 +138,11 @@ impl Player {
         &self.sound_engine.ring_buffer
     }
 
-    pub fn stop(self) -> DecoderResult<()> {
+    pub fn stop(mut self) -> DecoderResult<()> {
+        self.try_stop()
+    }
+
+    pub fn try_stop(&mut self) -> DecoderResult<()> {
         if let Some(decoder) = self
             .sound_engine
             .decoder

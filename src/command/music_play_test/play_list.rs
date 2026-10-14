@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Track {
     path: PathBuf,
     title: String,
