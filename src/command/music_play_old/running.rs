@@ -1,18 +1,18 @@
-use crate::command::music_play_test::decoder::{
-    Decoder, DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
-};
-use crate::command::music_play_test::play_list::{PlayList, Track};
-use crate::command::music_play_test::player::Player;
+use crate::command::music_play_old::LoopMode;
+use crate::command::music_play_old::play_list::{NextTrack, PlayList};
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
+use rodio::source::SeekError;
+use rodio::{Decoder, MixerDeviceSink, Player};
 use std::any::Any;
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::fs::File;
+use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub(super) struct Running {
     play_object: Arc<Mutex<PlayObject>>,
@@ -21,17 +21,15 @@ pub(super) struct Running {
 
 struct PlayObject {
     // 播放列表
-    play_list: Arc<Mutex<PlayList>>,
-    // 播放器
+    play_list: PlayList,
+    handle: MixerDeviceSink,
     player: Player,
     // 播放标志
     is_playing: bool,
     // 停止标志
     run_stop: bool,
     // 换曲ID
-    next_id: Arc<AtomicUsize>,
-    //
-    this_track: Arc<Mutex<Option<Track>>>,
+    next_id: usize,
     // 上次进度
     last_play_pos: Duration,
     // 上次进度相等次数
@@ -41,6 +39,7 @@ struct PlayObject {
 }
 
 struct ThreadControl {
+    next_thread: Option<JoinHandle<()>>,
     ui_thread: Option<JoinHandle<()>>,
     condvar: Arc<Condvar>,
 }
@@ -57,14 +56,16 @@ impl Running {
         play_list: PlayList,
         mp: Option<&MultiProgress>,
     ) -> Result<Self, Box<dyn Error>> {
-        let player = Player::new()?;
+        let handle = rodio::DeviceSinkBuilder::open_default_sink()?;
+        let player = Player::connect_new(handle.mixer());
+        player.pause();
         let play_object = Arc::new(Mutex::new(PlayObject {
-            play_list: Arc::new(Mutex::new(play_list)),
+            play_list,
+            handle,
             player,
             is_playing: false,
             run_stop: false,
-            next_id: Arc::new(AtomicUsize::new(0)),
-            this_track: Arc::new(Mutex::new(None)),
+            next_id: 0,
             last_play_pos: Duration::default(),
             last_play_pos_eq_count: 0,
             last_pos_eq_start_time: Duration::default(),
@@ -72,19 +73,26 @@ impl Running {
         //控制变量
         let condvar = Arc::new(Condvar::new());
         //创建线程
+        //换曲线程
+        let next_thread = {
+            let condvar = condvar.clone();
+            let play_object = play_object.clone();
+            Self::create_next_thread(condvar, play_object)
+        };
         //UI线程
         let ui_thread = {
             let condvar = condvar.clone();
             let play_object = play_object.clone();
             Self::create_ui_thread(condvar, play_object, mp)
-        }?;
-        let thread_control = ThreadControl {
+        };
+        let next_thread = ThreadControl {
+            next_thread: Some(next_thread),
             ui_thread: Some(ui_thread),
             condvar,
         };
         Ok(Self {
             play_object,
-            thread_control,
+            thread_control: next_thread,
         })
     }
 
@@ -92,9 +100,9 @@ impl Running {
         condvar: Arc<Condvar>,
         play_object: Arc<Mutex<PlayObject>>,
         mp: Option<&MultiProgress>,
-    ) -> std::io::Result<JoinHandle<()>> {
+    ) -> JoinHandle<()> {
         let pb = crate::command::create_pb(mp);
-        thread::Builder::new().name("ui".to_string()).spawn(move || {
+        thread::spawn(move || {
             let pb = pb;
             if let Some(pb) = &pb {
                 pb.set_style(
@@ -138,11 +146,7 @@ impl Running {
                     play_object.last_play_pos_eq_count = 0;
                 }
                 play_object.last_play_pos = play_pos;
-                let track_lock = play_object
-                    .this_track
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(track) = &*track_lock {
+                if let Some(track) = play_object.play_list.get_current_track() {
                     let track_dur = *track.duration();
                     if let Some(pb) = &pb {
                         let play_pos_millis = play_pos.as_millis();
@@ -165,8 +169,7 @@ impl Running {
                         .cyan(); // 时间: 青色
 
                         let volume_str =
-                            format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow();
-                        // 音量: 黄色
+                            format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow(); // 音量: 黄色
 
                         let title_str = track.title().bright_white().bold(); // 标题: 加粗亮白 (最醒目)
                         let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
@@ -183,7 +186,6 @@ impl Running {
                             label_path = "Path".green(),
                         ));
                     }
-                    drop(track_lock);
                     play_object = condvar
                         .wait_timeout(play_object, Duration::from_millis(50))
                         .expect("Condvar won't fail")
@@ -192,7 +194,6 @@ impl Running {
                     if let Some(pb) = &pb {
                         pb.set_prefix("异常暂停中");
                     }
-                    drop(track_lock);
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
                 }
                 //暂停时挂起
@@ -213,24 +214,133 @@ impl Running {
         })
     }
 
+    /// 创建换曲线程
+    fn create_next_thread(
+        condvar: Arc<Condvar>,
+        play_object: Arc<Mutex<PlayObject>>,
+    ) -> JoinHandle<()> {
+        fn next_inner(play_object: &mut PlayObject, next_id: usize) {
+            //执行换曲
+            let r = play_object.next_inner(true, next_id);
+            match r {
+                Ok(o) => {
+                    if let Some(o) = o {
+                        let track = o.track();
+                        info!(
+                            "自动换曲为, Title: {}, Artist: {}, \
+                            \n Path: {}",
+                            track.title(),
+                            track.artist(),
+                            track.path().display()
+                        );
+                    } else if let LoopMode::Sequential = play_object.play_list.loop_mod() {
+                        info!("自动换曲，顺序播放已结束，暂停播放");
+                        play_object.pause();
+                    }
+                }
+                Err(e) => {
+                    error!("自动换曲发生错误 {e:?}");
+                }
+            }
+        }
+        thread::Builder::new()
+            .name("next_thread".to_string())
+            .spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_millis(10));
+                    let mut play_object = play_object
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !play_object.is_playing {
+                        play_object = condvar.wait(play_object).expect("Condvar won't fail");
+                        if play_object.run_stop {
+                            break; // 如果正在释放就退出线程
+                        }
+                        continue;
+                    }
+                    // 如果运行时退出就退出线程
+                    if play_object.run_stop {
+                        break;
+                    }
+                    //如果正在播放
+                    let play_pos = play_object.player.get_pos();
+                    // 挂起检查、次数检查和超时检查
+                    if play_object.last_play_pos == play_pos
+                        && play_object.last_play_pos_eq_count > 3
+                    {
+                        let last_eq_dt = SystemTime::now()
+                            .duration_since(SystemTime::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .checked_sub(play_object.last_pos_eq_start_time)
+                            .unwrap_or_default();
+                        if last_eq_dt > Duration::from_secs(10) {
+                            warn!("检测到播放挂起，将换曲，超时: {last_eq_dt:?}",);
+                            let next_id = play_object.next_id;
+                            next_inner(&mut play_object, next_id);
+                            //复位
+                            play_object.last_play_pos_eq_count = 0;
+                            continue;
+                        }
+                    }
+                    if let Some(track) = play_object.play_list.get_current_track() {
+                        let track_dur = *track.duration();
+                        let next_id = play_object.next_id;
+                        let wait_dur = track_dur
+                            .checked_sub(play_pos)
+                            .unwrap_or(Duration::default());
+                        // 判断是否需要挂起
+                        if wait_dur.as_millis() > 0 {
+                            let (guard, timeout_result) = condvar
+                                .wait_timeout(play_object, wait_dur)
+                                .expect("Condvar won't fail");
+                            play_object = guard;
+
+                            // 如果运行时退出就退出线程
+                            if play_object.run_stop {
+                                break;
+                            }
+                            if timeout_result.timed_out() {
+                                // 检查是否播放和时间
+                                if play_object.is_playing
+                                    && track_dur
+                                        .checked_sub(play_pos)
+                                        .unwrap_or(Duration::default())
+                                        .as_millis()
+                                        <= 10
+                                {
+                                    //执行换曲
+                                    next_inner(&mut play_object, next_id);
+                                }
+                            }
+                        } else {
+                            //执行换曲
+                            next_inner(&mut play_object, next_id);
+                        }
+                    } else {
+                        warn!("[换曲线程]无法获取当前播放音轨，线程挂起");
+                        play_object = condvar.wait(play_object).expect("Condvar won't fail");
+                    }
+                }
+            })
+            .expect("无法创建线程")
+    }
+
     /// 播放
-    pub(super) fn play(&mut self) -> Result<(), cpal::Error> {
+    pub(super) fn play(&mut self) {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .play()?;
+            .play();
         self.thread_control.condvar.notify_all();
-        Ok(())
     }
 
     /// 暂停
-    pub(super) fn pause(&mut self) -> Result<(), cpal::Error> {
+    pub(super) fn pause(&mut self) {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pause()?;
+            .pause();
         self.thread_control.condvar.notify_all();
-        Ok(())
     }
 
     /// 下一曲
@@ -240,7 +350,8 @@ impl Running {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let r = play_object.next()?;
-        if let Some(track) = r {
+        if let Some(t) = r {
+            let track = t.track();
             info!(
                 "换曲为, Title: {}, Artist: {}, \
                 \n Path: {}",
@@ -255,7 +366,7 @@ impl Running {
     }
 
     /// 设置音量
-    pub(super) fn set_volume(&mut self, value: f32) {
+    pub(super) fn set_volume(&mut self, value: f64) {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -263,7 +374,7 @@ impl Running {
     }
 
     /// 增加音量
-    pub(super) fn add_volume(&mut self, value: f32) {
+    pub(super) fn add_volume(&mut self, value: f64) {
         let mut play_object = self
             .play_object
             .lock()
@@ -274,8 +385,7 @@ impl Running {
     }
 
     /// 增加进度
-    pub(super) fn add_pos(&mut self, value: Duration) -> Result<(), Box<dyn Error>> {
-        todo!();
+    pub(super) fn add_pos(&mut self, value: Duration) -> Result<(), SeekError> {
         let play_object = self
             .play_object
             .lock()
@@ -287,6 +397,9 @@ impl Running {
 
     /// 等待线程
     pub(super) fn join_thread(&mut self) -> Result<(), Box<dyn Any + Send + 'static>> {
+        if let Some(h) = self.thread_control.next_thread.take() {
+            h.join()?;
+        }
         if let Some(h) = self.thread_control.ui_thread.take() {
             h.join()?;
         }
@@ -305,9 +418,9 @@ impl Running {
                 .play_object
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            play_object.pause();
+            play_object.player.clear();
             play_object.run_stop = true;
-            _ = play_object.pause();
-            play_object.player.try_stop().expect("停止播放发生错误");
         }
         self.thread_control.condvar.notify_all();
         self.join_thread()?;
@@ -317,92 +430,53 @@ impl Running {
 }
 impl PlayObject {
     ///播放
-    fn play(&mut self) -> Result<(), cpal::Error> {
+    fn play(&mut self) {
         self.is_playing = true;
-        self.player.play()
+        self.player.play();
     }
 
     ///暂停
-    fn pause(&mut self) -> Result<(), cpal::Error> {
+    fn pause(&mut self) {
         self.is_playing = false;
-        self.player.pause()
+        self.player.pause();
     }
 
     /// 设置音量
-    fn set_volume(&mut self, value: f32) {
+    fn set_volume(&mut self, value: f64) {
         self.player.set_volume(value);
     }
 
     ///下一曲
-    fn next(&mut self) -> DecoderResult<Option<Track>> {
-        Self::next_inner(
-            &self.play_list,
-            false,
-            &self.next_id,
-            self.player.clone(),
-            self.this_track.clone(),
-        )
+    fn next(&mut self) -> Result<Option<NextTrack<'_>>, Box<dyn Error>> {
+        self.next_inner(false, self.next_id)
     }
 
+    //下一曲内部实现
     fn next_inner(
-        play_list: &Arc<Mutex<PlayList>>,
+        &mut self,
         play_end: bool,
-        next_id: &Arc<AtomicUsize>,
-        player: Player,
-        this_track: Arc<Mutex<Option<Track>>>,
-    ) -> DecoderResult<Option<Track>> {
-        let mut player = player;
-        let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
-        let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
-        if let Some(t) = &track {
-            info!("换曲： {:?}", t.track());
-            next_id.store(t.next_id(), Ordering::Release);
-            let mut decoder =
-                Decoder::new(player.ring_buffer().clone(), t.track().path().to_path_buf())?;
-
-            let play_list = play_list.clone();
-            let next_id = next_id.clone();
-            {
-                let this_track = this_track.clone();
-                let audio = player.clone();
-                decoder.add_event(Box::new(DecoderEventChannelSink::new(move |e| {
-                    debug!("解码器事件触发：{e:?}");
-                    match e.result() {
-                        Ok(decoder_event) => match decoder_event {
-                            DecoderEventType::Eof => {
-                                if let Err(e) = Self::next_inner(
-                                    &play_list,
-                                    true,
-                                    &next_id,
-                                    audio.clone(),
-                                    this_track.clone(),
-                                ) {
-                                    error!("自动换曲发生错误： {e}");
-                                }
-                            }
-                        },
-                        Err(err) => {
-                            error!("发生解码错误事件： {err:?}");
-                        }
-                    }
-                })));
-            }
-            player.set_decoder(decoder)?;
-            this_track
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .replace(t.track().clone());
-            Ok(Some(t.track().clone()))
-        } else {
-            if play_end {
-                player.pause().unwrap_or_else(|e| {
-                    error!("暂停失败: err: {e}");
-                });
-                info!("没有下一曲，将暂停");
+        next_id: usize,
+    ) -> Result<Option<NextTrack<'_>>, Box<dyn Error>> {
+        let paused = self.player.is_paused();
+        let loop_mode = self.play_list.loop_mod();
+        let next_track = self.play_list.next(play_end, next_id);
+        if let Some(next_track) = &next_track {
+            let track = next_track.track();
+            let file = File::open(track.path())
+                .map_err(|e| io::Error::new(e.kind(), format!("打开文件错误, err: {e}")))?;
+            self.player.clear();
+            if let LoopMode::RepeatOne = loop_mode {
+                let d = Decoder::new_looped(file)?;
+                self.player.append(d);
             } else {
-                error!("切换下一曲发生错误, 不存在");
+                let d = Decoder::new(file)?;
+                self.player.append(d);
             }
-            Ok(None)
+            self.next_id = next_track.next_id();
+            if !paused {
+                self.player.play();
+            }
         }
+        Ok(next_track)
     }
 }

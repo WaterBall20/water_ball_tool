@@ -15,8 +15,8 @@ use indicatif::{MultiProgress, ProgressBar};
 use std::time::Duration;
 
 mod ff;
-mod music_play;
-pub mod music_play_test;
+pub mod music_play;
+mod music_play_old;
 #[cfg(test)]
 mod test;
 mod wbfp;
@@ -34,7 +34,7 @@ enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
     MP(music_play::MusicPlayArgs),
-    Mpt(music_play_test::MusicPlayArgs),
+    Mpo(music_play_old::MusicPlayArgs),
 }
 
 static BUF_LEN: usize = 10 * 1024 * 1024;
@@ -80,6 +80,6 @@ pub(crate) fn cli(cli: Cli, mp: Option<MultiProgress>) -> Result<(), Box<dyn std
         Commands::Ff(args) => ff::args(args, mp),
         Commands::Wbfp(commands) => wbfp::commands(commands, mp),
         Commands::MP(args) => music_play::args(args, mp),
-        Commands::Mpt(args) => music_play_test::args(args, mp),
+        Commands::Mpo(args) => music_play_old::args(args, mp),
     }
 }

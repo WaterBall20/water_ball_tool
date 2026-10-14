@@ -1,10 +1,10 @@
-use crate::command::music_play::LoopMode;
+use crate::command::music_play_old::LoopMode;
 use lofty::file::FileType;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct Track {
     path: PathBuf,
     title: String,

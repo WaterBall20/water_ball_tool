@@ -1,19 +1,16 @@
-use crate::command::music_play_test::play_list::{PlayList, Track};
-use crate::command::music_play_test::running::Running;
-use clap::{Args, ValueEnum};
-use indicatif::MultiProgress;
-use lofty::file::{AudioFile, TaggedFileExt};
-use lofty::prelude::Accessor;
-use std::error;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize};
-use tracing::{debug, error, info, warn};
+use std::path::Path;
+use std::{error, path::PathBuf};
 
+mod audio;
 mod decoder;
 mod play_list;
-mod player;
 mod running;
+
+use crate::command::music_play_old::play_list::{PlayList, Track};
+use clap::{Args, ValueEnum};
+use indicatif::MultiProgress;
+use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
+use tracing::{debug, error, info, warn};
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
@@ -21,13 +18,13 @@ pub(crate) struct MusicPlayArgs {
     files: Vec<PathBuf>,
     ///初始音量 (0到<1的小数或0-100的数，大于或等于1视为0-100)
     #[arg(short, long, default_value_t = 0.75)]
-    volume: f32,
+    volume: f64,
     ///详细输出
     #[arg(long)]
     verbose: bool,
     /// 播放模式
     #[arg(short, long, default_value = "sequential-loop")]
-    mode: crate::command::music_play::LoopMode,
+    mode: LoopMode,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -52,56 +49,66 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         } else if args.volume > 100.0 {
             panic!("参数错误：声音参数不能大于100")
         }
-        Arc::new(AtomicU32::new(args.volume.to_bits()))
+        args.volume
     };
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
-    let next_id = Arc::new(AtomicUsize::new(0));
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut running = Running::create(play_list, mp.as_ref())?;
-    running
-        .next()
-        .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));
+    let mut running = running::Running::create(play_list, mp.as_ref())?;
+    debug!("创建运行时");
+    running.set_volume(volume);
+    debug!("设置音量");
+    if let Err(e) = running.next() {
+        error!("切换下一曲发生错误, err: {e}");
+    }
+
+    info!("收集音频信息完成");
+    info!("进入交互模式");
+    info!(
+        "命令（不含括号，括号表示短命令）：\
+    \n|command |作用\
+    \n|exit    |退出程序\
+    \n|(n)ext  |下一首\
+    \n|(P)lay  |播放\
+    \n|(p)ause |暂停"
+    );
 
     //交互处理
     loop {
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         match input.trim() {
+            "exit" => {
+                running.run_stop().expect("退出发生错误");
+                break;
+            }
             "next" | "n" => {
                 debug!("开始执行换曲");
-                running.next().unwrap_or_else(|e| {
-                    error!("换曲发生错误");
-                });
+                let r = running.next();
+                if let Err(e) = r {
+                    error!("切换下一曲发生错误, err: {e}");
+                }
             }
             "Play" | "P" => {
-                debug!("播放");
-                running.play().unwrap_or_else(|e| {
-                    error!("播放发生错误：err: {e}");
-                });
+                running.play();
             }
             "pause" | "p" => {
-                debug!("暂停");
-                running.pause().unwrap_or_else(|e| {
-                    error!("暂停发生错误: err: {e}");
-                });
-            }
-            "exit" => {
-                debug!("退出");
-                running.run_stop().unwrap_or_else(|e| {
-                    error!("停止播放发生错误");
-                });
-                break;
+                running.pause();
             }
             _ => warn!("未知命令： {input}"),
         }
     }
+
     Ok(())
 }
 
+/*fn tui_args_pos(args: &str) {
+    let args = args.get()
+}*/
+
 fn create_play_list(
     files: &[PathBuf],
-    loop_mode: crate::command::music_play::LoopMode,
+    loop_mode: LoopMode,
 ) -> Result<PlayList, Box<dyn error::Error>> {
     fn dir_tracks(path: &Path, tracks: &mut Vec<Track>) {
         let read_dir = path.read_dir();
