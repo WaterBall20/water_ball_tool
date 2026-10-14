@@ -1,5 +1,6 @@
+use crate::command::music_play_test::audio::Audio;
 use crate::command::music_play_test::decoder::{
-    DecoderEventChannelSink, DecoderEventSink, DecoderEventType,
+    DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
 use crate::command::music_play_test::play_list::{PlayList, Track};
 use clap::{Args, ValueEnum};
@@ -50,27 +51,6 @@ pub(crate) enum LoopMode {
 }
 
 pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
-    const BUF_LEN_U32: u32 = 1024;
-    const BUF_LEN: usize = BUF_LEN_U32 as usize;
-    const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
-    const SAMPLE_RATE_F64: f64 = SAMPLE_RATE as f64;
-
-    let host = cpal::default_host();
-    let Some(device) = host.default_output_device() else {
-        panic!("No output device available");
-    };
-    let config = device.default_output_config()?;
-    let channels = config.channels();
-
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: SAMPLE_RATE,
-        buffer_size: cpal::BufferSize::Fixed(BUF_LEN_U32), // 先试 512
-    };
-    // 在你的播放器初始化阶段
-    let ring_capacity = SAMPLE_RATE as usize * channels as usize * 4;
-    let ring_buf = RingBufferWait::new_max_len(ring_capacity).expect("创建缓冲区失败");
-
     let files = args.files;
     let volume = {
         if args.volume < 0.0 {
@@ -85,33 +65,12 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     let next_id = Arc::new(AtomicUsize::new(0));
     let play_list = create_play_list(&files, loop_mode)?;
     let play_list = Arc::new(Mutex::new(play_list));
-    let decoder = Arc::new(Mutex::new(None));
-    next_inner(
-        play_list.clone(),
-        decoder.clone(),
-        false,
-        next_id.clone(),
-        ring_buf.clone(),
-    );
 
-    // producer 交给解码线程
-    // consumer 交给 cpal 回调（需要 move 进闭包）
-    let stream = {
-        let mut ring_buf = ring_buf.clone();
-        let r = device.build_output_stream(
-            config,
-            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let len = ring_buf.try_read(data).unwrap_or(0);
-                for datum in &mut data[..len] {
-                    *datum *= f32::from_bits(volume.load(Ordering::Relaxed));
-                }
-                data[len..].fill(0.0);
-            },
-            |err| error!("流错误: {err}"),
-            None,
-        );
-        r
-    }?;
+    let mut audio = Audio::new()?;
+    next_inner(play_list.clone(), false, next_id.clone(), audio.clone()).unwrap_or_else(|e| {
+        error!("初始化歌曲播放失败： {e:?}");
+    });
+
     //交互处理
     loop {
         let mut input = String::new();
@@ -119,27 +78,28 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         match input.trim() {
             "next" | "n" => {
                 debug!("开始执行换曲");
-                next_inner(
-                    play_list.clone(),
-                    decoder.clone(),
-                    false,
-                    next_id.clone(),
-                    ring_buf.clone(),
-                );
+                next_inner(play_list.clone(), false, next_id.clone(), audio.clone())
+                    .unwrap_or_else(|e| {
+                        error!("换曲发生错误");
+                    });
             }
             "Play" | "P" => {
                 debug!("播放");
-                stream.play().expect("播放失败");
+                if let Err(e) = audio.play() {
+                    error!("播放失败：err: {e}");
+                }
             }
             "pause" | "p" => {
                 debug!("暂停");
-                stream.pause().expect("暂停失败");
+                if let Err(e) = audio.pause() {
+                    error!("暂停失败: err: {e}");
+                }
             }
             "exit" => {
                 debug!("退出");
-                if let Some(decoder) = decoder.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    decoder.stop().expect("停止解码发生错误");
-                }
+                audio.stop().unwrap_or_else(|e| {
+                    error!("停止播放发生错误");
+                });
                 break;
             }
             _ => warn!("未知命令： {input}"),
@@ -150,55 +110,49 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
 
 fn next_inner(
     play_list: Arc<Mutex<PlayList>>,
-    decoder: Arc<Mutex<Option<decoder::Decoder>>>,
     play_end: bool,
     next_id: Arc<AtomicUsize>,
-    ring_buf: RingBufferWait<f32>,
-) {
+    audio: Audio,
+) -> DecoderResult<()> {
+    let mut audio = audio;
     let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
-    let mut decoder_lock = decoder.lock().unwrap_or_else(|err| err.into_inner());
-    if let Some(decoder) = decoder_lock.take() {
-        decoder.stop().expect("停止解码发生错误");
-    }
     let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
-    if track.is_none() {
-        error!("切换下一曲发生错误, 不存在");
-    }
-    *decoder_lock = if let Some(t) = track {
+    if let Some(t) = track {
         info!("换曲： {:?}", t.track());
         next_id.store(t.next_id(), Ordering::Release);
-        Some(
-            decoder::Decoder::new(ring_buf.clone(), t.track().path().to_path_buf())
-                .expect("创建解码器失败"),
-        )
-    } else {
-        None
-    };
-    if let Some(decoder_lock) = &mut *decoder_lock {
-        decoder_lock.run().expect("解码运行失败");
+        let mut decoder =
+            decoder::Decoder::new(audio.ring_buffer().clone(), t.track().path().to_path_buf())?;
+
         let play_list = play_list.clone();
-        let decoder = decoder.clone();
         let next_id = next_id.clone();
-        let ring_buf = ring_buf.clone();
-        decoder_lock.add_event(DecoderEventChannelSink::new(move |e| {
-            debug!("解码器事件触发：{e:?}");
-            match e.result() {
-                Ok(decoder_event) => match decoder_event {
-                    DecoderEventType::Eof => {
-                        next_inner(
-                            play_list.clone(),
-                            decoder.clone(),
-                            true,
-                            next_id.clone(),
-                            ring_buf.clone(),
-                        );
+        {
+            let audio = audio.clone();
+            decoder.add_event(DecoderEventChannelSink::new(move |e| {
+                debug!("解码器事件触发：{e:?}");
+                match e.result() {
+                    Ok(decoder_event) => match decoder_event {
+                        DecoderEventType::Eof => {
+                            _ = next_inner(play_list.clone(), true, next_id.clone(), audio.clone());
+                        }
+                    },
+                    Err(err) => {
+                        error!("发生解码错误事件： {err:?}")
                     }
-                },
-                Err(err) => {
-                    todo!()
                 }
-            }
-        }));
+            }));
+        }
+        audio.set_decoder(decoder)?;
+        Ok(())
+    } else {
+        if play_end {
+            audio.pause().unwrap_or_else(|e| {
+                error!("暂停失败: err: {e}");
+            });
+            info!("没有下一曲，将暂停")
+        } else {
+            error!("切换下一曲发生错误, 不存在");
+        }
+        Ok(())
     }
 }
 
