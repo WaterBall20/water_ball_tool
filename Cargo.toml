@@ -28,7 +28,6 @@ sha2 = "0.11.1"
 blake2b_simd = "1.0.5"
 md-5 = "0.11.0"
 crc32fast = "1.5.2"
-rodio = { version = "0.23.0", features = ["64bit"] }
 lofty = "0.25.4"
 pretty_assertions = "1.4.1"
 colored = "3.1.1"
@@ -62,7 +61,6 @@ blake2b_simd = { workspace = true }
 md-5 = { workspace = true }
 crc32fast = { workspace = true }
 
-rodio = { workspace = true }
 lofty = { workspace = true }
 colored = { workspace = true }
 cpal = { workspace = true }

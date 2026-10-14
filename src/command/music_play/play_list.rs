@@ -1,4 +1,4 @@
-use crate::command::music_play_old::LoopMode;
+use crate::command::music_play::LoopMode;
 use lofty::file::FileType;
 use std::collections::VecDeque;
 use std::path::Path;

@@ -27,7 +27,7 @@ pub(crate) struct MusicPlayArgs {
     verbose: bool,
     /// 播放模式
     #[arg(short, long, default_value = "sequential-loop")]
-    mode: crate::command::music_play_old::LoopMode,
+    mode: LoopMode,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -101,7 +101,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
 
 fn create_play_list(
     files: &[PathBuf],
-    loop_mode: crate::command::music_play_old::LoopMode,
+    loop_mode: LoopMode,
 ) -> Result<PlayList, Box<dyn error::Error>> {
     fn dir_tracks(path: &Path, tracks: &mut Vec<Track>) {
         let read_dir = path.read_dir();
