@@ -1,11 +1,9 @@
-use crate::command::music_play_test::audio::Audio;
 use crate::command::music_play_test::decoder::{
     DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
 use crate::command::music_play_test::play_list::{PlayList, Track};
+use crate::command::music_play_test::player::Player;
 use clap::{Args, ValueEnum};
-use cpal::SAMPLE_RATE_48K;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use indicatif::MultiProgress;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
@@ -14,11 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
-use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
 
-mod audio;
 mod decoder;
 mod play_list;
+mod player;
 mod running;
 
 #[derive(Args, Debug)]
@@ -66,8 +63,8 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     let play_list = create_play_list(&files, loop_mode)?;
     let play_list = Arc::new(Mutex::new(play_list));
 
-    let mut audio = Audio::new()?;
-    next_inner(play_list.clone(), false, next_id.clone(), audio.clone()).unwrap_or_else(|e| {
+    let mut audio = Player::new()?;
+    next_inner(&play_list, false, &next_id, audio.clone()).unwrap_or_else(|e| {
         error!("初始化歌曲播放失败： {e:?}");
     });
 
@@ -78,10 +75,9 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         match input.trim() {
             "next" | "n" => {
                 debug!("开始执行换曲");
-                next_inner(play_list.clone(), false, next_id.clone(), audio.clone())
-                    .unwrap_or_else(|e| {
-                        error!("换曲发生错误");
-                    });
+                next_inner(&play_list, false, &next_id, audio.clone()).unwrap_or_else(|e| {
+                    error!("换曲发生错误");
+                });
             }
             "Play" | "P" => {
                 debug!("播放");
@@ -106,54 +102,6 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         }
     }
     Ok(())
-}
-
-fn next_inner(
-    play_list: Arc<Mutex<PlayList>>,
-    play_end: bool,
-    next_id: Arc<AtomicUsize>,
-    audio: Audio,
-) -> DecoderResult<()> {
-    let mut audio = audio;
-    let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
-    let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
-    if let Some(t) = track {
-        info!("换曲： {:?}", t.track());
-        next_id.store(t.next_id(), Ordering::Release);
-        let mut decoder =
-            decoder::Decoder::new(audio.ring_buffer().clone(), t.track().path().to_path_buf())?;
-
-        let play_list = play_list.clone();
-        let next_id = next_id.clone();
-        {
-            let audio = audio.clone();
-            decoder.add_event(DecoderEventChannelSink::new(move |e| {
-                debug!("解码器事件触发：{e:?}");
-                match e.result() {
-                    Ok(decoder_event) => match decoder_event {
-                        DecoderEventType::Eof => {
-                            _ = next_inner(play_list.clone(), true, next_id.clone(), audio.clone());
-                        }
-                    },
-                    Err(err) => {
-                        error!("发生解码错误事件： {err:?}")
-                    }
-                }
-            }));
-        }
-        audio.set_decoder(decoder)?;
-        Ok(())
-    } else {
-        if play_end {
-            audio.pause().unwrap_or_else(|e| {
-                error!("暂停失败: err: {e}");
-            });
-            info!("没有下一曲，将暂停")
-        } else {
-            error!("切换下一曲发生错误, 不存在");
-        }
-        Ok(())
-    }
 }
 
 fn create_play_list(

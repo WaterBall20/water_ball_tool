@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 use symphonia::core::codecs::audio::AudioDecoder;
+use symphonia::core::errors::SeekErrorKind;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::units::Time;
 use tracing::{debug, error};
 use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
 
@@ -160,7 +163,6 @@ impl Decoder {
                                 }
                                 Err(symphonia::core::errors::Error::DecodeError(e)) => {
                                     error!("Decode error (skipping frame): {e}");
-                                    continue;
                                 }
                                 Err(e) => {
                                     error!("Fatal decode error: {e}");
@@ -211,11 +213,33 @@ impl Decoder {
         }
         Ok(())
     }
+
+    pub fn try_seek(
+        &mut self,
+        d: Duration,
+    ) -> Result<symphonia::core::formats::SeekedTo, symphonia::core::errors::Error> {
+        if let Some(format) = self.format.as_mut()
+            && let Some(decoder) = self.decoder.as_mut()
+        {
+            let r = format.seek(
+                SeekMode::Accurate,
+                SeekTo::Time {
+                    time: Time::from_millis(i64::try_from(d.as_millis()).unwrap_or(0)),
+                    track_id: Some(self.track_id),
+                },
+            )?;
+            decoder.reset();
+            self.ring_buf.clear();
+            Ok(r)
+        } else {
+            panic!("逻辑错误")
+        }
+    }
 }
 
 pub trait DecoderEventSink: Send + 'static {
     fn emit(&mut self, event: DecoderEvent);
-    fn new<F>(f: F) -> Box<Self>
+    fn new<F>(f: F) -> Self
     where
         F: Fn(DecoderEvent) + Send + 'static,
         Self: Sized;
@@ -229,7 +253,7 @@ impl DecoderEventSink for DecoderEventChannelSink {
         let _ = self.0.send(event);
     }
 
-    fn new<F>(f: F) -> Box<Self>
+    fn new<F>(f: F) -> Self
     where
         F: Fn(DecoderEvent) + Send + 'static,
     {
@@ -239,7 +263,7 @@ impl DecoderEventSink for DecoderEventChannelSink {
                 f(event);
             }
         });
-        Box::new(Self(sender))
+        Self(sender)
     }
 }
 
@@ -250,11 +274,11 @@ impl DecoderEventSink for DecoderEventDirectSink {
         self.0(event); // 就在解码线程里跑
     }
 
-    fn new<F>(f: F) -> Box<Self>
+    fn new<F>(f: F) -> Self
     where
         F: Fn(DecoderEvent) + Send + 'static,
     {
-        Box::new(Self(Box::new(f)))
+        Self(Box::new(f))
     }
 }
 
@@ -283,9 +307,41 @@ pub(super) struct DecoderEventError {
     kind: DecoderEventErrorKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) enum DecoderEventErrorKind {
     RingBufferError(RingBufferWaitError<f32>),
+    /// An IO error occured while reading, writing, or seeking the stream.
+    IoError(std::io::Error),
+    /// The stream contained malformed data and could not be decoded or demuxed.
+    DecodeError(&'static str),
+    /// The stream could not be seeked.
+    SeekError(SeekErrorKind),
+    /// An unsupported container or codec feature was encounted.
+    Unsupported(&'static str),
+    /// A default or user-defined limit was reached while decoding or demuxing the stream. Limits
+    /// are used to prevent denial-of-service attacks from malicious streams.
+    LimitError(&'static str),
+    /// The demuxer or decoder needs to be reset before continuing.
+    ResetRequired,
+}
+impl Clone for DecoderEventErrorKind {
+    fn clone(&self) -> Self {
+        match &self {
+            Self::RingBufferError(e) => Self::RingBufferError(e.clone()),
+            Self::IoError(e) => Self::IoError(std::io::Error::new(e.kind(), e.to_string())),
+            Self::DecodeError(e) => Self::DecodeError(e),
+            Self::SeekError(e) => Self::SeekError(match e {
+                SeekErrorKind::Unseekable => SeekErrorKind::Unseekable,
+                SeekErrorKind::ForwardOnly => SeekErrorKind::ForwardOnly,
+                SeekErrorKind::OutOfRange => SeekErrorKind::OutOfRange,
+                SeekErrorKind::InvalidTrack => SeekErrorKind::InvalidTrack,
+                _ => panic!("无法处理的错误, error: {e:?}"),
+            }),
+            Self::Unsupported(e) => Self::Unsupported(e),
+            Self::LimitError(e) => Self::LimitError(e),
+            Self::ResetRequired => Self::ResetRequired,
+        }
+    }
 }
 
 pub(super) type DecoderResult<T> = Result<T, DecoderError>;

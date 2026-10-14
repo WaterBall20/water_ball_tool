@@ -1,13 +1,14 @@
 use crate::command::music_play::LoopMode;
+use crate::command::music_play_test::decoder::{
+    Decoder, DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
+};
 use crate::command::music_play_test::play_list::{NextTrack, PlayList};
+use crate::command::music_play_test::player::Player;
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
-use rodio::source::SeekError;
-use rodio::{Decoder, MixerDeviceSink, Player};
 use std::any::Any;
 use std::error::Error;
-use std::fs::File;
-use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -21,15 +22,14 @@ pub(super) struct Running {
 
 struct PlayObject {
     // 播放列表
-    play_list: PlayList,
-    handle: MixerDeviceSink,
+    play_list: Arc<Mutex<PlayList>>,
     player: Player,
     // 播放标志
     is_playing: bool,
     // 停止标志
     run_stop: bool,
     // 换曲ID
-    next_id: usize,
+    next_id: Arc<AtomicUsize>,
     // 上次进度
     last_play_pos: Duration,
     // 上次进度相等次数
@@ -39,7 +39,6 @@ struct PlayObject {
 }
 
 struct ThreadControl {
-    next_thread: Option<JoinHandle<()>>,
     ui_thread: Option<JoinHandle<()>>,
     condvar: Arc<Condvar>,
 }
@@ -56,16 +55,13 @@ impl Running {
         play_list: PlayList,
         mp: Option<&MultiProgress>,
     ) -> Result<Self, Box<dyn Error>> {
-        let handle = rodio::DeviceSinkBuilder::open_default_sink()?;
-        let player = Player::connect_new(handle.mixer());
-        player.pause();
+        let audio = Player::new()?;
         let play_object = Arc::new(Mutex::new(PlayObject {
-            play_list,
-            handle,
-            player,
+            play_list: Arc::new(Mutex::new(play_list)),
+            player: audio,
             is_playing: false,
             run_stop: false,
-            next_id: 0,
+            next_id: Arc::new(AtomicUsize::new(0)),
             last_play_pos: Duration::default(),
             last_play_pos_eq_count: 0,
             last_pos_eq_start_time: Duration::default(),
@@ -73,26 +69,19 @@ impl Running {
         //控制变量
         let condvar = Arc::new(Condvar::new());
         //创建线程
-        //换曲线程
-        let next_thread = {
-            let condvar = condvar.clone();
-            let play_object = play_object.clone();
-            Self::create_next_thread(condvar, play_object)
-        };
         //UI线程
         let ui_thread = {
             let condvar = condvar.clone();
             let play_object = play_object.clone();
             Self::create_ui_thread(condvar, play_object, mp)
         };
-        let next_thread = ThreadControl {
-            next_thread: Some(next_thread),
+        let thread_control = ThreadControl {
             ui_thread: Some(ui_thread),
             condvar,
         };
         Ok(Self {
             play_object,
-            thread_control: next_thread,
+            thread_control,
         })
     }
 
@@ -169,7 +158,8 @@ impl Running {
                         .cyan(); // 时间: 青色
 
                         let volume_str =
-                            format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow(); // 音量: 黄色
+                            format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow();
+                        // 音量: 黄色
 
                         let title_str = track.title().bright_white().bold(); // 标题: 加粗亮白 (最醒目)
                         let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
@@ -366,7 +356,7 @@ impl Running {
     }
 
     /// 设置音量
-    pub(super) fn set_volume(&mut self, value: f64) {
+    pub(super) fn set_volume(&mut self, value: f32) {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -374,7 +364,7 @@ impl Running {
     }
 
     /// 增加音量
-    pub(super) fn add_volume(&mut self, value: f64) {
+    pub(super) fn add_volume(&mut self, value: f32) {
         let mut play_object = self
             .play_object
             .lock()
@@ -385,7 +375,8 @@ impl Running {
     }
 
     /// 增加进度
-    pub(super) fn add_pos(&mut self, value: Duration) -> Result<(), SeekError> {
+    pub(super) fn add_pos(&mut self, value: Duration) -> Result<(), Box<dyn Error>> {
+        todo!();
         let play_object = self
             .play_object
             .lock()
@@ -397,9 +388,6 @@ impl Running {
 
     /// 等待线程
     pub(super) fn join_thread(&mut self) -> Result<(), Box<dyn Any + Send + 'static>> {
-        if let Some(h) = self.thread_control.next_thread.take() {
-            h.join()?;
-        }
         if let Some(h) = self.thread_control.ui_thread.take() {
             h.join()?;
         }
@@ -430,53 +418,72 @@ impl Running {
 }
 impl PlayObject {
     ///播放
-    fn play(&mut self) {
+    fn play(&mut self) -> Result<(), cpal::Error> {
         self.is_playing = true;
-        self.player.play();
+        self.player.play()
     }
 
     ///暂停
-    fn pause(&mut self) {
+    fn pause(&mut self) -> Result<(), cpal::Error> {
         self.is_playing = false;
-        self.player.pause();
+        self.player.pause()
     }
 
     /// 设置音量
-    fn set_volume(&mut self, value: f64) {
+    fn set_volume(&mut self, value: f32) {
         self.player.set_volume(value);
     }
 
     ///下一曲
     fn next(&mut self) -> Result<Option<NextTrack<'_>>, Box<dyn Error>> {
-        self.next_inner(false, self.next_id)
+        Self::next_inner(&self.play_list, false, self.next_id, self.player)
     }
 
-    //下一曲内部实现
     fn next_inner(
-        &mut self,
+        play_list: &Arc<Mutex<PlayList>>,
         play_end: bool,
-        next_id: usize,
-    ) -> Result<Option<NextTrack<'_>>, Box<dyn Error>> {
-        let paused = self.player.is_paused();
-        let loop_mode = self.play_list.loop_mod();
-        let next_track = self.play_list.next(play_end, next_id);
-        if let Some(next_track) = &next_track {
-            let track = next_track.track();
-            let file = File::open(track.path())
-                .map_err(|e| io::Error::new(e.kind(), format!("打开文件错误, err: {e}")))?;
-            self.player.clear();
-            if let LoopMode::RepeatOne = loop_mode {
-                let d = Decoder::new_looped(file)?;
-                self.player.append(d);
+        next_id: &Arc<AtomicUsize>,
+        player: Player,
+    ) -> DecoderResult<()> {
+        let mut player = player;
+        let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
+        let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
+        if let Some(t) = track {
+            info!("换曲： {:?}", t.track());
+            next_id.store(t.next_id(), Ordering::Release);
+            let mut decoder =
+                Decoder::new(player.ring_buffer().clone(), t.track().path().to_path_buf())?;
+
+            let play_list = play_list.clone();
+            let next_id = next_id.clone();
+            {
+                let audio = player.clone();
+                decoder.add_event(Box::new(DecoderEventChannelSink::new(move |e| {
+                    debug!("解码器事件触发：{e:?}");
+                    match e.result() {
+                        Ok(decoder_event) => match decoder_event {
+                            DecoderEventType::Eof => {
+                                _ = Self::next_inner(&play_list, true, &next_id, audio.clone());
+                            }
+                        },
+                        Err(err) => {
+                            error!("发生解码错误事件： {err:?}");
+                        }
+                    }
+                })));
+            }
+            player.set_decoder(decoder)?;
+            Ok(())
+        } else {
+            if play_end {
+                player.pause().unwrap_or_else(|e| {
+                    error!("暂停失败: err: {e}");
+                });
+                info!("没有下一曲，将暂停");
             } else {
-                let d = Decoder::new(file)?;
-                self.player.append(d);
+                error!("切换下一曲发生错误, 不存在");
             }
-            self.next_id = next_track.next_id();
-            if !paused {
-                self.player.play();
-            }
+            Ok(())
         }
-        Ok(next_track)
     }
 }
