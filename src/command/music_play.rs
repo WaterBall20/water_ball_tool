@@ -52,16 +52,16 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
         } else if args.volume > 100.0 {
             panic!("参数错误：声音参数不能大于100")
         }
-        Arc::new(AtomicU32::new(args.volume.to_bits()))
+        args.volume
     };
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
-    let next_id = Arc::new(AtomicUsize::new(0));
     let play_list = create_play_list(&files, loop_mode)?;
     let mut running = Running::create(play_list, mp.as_ref())?;
     running
         .next()
         .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));
+    running.set_volume(volume);
 
     //交互处理
     loop {

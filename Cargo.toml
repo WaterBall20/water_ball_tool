@@ -33,6 +33,7 @@ pretty_assertions = "1.4.1"
 colored = "3.1.1"
 cpal = "0.18.2"
 symphonia = { version = "0.6.1",features = ["default"] }
+rubato = "5.0.1"
 
 
 # package
@@ -61,10 +62,12 @@ blake2b_simd = { workspace = true }
 md-5 = { workspace = true }
 crc32fast = { workspace = true }
 
-lofty = { workspace = true }
 colored = { workspace = true }
+#Audio
+lofty = { workspace = true }
 cpal = { workspace = true }
 symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"]}
+rubato = { workspace = true}
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

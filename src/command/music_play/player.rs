@@ -12,6 +12,8 @@ const BUF_LEN: usize = BUF_LEN_U32 as usize;
 const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
 const SAMPLE_RATE_F64: f64 = SAMPLE_RATE as f64;
 
+const RING_BUF_LEN: usize = 128 * 1024;
+
 #[derive(Clone)]
 pub(super) struct Player {
     played_samples: Arc<AtomicU64>,
@@ -71,8 +73,7 @@ impl Player {
             buffer_size: cpal::BufferSize::Fixed(BUF_LEN_U32),
         });
         // 在你的播放器初始化阶段
-        let ring_capacity = SAMPLE_RATE as usize * channels as usize;
-        let ring_buffer = RingBufferWait::new_max_len(ring_capacity)?;
+        let ring_buffer = RingBufferWait::new_max_len(RING_BUF_LEN)?;
 
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
@@ -182,5 +183,9 @@ impl Player {
             todo!()
         }
         Ok(())
+    }
+
+    pub fn get_sample_rate(&self) -> u32 {
+        self.sound_engine.stream_config.sample_rate
     }
 }

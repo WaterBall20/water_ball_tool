@@ -200,6 +200,9 @@ impl Running {
                     if let Some(pb) = &pb {
                         pb.set_prefix("暂停中");
                     }
+                    if play_object.run_stop {
+                        break; // 如果正在释放就退出线程
+                    }
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
                     if play_object.run_stop {
                         break; // 如果正在释放就退出线程
@@ -357,8 +360,11 @@ impl PlayObject {
         if let Some(t) = &track {
             info!("换曲： {:?}", t.track());
             next_id.store(t.next_id(), Ordering::Release);
-            let mut decoder =
-                Decoder::new(player.ring_buffer().clone(), t.track().path().to_path_buf())?;
+            let mut decoder = Decoder::new(
+                player.ring_buffer().clone(),
+                t.track().path().to_path_buf(),
+                player.get_sample_rate(),
+            )?;
 
             let play_list = play_list.clone();
             let next_id = next_id.clone();

@@ -259,8 +259,12 @@ impl<T> RingBufferWait<T> {
         }
     }
 
-    pub fn max_len(&self) -> usize {
-        self.max_len.load(Ordering::Acquire)
+    pub fn max_len(&self) -> Option<usize> {
+        if self.is_max_len.load(Ordering::Acquire) {
+            Some(self.max_len.load(Ordering::Acquire))
+        } else {
+            None
+        }
     }
 
     pub fn len(&self) -> usize {
