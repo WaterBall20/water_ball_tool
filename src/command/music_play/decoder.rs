@@ -9,14 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use symphonia::core::codecs::audio::AudioDecoder;
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::SeekErrorKind;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
-use tracing::{debug, error};
+use tracing::{debug, error, event};
 use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
 
 const RESAMPLER_CHUNK_IN: usize = 1024;
@@ -50,7 +50,7 @@ struct DecoderData {
 impl Decoder {
     pub fn new(
         ring_buf: RingBufferWait<f32>,
-        path: PathBuf,
+        path: &PathBuf,
         output_sample_rate: u32,
     ) -> DecoderResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -91,7 +91,7 @@ impl Decoder {
                     kind: DecoderErrorKind::NoAudioCodecParams,
                 })?;
         let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(codec_params, &Default::default())
+            .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
             .map_err(|e| DecoderError {
                 message: format!("make audio decoder error: {e}"),
                 kind: DecoderErrorKind::MakeAudioDecoderError(e),
@@ -300,7 +300,6 @@ impl Decoder {
         max_out_frames: usize,
     ) -> Result<usize, DecoderEventError> {
         let input_buf = &rs.in_buf[..RESAMPLER_CHUNK_IN * channels];
-        let max_out_frames = max_out_frames;
         let input_adapter = match InterleavedSlice::new(input_buf, channels, RESAMPLER_CHUNK_IN) {
             Ok(i) => i,
             Err(e) => {
@@ -356,6 +355,7 @@ impl Decoder {
     }
 
     fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>) {
+        let event = Arc::new(event);
         let mut list = list.lock().expect("list is poisoned");
         for sink in list.iter_mut() {
             sink.emit(event.clone());
@@ -371,7 +371,10 @@ impl Decoder {
         for chunk in write_buf.chunks(max_write_len) {
             // 检查停止信号
             if stop.load(Ordering::Acquire) {
-                break;
+                return Err(DecoderEventError {
+                    message: "Decoder stop".to_string(),
+                    kind: DecoderEventErrorKind::DecoderStop,
+                });
             }
             // 分块后，每一块的长度都 ≤ CHUNK_SIZE ≤ ring 容量
             // 因此 write_all 不会返回 WriteSizeTooLarge
@@ -398,15 +401,18 @@ impl Decoder {
             .push(event);
     }
 
-    fn stop_inner(&mut self) -> DecoderResult<()> {
-        self.stop.store(true, Ordering::Release);
-        self.ring_buf.clear();
-        self.join()
+    pub fn add_event_insert(&mut self, index: usize, event: Box<dyn DecoderEventSink>) {
+        self.event_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(index, event);
     }
 
     pub fn stop(self) -> DecoderResult<()> {
         let mut s = self;
-        s.stop_inner()
+        s.stop.store(true, Ordering::Release);
+        s.ring_buf.clear();
+        s.join()
     }
 
     pub fn join(&mut self) -> DecoderResult<()> {
@@ -444,31 +450,31 @@ impl Decoder {
 }
 
 pub trait DecoderEventSink: Send + 'static {
-    fn emit(&mut self, event: DecoderEvent);
+    fn emit(&mut self, event: Arc<DecoderEvent>);
     fn new<F>(f: F) -> Self
     where
-        F: Fn(DecoderEvent) + Send + 'static,
+        F: Fn(&DecoderEvent) + Send + 'static,
         Self: Sized;
 }
 
-pub struct DecoderEventChannelSink(Sender<DecoderEvent>);
+pub struct DecoderEventChannelSink(Sender<Arc<DecoderEvent>>);
 
 impl DecoderEventSink for DecoderEventChannelSink {
-    fn emit(&mut self, event: DecoderEvent) {
+    fn emit(&mut self, event: Arc<DecoderEvent>) {
         // send 非阻塞；满了就丢弃（或 try_send + 计数）
         let _ = self.0.send(event);
     }
 
     fn new<F>(f: F) -> Self
     where
-        F: Fn(DecoderEvent) + Send + 'static,
+        F: Fn(&DecoderEvent) + Send + 'static,
     {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<Arc<DecoderEvent>>();
         std::thread::Builder::new()
             .name("decoder_event_channel_sink".to_string())
             .spawn(move || {
                 for event in receiver {
-                    f(event);
+                    f(&*event);
                 }
             })
             .expect("创建线程失败");
@@ -476,16 +482,16 @@ impl DecoderEventSink for DecoderEventChannelSink {
     }
 }
 
-pub struct DecoderEventDirectSink(Box<dyn Fn(DecoderEvent) + Send + 'static>);
+pub struct DecoderEventDirectSink(Box<dyn Fn(&DecoderEvent) + Send + 'static>);
 
 impl DecoderEventSink for DecoderEventDirectSink {
-    fn emit(&mut self, event: DecoderEvent) {
-        self.0(event); // 就在解码线程里跑
+    fn emit(&mut self, event: Arc<DecoderEvent>) {
+        self.0(&*event); // 就在解码线程里跑
     }
 
     fn new<F>(f: F) -> Self
     where
-        F: Fn(DecoderEvent) + Send + 'static,
+        F: Fn(&DecoderEvent) + Send + 'static,
     {
         Self(Box::new(f))
     }
@@ -552,6 +558,7 @@ pub(super) enum DecoderEventErrorKind {
     InterleavedSliceSizeError(SizeError),
     ResampleError(ResampleError),
     NextPacketError(String),
+    DecoderStop,
 }
 impl Clone for DecoderEventErrorKind {
     fn clone(&self) -> Self {
@@ -607,6 +614,7 @@ impl Clone for DecoderEventErrorKind {
             }),
             Self::ResampleError(e) => Self::ResampleError(*e),
             Self::NextPacketError(e) => Self::NextPacketError(e.clone()),
+            Self::DecoderStop => Self::DecoderStop,
         }
     }
 }
@@ -673,7 +681,7 @@ impl DecoderError {
 }
 
 #[derive(Debug)]
-enum DecoderErrorKind {
+pub enum DecoderErrorKind {
     RingBufferNoMaxLen,
     Running,
     IOError(std::io::Error),

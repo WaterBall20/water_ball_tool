@@ -1,8 +1,11 @@
 use crate::command::music_play::decoder::{
-    Decoder, DecoderEventChannelSink, DecoderEventSink, DecoderEventType, DecoderResult,
+    Decoder, DecoderEventChannelSink, DecoderEventDirectSink, DecoderEventSink, DecoderEventType,
+    DecoderResult,
 };
 use crate::command::music_play::play_list::{PlayList, Track};
-use crate::command::music_play::player::Player;
+use crate::command::music_play::player::{
+    Player, PlayerEventChannelSink, PlayerEventSink, PlayerEventType,
+};
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
 use std::any::Any;
@@ -28,16 +31,23 @@ struct PlayObject {
     is_playing: bool,
     // 停止标志
     run_stop: bool,
-    // 换曲ID
-    next_id: Arc<AtomicUsize>,
-    //
+    //这次歌曲
     this_track: Arc<Mutex<Option<Track>>>,
+    //UI这次歌曲
+    ui_track: Arc<Mutex<Option<Track>>>,
     // 上次进度
     last_play_pos: Duration,
     // 上次进度相等次数
     last_play_pos_eq_count: usize,
     // 上次进度相等起始时间
     last_pos_eq_start_time: Duration,
+    next_content: NextContent,
+}
+
+#[derive(Clone)]
+struct NextContent {
+    // 换曲ID
+    next_id: Arc<AtomicUsize>,
 }
 
 struct ThreadControl {
@@ -57,17 +67,45 @@ impl Running {
         play_list: PlayList,
         mp: Option<&MultiProgress>,
     ) -> Result<Self, Box<dyn Error>> {
-        let player = Player::new()?;
+        let mut player = Player::new()?;
+
+        let this_track = Arc::new(Mutex::new(None));
+        let ui_track = Arc::new(Mutex::new(None));
+        //注册事件
+        {
+            let this_track = this_track.clone();
+            let ui_track = ui_track.clone();
+            player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
+                debug!("播放事件触发: {e:?}");
+                if let Ok(e) = e.result() {
+                    match e {
+                        PlayerEventType::TrackEnded => {
+                            ui_track
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .clone_from(
+                                    &this_track
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
+                        }
+                    }
+                }
+            })));
+        }
         let play_object = Arc::new(Mutex::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player,
             is_playing: false,
             run_stop: false,
-            next_id: Arc::new(AtomicUsize::new(0)),
-            this_track: Arc::new(Mutex::new(None)),
+            this_track,
+            ui_track,
             last_play_pos: Duration::default(),
             last_play_pos_eq_count: 0,
             last_pos_eq_start_time: Duration::default(),
+            next_content: NextContent {
+                next_id: Arc::new(AtomicUsize::new(0)),
+            },
         }));
         //控制变量
         let condvar = Arc::new(Condvar::new());
@@ -257,6 +295,14 @@ impl Running {
         Ok(())
     }
 
+    /// 获取音量
+    pub fn volume(&self) -> f32 {
+        self.play_object
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .volume()
+    }
+
     /// 设置音量
     pub(super) fn set_volume(&mut self, value: f32) {
         self.play_object
@@ -331,6 +377,11 @@ impl PlayObject {
         self.player.pause()
     }
 
+    /// 获取音量
+    fn volume(&self) -> f32 {
+        self.player.volume()
+    }
+
     /// 设置音量
     fn set_volume(&mut self, value: f32) {
         self.player.set_volume(value);
@@ -341,37 +392,65 @@ impl PlayObject {
         Self::next_inner(
             &self.play_list,
             false,
-            &self.next_id,
             self.player.clone(),
-            self.this_track.clone(),
+            &self.this_track,
+            Some(&self.ui_track),
+            &self.next_content,
         )
     }
 
     fn next_inner(
         play_list: &Arc<Mutex<PlayList>>,
         play_end: bool,
-        next_id: &Arc<AtomicUsize>,
         player: Player,
-        this_track: Arc<Mutex<Option<Track>>>,
+        this_track: &Arc<Mutex<Option<Track>>>,
+        ui_track: Option<&Arc<Mutex<Option<Track>>>>,
+        next_content: &NextContent,
     ) -> DecoderResult<Option<Track>> {
         let mut player = player;
-        let mut play_list_lock = play_list.lock().unwrap_or_else(|err| err.into_inner());
+        let mut play_list_lock = play_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_id = &next_content.next_id;
+        //临界区处理
+        if player.get_decoder_eof() {
+            return if play_end {
+                Ok(None)
+            } else {
+                //缓冲区部分清理
+                player.clear_decoder_eof_buf();
+                //立刻指定UI
+                if let Some(ui_track) = &ui_track {
+                    let this_track = this_track
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    *ui_track
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = this_track;
+                }
+                Ok(this_track
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone())
+            };
+        }
         let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
         if let Some(t) = &track {
             info!("换曲： {:?}", t.track());
             next_id.store(t.next_id(), Ordering::Release);
             let mut decoder = Decoder::new(
                 player.ring_buffer().clone(),
-                t.track().path().to_path_buf(),
+                &t.track().path().to_path_buf(),
                 player.get_sample_rate(),
             )?;
 
             let play_list = play_list.clone();
-            let next_id = next_id.clone();
             {
                 let this_track = this_track.clone();
-                let audio = player.clone();
-                decoder.add_event(Box::new(DecoderEventChannelSink::new(move |e| {
+                let player = player.clone();
+                let next_content = next_content.clone();
+                decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
                     debug!("解码器事件触发：{e:?}");
                     match e.result() {
                         Ok(decoder_event) => match decoder_event {
@@ -379,9 +458,10 @@ impl PlayObject {
                                 if let Err(e) = Self::next_inner(
                                     &play_list,
                                     true,
-                                    &next_id,
-                                    audio.clone(),
-                                    this_track.clone(),
+                                    player.clone(),
+                                    &this_track,
+                                    None,
+                                    &next_content,
                                 ) {
                                     error!("自动换曲发生错误： {e}");
                                 }
@@ -393,7 +473,11 @@ impl PlayObject {
                     }
                 })));
             }
-            player.set_decoder(decoder)?;
+            if play_end {
+                player.set_decoder_no_clear(decoder)?;
+            } else {
+                player.set_decoder(decoder)?;
+            }
             this_track
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
