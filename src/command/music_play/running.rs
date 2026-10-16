@@ -1,6 +1,5 @@
 use crate::command::music_play::decoder::{
-    Decoder, DecoderEventChannelSink, DecoderEventDirectSink, DecoderEventSink, DecoderEventType,
-    DecoderResult,
+    Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
 use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::player::{

@@ -4,7 +4,7 @@ use rubato::{Fft, FixedSync, ResampleError, Resampler, ResamplerConstructionErro
 use std::any::Any;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};

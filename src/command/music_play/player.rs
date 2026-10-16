@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
-use tracing::{error, event};
+use tracing::error;
 use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
 
 const BUF_LEN_U32: u32 = 1024;
