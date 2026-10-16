@@ -332,7 +332,7 @@ impl PlayerEventSink for PlayerEventChannelSink {
             .name("player_event_channel_sink".to_string())
             .spawn(move || {
                 for event in receiver {
-                    f(&*event);
+                    f(&event);
                 }
             })
             .expect("创建线程失败");

@@ -413,9 +413,10 @@ impl PlayObject {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next_id = &next_content.next_id;
         //临界区处理
-        if player.get_decoder_eof() {
-            return if play_end {
-                Ok(None)
+        while player.get_decoder_eof() {
+            if play_end {
+                //自旋等待
+                thread::sleep(Duration::from_millis(1));
             } else {
                 //缓冲区部分清理
                 player.clear_decoder_eof_buf();
@@ -429,10 +430,10 @@ impl PlayObject {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = this_track;
                 }
-                Ok(this_track
+                return Ok(this_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone())
+                    .clone());
             };
         }
         let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
@@ -441,7 +442,7 @@ impl PlayObject {
             next_id.store(t.next_id(), Ordering::Release);
             let mut decoder = Decoder::new(
                 player.ring_buffer().clone(),
-                &t.track().path().to_path_buf(),
+                &t.track().path(),
                 player.get_sample_rate(),
             )?;
 

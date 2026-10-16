@@ -4,7 +4,7 @@ use rubato::{Fft, FixedSync, ResampleError, Resampler, ResamplerConstructionErro
 use std::any::Any;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
@@ -50,12 +50,12 @@ struct DecoderData {
 impl Decoder {
     pub fn new(
         ring_buf: RingBufferWait<f32>,
-        path: &PathBuf,
+        path: &Path,
         output_sample_rate: u32,
     ) -> DecoderResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         // 1. 打开文件 & 创建 MSS
-        let file = File::open(&path)?;
+        let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
 
         // 2. 探测格式
@@ -474,7 +474,7 @@ impl DecoderEventSink for DecoderEventChannelSink {
             .name("decoder_event_channel_sink".to_string())
             .spawn(move || {
                 for event in receiver {
-                    f(&*event);
+                    f(&event);
                 }
             })
             .expect("创建线程失败");
@@ -486,7 +486,7 @@ pub struct DecoderEventDirectSink(Box<dyn Fn(&DecoderEvent) + Send + 'static>);
 
 impl DecoderEventSink for DecoderEventDirectSink {
     fn emit(&mut self, event: Arc<DecoderEvent>) {
-        self.0(&*event); // 就在解码线程里跑
+        self.0(&event); // 就在解码线程里跑
     }
 
     fn new<F>(f: F) -> Self
