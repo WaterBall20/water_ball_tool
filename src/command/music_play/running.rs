@@ -2,6 +2,7 @@ use crate::command::music_play::decoder::{
     Decoder, DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventSink,
     DecoderEventType, DecoderResult,
 };
+use crate::command::music_play::effect::fade::FadeEffect;
 use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::player::{
     Player, PlayerEventChannelSink, PlayerEventSink, PlayerEventType,
@@ -90,6 +91,9 @@ impl Running {
                 }
             })));
         }
+        //添加效果(淡出淡入)
+        player.add_audio_effect(FadeEffect::new());
+
         let play_object = Arc::new(Mutex::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player,
@@ -241,7 +245,7 @@ impl Running {
     }
 
     /// 播放
-    pub(super) fn play(&mut self) -> Result<(), cpal::Error> {
+    pub(super) fn play(&mut self) -> Result<(), Box<dyn Error>> {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -251,7 +255,7 @@ impl Running {
     }
 
     /// 暂停
-    pub(super) fn pause(&mut self) -> Result<(), cpal::Error> {
+    pub(super) fn pause(&mut self) -> Result<(), Box<dyn Error>> {
         self.play_object
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -352,12 +356,12 @@ impl Running {
 }
 impl PlayObject {
     ///播放
-    fn play(&mut self) -> Result<(), cpal::Error> {
+    fn play(&mut self) -> Result<(), Box<dyn Error>> {
         self.player.play()
     }
 
     ///暂停
-    fn pause(&mut self) -> Result<(), cpal::Error> {
+    fn pause(&mut self) -> Result<(), Box<dyn Error>> {
         self.player.pause()
     }
 

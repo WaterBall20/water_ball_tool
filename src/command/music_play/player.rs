@@ -1,17 +1,17 @@
 use crate::command::music_play::decoder::{
     Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
+use crate::command::music_play::effect::{Decision, Effect, EffectChain, PlayCmd};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Error, Stream, StreamConfig};
+use cpal::{Device, Stream, StreamConfig};
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::error;
 use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
-
-const BUF_LEN_U32: u32 = 1024;
-const BUF_LEN: usize = BUF_LEN_U32 as usize;
 
 #[derive(Clone)]
 pub(super) struct Player {
@@ -19,6 +19,7 @@ pub(super) struct Player {
     sound_engine: SoundEngine,
     content: Content,
     event_content: EventContent,
+    rx_cmd_thread: Arc<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -27,12 +28,14 @@ struct SoundEngine {
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
+    effect_chain: Arc<Mutex<EffectChain>>,
 }
 
 #[derive(Clone)]
 struct Content {
     is_playing: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
+    tx_cmd: Sender<PlayCmd>,
 }
 
 /// 事件控制
@@ -51,19 +54,23 @@ impl Player {
         content: Content,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
-    ) -> Result<Stream, Error> {
+        rx_cmd: Receiver<PlayCmd>,
+        tx_done: Sender<PlayCmd>,
+        effect_chain: Arc<Mutex<EffectChain>>,
+    ) -> Result<Stream, cpal::Error> {
+        let mut scratch = Vec::new();
         device.build_output_stream(
             config,
             move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
                 //暂停处理
-                if !content.is_playing.load(Ordering::Acquire) {
+                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
+                if !content.is_playing.load(Ordering::Acquire) || volume == 0.0 {
                     data.fill(0.0);
                     return;
                 }
 
                 let len = ring_buf.read(data);
                 //音量处理
-                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
                 if (volume - 1.0).abs() > 0.0 {
                     for datum in &mut data[..len] {
                         *datum *= volume;
@@ -72,6 +79,24 @@ impl Player {
                 //进度计数
                 played_samples.fetch_add(len as u64, Ordering::Relaxed);
                 data[len..].fill(0.0);
+                //效果处理
+                if let Ok(mut effect_chain) = effect_chain.try_lock() {
+                    // 1. 收指令，做决策（绝不阻塞、不分配）
+                    while let Ok(cmd) = rx_cmd.try_recv() {
+                        if matches!(effect_chain.dispatch_transport(cmd), Decision::Pass) {
+                            let _ = tx_done.try_send(cmd);
+                        }
+                    }
+                    // 2. 处理音频
+                    effect_chain.process(data);
+                    // 3. 上报已完成的延迟指令（Vec 预分配，复用）
+                    scratch.clear();
+                    effect_chain.poll_transport(&mut scratch);
+                    for cmd in scratch.drain(..) {
+                        let _ = tx_done.try_send(cmd);
+                    }
+                }
+
                 //检查解码是否EOF
                 let decoder_eof = &event_content.decoder_eof;
                 let decoder_eof_pos = &event_content.decoder_eof_pos;
@@ -108,6 +133,20 @@ impl Player {
             sink.emit(event.clone());
         }
     }
+
+    fn add_decoder_event_inner(&self, decoder: &mut Decoder) {
+        let decoder_eof_pos = self.event_content.decoder_eof_pos.clone();
+        let decoder_eof = self.event_content.decoder_eof.clone();
+        let ring_buf = self.sound_engine.ring_buffer.clone();
+        decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
+            if let Ok(e) = e.result()
+                && let DecoderEventType::Eof = e
+            {
+                decoder_eof_pos.store(ring_buf.len(), Ordering::Relaxed);
+                decoder_eof.store(true, Ordering::Relaxed);
+            }
+        })));
+    }
 }
 impl Player {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -138,7 +177,18 @@ impl Player {
             list,
         };
 
-        let content = Content { is_playing, volume };
+        let effect_chain = Arc::new(Mutex::new(EffectChain::new(channels, sample_rate)));
+
+        // 主线程 → 音频线程：transport 指令
+        let (tx_cmd, rx_cmd) = crossbeam_channel::bounded::<PlayCmd>(1);
+        // 音频线程 → 主线程：已放行的指令
+        let (tx_done, rx_done) = crossbeam_channel::bounded::<PlayCmd>(8);
+
+        let content = Content {
+            is_playing: is_playing.clone(),
+            volume,
+            tx_cmd,
+        };
 
         let stream = Arc::new(Self::create_stream(
             &device,
@@ -147,7 +197,40 @@ impl Player {
             content.clone(),
             played_samples.clone(),
             event_content.clone(),
+            rx_cmd,
+            tx_done,
+            effect_chain.clone(),
         )?);
+
+        let rx_cmd_thread = {
+            let stream = stream.clone();
+            Arc::new(
+                thread::Builder::new()
+                    .name("rx_cmd".to_string())
+                    .spawn(move || {
+                        for cmd in rx_done {
+                            match cmd {
+                                PlayCmd::Play => {
+                                    is_playing.store(true, Ordering::Relaxed);
+                                    if let Err(e) = stream.play() {
+                                        error!("播放发生错误： {e}");
+                                    }
+                                }
+                                PlayCmd::Pause => {
+                                    is_playing.store(false, Ordering::Relaxed);
+                                    if let Err(e) = stream.pause() {
+                                        error!("暂停发生错误{e}");
+                                    }
+                                }
+                                PlayCmd::Seek(_) => {
+                                    todo!();
+                                }
+                            }
+                        }
+                    })
+                    .expect(r#"无法创建"rx_cmd"线程"#),
+            )
+        };
 
         Ok(Self {
             sound_engine: SoundEngine {
@@ -155,10 +238,12 @@ impl Player {
                 decoder,
                 stream_config,
                 stream,
+                effect_chain,
             },
             content,
             played_samples,
             event_content,
+            rx_cmd_thread,
         })
     }
 
@@ -183,19 +268,29 @@ impl Player {
     }
 
     pub fn set_volume(&self, volume: f32) {
+        //安全范围处理
+        let volume = if volume > 1.0 {
+            (volume / 100.0).min(1.0)
+        } else if volume < 0.0 {
+            0.0
+        } else {
+            volume
+        };
         self.content
             .volume
             .store(volume.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn play(&self) -> Result<(), Error> {
+    pub fn play(&self) -> Result<(), Box<dyn std::error::Error>> {
+        _ = self.content.tx_cmd.try_send(PlayCmd::Play);
         self.content.is_playing.store(true, Ordering::Relaxed);
-        self.sound_engine.stream.play()
+        self.sound_engine.stream.play()?;
+        Ok(())
     }
 
-    pub fn pause(&self) -> Result<(), Error> {
-        self.content.is_playing.store(false, Ordering::Relaxed);
-        self.sound_engine.stream.pause()
+    pub fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.content.tx_cmd.send(PlayCmd::Pause)?;
+        Ok(())
     }
 
     pub fn ring_buffer(&self) -> &RingBufferWait<f32> {
@@ -250,21 +345,8 @@ impl Player {
         Ok(())
     }
 
-    fn add_decoder_event_inner(&self, decoder: &mut Decoder) {
-        let decoder_eof_pos = self.event_content.decoder_eof_pos.clone();
-        let decoder_eof = self.event_content.decoder_eof.clone();
-        let ring_buf = self.sound_engine.ring_buffer.clone();
-        decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
-            if let Ok(e) = e.result()
-                && let DecoderEventType::Eof = e
-            {
-                decoder_eof_pos.store(ring_buf.len(), Ordering::Relaxed);
-                decoder_eof.store(true, Ordering::Relaxed);
-            }
-        })));
-    }
-
     pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn std::error::Error>> {
+        todo!();
         let mut decoder = self
             .sound_engine
             .decoder
@@ -272,7 +354,6 @@ impl Player {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(decoder) = &mut *decoder {
             let pos = decoder.try_seek(pos)?.actual_ts;
-            todo!()
         }
         Ok(())
     }
@@ -314,6 +395,17 @@ impl Player {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(event);
     }
+
+    pub fn add_audio_effect<E>(&mut self, effect: E)
+    where
+        E: Effect + Send + 'static,
+    {
+        self.sound_engine
+            .effect_chain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(effect);
+    }
 }
 
 pub trait PlayerEventSink: Send + 'static {
@@ -324,7 +416,7 @@ pub trait PlayerEventSink: Send + 'static {
         Self: Sized;
 }
 
-pub struct PlayerEventChannelSink(Sender<Arc<PlayerEvent>>);
+pub struct PlayerEventChannelSink(mpsc::Sender<Arc<PlayerEvent>>);
 
 impl PlayerEventSink for PlayerEventChannelSink {
     fn emit(&mut self, event: Arc<PlayerEvent>) {
@@ -336,7 +428,7 @@ impl PlayerEventSink for PlayerEventChannelSink {
         F: Fn(&PlayerEvent) + Send + 'static,
     {
         let (sender, receiver) = mpsc::channel::<Arc<PlayerEvent>>();
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("player_event_channel_sink".to_string())
             .spawn(move || {
                 for event in receiver {
