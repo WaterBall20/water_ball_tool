@@ -1,5 +1,6 @@
 use crate::command::music_play::decoder::{
-    Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
+    Decoder, DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventSink,
+    DecoderEventType, DecoderResult,
 };
 use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::player::{
@@ -11,9 +12,9 @@ use std::any::Any;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
+use std::{io, thread};
 use tracing::{debug, error, info};
 
 pub(super) struct Running {
@@ -26,8 +27,6 @@ struct PlayObject {
     play_list: Arc<Mutex<PlayList>>,
     // 播放器
     player: Player,
-    // 播放标志
-    is_playing: bool,
     // 停止标志
     run_stop: bool,
     //这次歌曲
@@ -47,6 +46,8 @@ struct PlayObject {
 struct NextContent {
     // 换曲ID
     next_id: Arc<AtomicUsize>,
+    //连续发生错误次数
+    err_count: Arc<AtomicUsize>,
 }
 
 struct ThreadControl {
@@ -62,10 +63,7 @@ impl Drop for Running {
 
 impl Running {
     ///创建运行时
-    pub(super) fn create(
-        play_list: PlayList,
-        mp: Option<&MultiProgress>,
-    ) -> Result<Self, Box<dyn Error>> {
+    pub(super) fn create(play_list: PlayList, mp: &MultiProgress) -> Result<Self, Box<dyn Error>> {
         let mut player = Player::new()?;
 
         let this_track = Arc::new(Mutex::new(None));
@@ -95,7 +93,6 @@ impl Running {
         let play_object = Arc::new(Mutex::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player,
-            is_playing: false,
             run_stop: false,
             this_track,
             ui_track,
@@ -104,6 +101,7 @@ impl Running {
             last_pos_eq_start_time: Duration::default(),
             next_content: NextContent {
                 next_id: Arc::new(AtomicUsize::new(0)),
+                err_count: Arc::new(AtomicUsize::new(0)),
             },
         }));
         //控制变量
@@ -128,12 +126,10 @@ impl Running {
     fn create_ui_thread(
         condvar: Arc<Condvar>,
         play_object: Arc<Mutex<PlayObject>>,
-        mp: Option<&MultiProgress>,
-    ) -> std::io::Result<JoinHandle<()>> {
+        mp: &MultiProgress,
+    ) -> io::Result<JoinHandle<()>> {
         let pb = crate::command::create_pb(mp);
         thread::Builder::new().name("ui".to_string()).spawn(move || {
-            let pb = pb;
-            if let Some(pb) = &pb {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] {percent:>3.bold.magenta}%  {msg}")
@@ -141,7 +137,6 @@ impl Running {
                         .progress_chars("█▉▊▋▌▍▎▏ ")
                 );
                 pb.set_prefix("暂停中");
-            }
             loop {
                 let mut play_object = play_object
                     .lock()
@@ -181,7 +176,7 @@ impl Running {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(track) = &*track_lock {
                     let track_dur = *track.duration();
-                    if let Some(pb) = &pb {
+
                         let play_pos_millis = play_pos.as_millis();
                         let play_pos_secs = play_pos_millis / 1000;
                         let play_pos_minutes = play_pos_secs / 60;
@@ -219,34 +214,26 @@ impl Running {
                             label_artist = "Artist".green(),
                             label_path = "Path".green(),
                         ));
-                    }
+
                     drop(track_lock);
                     play_object = condvar
                         .wait_timeout(play_object, Duration::from_millis(50))
                         .expect("Condvar won't fail")
                         .0;
                 } else {
-                    if let Some(pb) = &pb {
                         pb.set_prefix("异常暂停中");
-                    }
                     drop(track_lock);
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
                 }
                 //暂停时挂起
-                if !play_object.is_playing {
-                    if let Some(pb) = &pb {
-                        pb.set_prefix("暂停中");
-                    }
-                    if play_object.run_stop {
-                        break; // 如果正在释放就退出线程
-                    }
+                if !play_object.player.is_playing() && !play_object.run_stop {
+                    pb.set_prefix("暂停中");
                     play_object = condvar.wait(play_object).expect("Condvar won't fail");
                     if play_object.run_stop {
                         break; // 如果正在释放就退出线程
                     }
-                    if let Some(pb) = &pb {
-                        pb.set_prefix("播放中");
-                    }
+                    pb.set_prefix("播放中");
+
                 }
             }
             debug!("[UI线程]线程正在退出");
@@ -366,13 +353,11 @@ impl Running {
 impl PlayObject {
     ///播放
     fn play(&mut self) -> Result<(), cpal::Error> {
-        self.is_playing = true;
         self.player.play()
     }
 
     ///暂停
     fn pause(&mut self) -> Result<(), cpal::Error> {
-        self.is_playing = false;
         self.player.pause()
     }
 
@@ -439,11 +424,40 @@ impl PlayObject {
         if let Some(t) = &track {
             info!("换曲： {:?}", t.track());
             next_id.store(t.next_id(), Ordering::Release);
-            let mut decoder = Decoder::new(
-                player.ring_buffer().clone(),
-                &t.track().path(),
-                player.get_sample_rate(),
-            )?;
+
+            let mut decoder = loop {
+                let decoder = Decoder::new(
+                    player.ring_buffer().clone(),
+                    t.track().path(),
+                    player.get_sample_rate(),
+                );
+                match decoder {
+                    Ok(decoder) => break decoder,
+                    Err(e) => {
+                        let err_action = Self::new_decoder_err_action_inner(&e, next_content);
+                        match err_action {
+                            DecoderErrorAction::Skip => {
+                                drop(play_list_lock); //必须提前释放，否则死锁
+                                return Self::next_inner(
+                                    play_list,
+                                    play_end,
+                                    player.clone(),
+                                    this_track,
+                                    ui_track,
+                                    next_content,
+                                );
+                            }
+                            DecoderErrorAction::AutoRetry => {}
+                            DecoderErrorAction::Pause => {
+                                if let Err(e) = player.pause() {
+                                    error!("暂停发生错误, err: {e}");
+                                }
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+            };
 
             let play_list = play_list.clone();
             {
@@ -463,12 +477,15 @@ impl PlayObject {
                                     None,
                                     &next_content,
                                 ) {
-                                    error!("自动换曲发生错误： {e}");
+                                    error!("自动换曲发生错误，err:{e}");
                                 }
                             }
                         },
                         Err(err) => {
-                            error!("发生解码错误事件： {err:?}");
+                            if let Err(e) = player.pause() {
+                                error!("暂停发生错误, err: {e}");
+                            }
+                            error!("发生解码错误事件, 将暂停： {err:?}");
                         }
                     }
                 })));
@@ -482,17 +499,95 @@ impl PlayObject {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .replace(t.track().clone());
+            next_content.err_count.store(0, Ordering::Release);
             Ok(Some(t.track().clone()))
         } else {
             if play_end {
-                player.pause().unwrap_or_else(|e| {
-                    error!("暂停失败: err: {e}");
-                });
+                if let Err(e) = player.pause() {
+                    error!("暂停发生错误, err: {e}");
+                }
                 info!("没有下一曲，将暂停");
             } else {
-                error!("切换下一曲发生错误, 不存在");
+                if let Err(e) = player.pause() {
+                    error!("暂停发生错误, err: {e}");
+                }
+                error!("切换下一曲发生错误，不存在，将暂停");
             }
+            next_content.err_count.store(0, Ordering::Release);
             Ok(None)
         }
     }
+
+    //
+    fn new_decoder_err_action_inner(
+        e: &DecoderError,
+        next_content: &NextContent,
+    ) -> DecoderErrorAction {
+        //增加错误计数
+        next_content.err_count.fetch_add(1, Ordering::Release);
+        if next_content.err_count.load(Ordering::Acquire) > 5 {
+            error!("新建编码器发生多次失败（大于5次），将暂停");
+            return DecoderErrorAction::Pause;
+        }
+        match e.kind() {
+            DecoderErrorKind::IOError(io_e) => {
+                match io_e.kind() {
+                    // 永久性，建议跳过
+                    io::ErrorKind::NotFound
+                    | io::ErrorKind::InvalidData
+                    | io::ErrorKind::Unsupported
+                    | io::ErrorKind::IsADirectory
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::InvalidInput => {
+                        error!("创建解码器发生了IO错误，将跳过，err: {e}");
+                        DecoderErrorAction::Skip
+                    }
+
+                    // 可重试，暂停并给重试入口
+                    io::ErrorKind::Interrupted
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::ResourceBusy
+                    | io::ErrorKind::StaleNetworkFileHandle
+                    | io::ErrorKind::NetworkDown
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::OutOfMemory
+                    | io::ErrorKind::StorageFull
+                    | io::ErrorKind::QuotaExceeded
+                    | io::ErrorKind::PermissionDenied => {
+                        error!("创建解码器发生了IO错误，尝试重试，err: {e}");
+                        DecoderErrorAction::AutoRetry
+                    }
+
+                    // 未知或无法判断，保守暂停
+                    _ => {
+                        error!("创建解码器发生了无法自动处理的IO错误，将暂停，err: {e}");
+                        DecoderErrorAction::Pause
+                    }
+                }
+            }
+            DecoderErrorKind::NoAudioTrack
+            | DecoderErrorKind::NoAudioCodecParams
+            | DecoderErrorKind::MakeAudioDecoderError(_)
+            | DecoderErrorKind::GetProbeError(_)
+            | DecoderErrorKind::NoSampleRate
+            | DecoderErrorKind::NoChannels
+            | DecoderErrorKind::ResamplerConstructionError(_) => {
+                error!("创建解码器错误， 将跳过， err: {e}");
+                DecoderErrorAction::Skip
+            }
+            _ => {
+                error!("创建解码器发生了无法自动处理的错误，将暂停, err: {e}");
+                DecoderErrorAction::Pause
+            }
+        }
+    }
+}
+
+enum DecoderErrorAction {
+    Skip,
+    AutoRetry,
+    Pause,
 }

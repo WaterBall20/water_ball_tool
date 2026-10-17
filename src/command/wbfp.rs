@@ -9,6 +9,7 @@
 //! for streaming file discovery), per-worker-thread progress bars, and large file (>512MiB) log notices.
 
 use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb};
+use crate::multi_progress_init;
 use clap::error::Result;
 use clap::{Args, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -27,6 +28,7 @@ use water_ball_tool_lib::file_finder::{FileFinder, FileInfo, FileKind, SearchEve
 use water_ball_tool_lib::tools::PathTool;
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 use water_ball_tool_lib::wb_files_pack::{PackFileError, PackStructItemType};
+
 type ArcMutex<T> = Arc<Mutex<T>>;
 
 /// 水球包文件操作
@@ -149,15 +151,12 @@ impl WaterBallFilePackCommandsHashVerify {
 /// wbfp command router. Dispatches to the appropriate execution function
 /// based on the subcommand. Each function handles its own progress bars
 /// and multi-threading logic independently.
-pub fn commands(
-    args: WaterBallFilePackCommand,
-    mp: Option<MultiProgress>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn commands(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let mp = multi_progress_init();
     let args2 = &args.commands;
     match args2 {
-        WaterBallFilePackCommands::Unpack(u) => WaterBallFilePackArgsRuning::wbfp_u(u, mp),
         WaterBallFilePackCommands::Pack(p) => WaterBallFilePackArgsRuning::wbfp_p(p, mp),
-
+        WaterBallFilePackCommands::Unpack(u) => WaterBallFilePackArgsRuning::wbfp_u(u, mp),
         WaterBallFilePackCommands::HashVerify(h) => WaterBallFilePackArgsRuning::wbfp_h(h, mp),
     }
 }
@@ -186,7 +185,7 @@ impl WaterBallFilePackArgsRuning {
     /// separate `.wbm` file.
     pub fn wbfp_p(
         args: &WaterBallFilePackCommandsPack,
-        mp: Option<MultiProgress>,
+        mp: MultiProgress,
     ) -> Result<(), Box<dyn std::error::Error>> {
         //源目录路径
         let in_path = PathBuf::from(&args.in_path);
@@ -230,10 +229,10 @@ impl WaterBallFilePackArgsRuning {
         //写入优化
         let write_optimization = !args.no_write_optimization;
         //搜索进度条
-        let ff_pb = create_pb(mp.as_ref());
+        let ff_pb = create_pb(&mp);
 
         //包文件进度条
-        let wb_pb = create_pb(mp.as_ref()).map(|pb| Arc::new(Mutex::new(pb)));
+        let wb_pb = Arc::new(Mutex::new(create_pb(&mp)));
 
         info!("开始准备打包");
 
@@ -269,28 +268,30 @@ impl WaterBallFilePackArgsRuning {
             pack,
             write_optimization,
             args,
-            mp.as_ref(),
+            &mp,
             &pack_path,
         )
     }
 
     fn wbfp_p_run(
-        wb_pb: Option<ArcMutex<ProgressBar>>,
+        wb_pb: ArcMutex<ProgressBar>,
         data_len: Arc<AtomicU64>,
         in_path: &Path,
-        ff_pb: Option<ProgressBar>,
+        ff_pb: ProgressBar,
         mut pack: ManagerSync,
         write_optimization: bool,
         args: &WaterBallFilePackCommandsPack,
-        mp: Option<&MultiProgress>,
+        mp: &MultiProgress,
         pack_path: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use std::thread;
         //复制操作===
         info!("开始复制数据");
         //设置为包文件具体进度条
-        if let Some(pb) = &wb_pb {
-            let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        {
+            let pb = wb_pb
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pb.set_length(data_len.load(Ordering::SeqCst));
             pb.set_style(
                 ProgressStyle::default_bar()
@@ -326,10 +327,10 @@ impl WaterBallFilePackArgsRuning {
             let mut update_pb =
                 |write_len_2, _, info: &FileInfo, this_in_path: &Path, this_pack_path: &Path| {
                     write_len = write_len_2;
-                    if write_len - last_write_len >= 5 * 1024 * 1024
-                        && let Some(pb) = &wb_pb
-                    {
-                        let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if write_len - last_write_len >= 5 * 1024 * 1024 {
+                        let pb = wb_pb
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         pb.set_length(info.length());
                         pb.set_position(write_len);
                         pb.set_message(format!(
@@ -421,7 +422,7 @@ impl WaterBallFilePackArgsRuning {
         condver: &Arc<Condvar>,
         file_count: &Arc<AtomicU64>,
         data_len: &Arc<AtomicU64>,
-        ff_pb: Option<ProgressBar>,
+        ff_pb: ProgressBar,
     ) -> JoinHandle<Result<(), Error>> {
         use std::thread;
 
@@ -442,8 +443,7 @@ impl WaterBallFilePackArgsRuning {
                 let (search_stream_handle, stream_results) =
                     ff.search_stream(&in_dir_path, true, tx, 2)?;
                 //更新进度线程
-
-                if let Some(ff_pb) = ff_pb {
+                {
                     let file_count = file_count.clone();
                     let dir_count = dir_count.clone();
                     thread::spawn(move || {
@@ -511,9 +511,9 @@ impl WaterBallFilePackArgsRuning {
         condver: &Arc<Condvar>,
         ff_end: &Arc<AtomicBool>,
         thread_count: usize,
-        mp: Option<&MultiProgress>,
+        mp: &MultiProgress,
         write_optimization: bool,
-        wb_pb: Option<ArcMutex<ProgressBar>>,
+        wb_pb: ArcMutex<ProgressBar>,
         data_len: Arc<AtomicU64>,
         file_count: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
@@ -528,14 +528,14 @@ impl WaterBallFilePackArgsRuning {
         let mut wb_pbs = Vec::with_capacity(thread_count);
         for _ in 0..thread_count {
             let pb = create_pb(mp);
-            if let Some(pb) = &pb {
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .expect("设置进度条模板失败")
-                        .progress_chars("=>-"),
-                );
-            }
+
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .expect("设置进度条模板失败")
+                    .progress_chars("=>-"),
+            );
+
             wb_pbs.push(pb);
         }
 
@@ -553,9 +553,7 @@ impl WaterBallFilePackArgsRuning {
                     .pop()
                     .expect("逻辑错误：线程获取线程进度条，进度条不存在");
                 let ff_end = ff_end.clone();
-                if let Some(pb) = &pb {
-                    pb.set_prefix(format!("线程{index}"));
-                }
+                pb.set_prefix(format!("线程{index}"));
                 thread_handle.push(thread::spawn(move || {
                     Self::wbfp_p_work(
                         pack_man,
@@ -580,10 +578,10 @@ impl WaterBallFilePackArgsRuning {
                 write_file_count += file_count_add;
                 write_len += len_add;
                 //更新进度
-                if write_len - last_write_len > 10 * 1024 * 1024
-                    && let Some(pb) = &wb_pb
-                {
-                    let pb = pb.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if write_len - last_write_len > 10 * 1024 * 1024 {
+                    let pb = wb_pb
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     //总大小与实际写入量对齐（源文件可能在复制期间增长）
                     let mut total = data_len.load(Ordering::SeqCst);
                     if write_len > total {
@@ -621,7 +619,7 @@ impl WaterBallFilePackArgsRuning {
     /// byte counts to the main thread via main_pb_tx for total aggregation.
     fn wbfp_p_work(
         mut pack_man: ManagerSync,
-        pb: Option<ProgressBar>,
+        pb: ProgressBar,
         files_list: ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
         in_dir_path: &Path,
         ff_end: Arc<AtomicBool>,
@@ -638,9 +636,7 @@ impl WaterBallFilePackArgsRuning {
                              this_in_path: &Path,
                              this_pack_path: &Path| {
             thread_write_len += write_len_add;
-            if thread_write_len - last_thread_write_len >= 5 * 1024 * 1024
-                && let Some(pb) = &pb
-            {
+            if thread_write_len - last_thread_write_len >= 5 * 1024 * 1024 {
                 pb.set_length(info.length());
                 pb.set_position(write_len);
                 pb.set_message(format!(
@@ -669,14 +665,12 @@ impl WaterBallFilePackArgsRuning {
                             break 'write_pack;
                         }
                         //设置进度条样式
-                        if let Some(pb) = &pb {
-                            pb.set_style(
-                                ProgressStyle::default_bar()
-                                    .template(SPINNER_TEMPLATE)
-                                    .expect("设置进度条模板失败"),
-                            );
-                            pb.set_message("已挂起");
-                        }
+                        pb.set_style(
+                            ProgressStyle::default_bar()
+                                .template(SPINNER_TEMPLATE)
+                                .expect("设置进度条模板失败"),
+                        );
+                        pb.set_message("已挂起");
 
                         let mut files_list = files_list
                             .lock()
@@ -687,14 +681,12 @@ impl WaterBallFilePackArgsRuning {
 
                         if let Some(v) = files_list.pop_front() {
                             //恢复进度条样式
-                            if let Some(pb) = &pb {
-                                pb.set_style(
-                                    ProgressStyle::default_bar()
-                                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                                        .expect("设置进度条模板失败")
-                                        .progress_chars("=>-"),
-                                );
-                            }
+                            pb.set_style(
+                                ProgressStyle::default_bar()
+                                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                                    .expect("设置进度条模板失败")
+                                    .progress_chars("=>-"),
+                            );
                             break v;
                         }
                     }
@@ -797,7 +789,7 @@ impl WaterBallFilePackArgsRuning {
                         //基于检查修改时间和大小，简单的写入优化判断
                         if write_optimization
                             && (v.get_modified() == info.modified_time()
-                            && v.get_len() == info.length())
+                                && v.get_len() == info.length())
                         {
                             update_pb(
                                 info.length(),
@@ -930,7 +922,7 @@ impl WaterBallFilePackArgsRuning {
     /// No `load_all_data` — structures and metadata are loaded on demand during traversal.
     pub fn wbfp_u(
         args: &WaterBallFilePackCommandsUnpack,
-        mp: Option<MultiProgress>,
+        mp: MultiProgress,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let pack_path = &args.pack_path;
         // 智能推导输出路径：若未指定，取文件名去掉 .wbfp 后缀，放在工作目录下
@@ -961,16 +953,14 @@ impl WaterBallFilePackArgsRuning {
         let data_len = attribute.data_len();
 
         // 总进度条 / Main progress bar
-        let main_pb = create_pb(mp.as_ref());
-        if let Some(pb) = &main_pb {
-            pb.set_length(data_len);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)?
-                    .progress_chars("=>-"),
-            );
-            pb.set_prefix("总进度");
-        }
+        let main_pb = create_pb(&mp);
+        main_pb.set_length(data_len);
+        main_pb.set_style(
+            ProgressStyle::default_bar()
+                .template(PACK_PROGRESS_STYLE_TEMPLATE)?
+                .progress_chars("=>-"),
+        );
+        main_pb.set_prefix("总进度");
 
         // 统一工作队列 + 终止控制
         // Unified work queue + termination control
@@ -988,17 +978,15 @@ impl WaterBallFilePackArgsRuning {
         }
 
         // 创建子线程进度条 / Create per-worker progress bars
-        let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
+        let mut worker_pbs = Vec::with_capacity(thread_count);
         for i in 0..thread_count {
-            let pb = create_pb(mp.as_ref());
-            if let Some(pb) = &pb {
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(PACK_PROGRESS_STYLE_TEMPLATE)?
-                        .progress_chars("=>-"),
-                );
-                pb.set_prefix(format!("线程{i}"));
-            }
+            let pb = create_pb(&mp);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)?
+                    .progress_chars("=>-"),
+            );
+            pb.set_prefix(format!("线程{i}"));
             worker_pbs.push(pb);
         }
 
@@ -1031,10 +1019,8 @@ impl WaterBallFilePackArgsRuning {
             file_count += 1;
 
             if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
-                if let Some(pb) = &main_pb {
-                    pb.set_position(written_len);
-                    pb.set_message(format!("[{file_count}/{all_file_count}个文件]"));
-                }
+                main_pb.set_position(written_len);
+                main_pb.set_message(format!("[{file_count}/{all_file_count}个文件]"));
                 last_pb_update_len = written_len;
             }
         }
@@ -1053,7 +1039,7 @@ impl WaterBallFilePackArgsRuning {
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
         tx: &Sender<u64>,
-        worker_pbs: &mut Vec<Option<ProgressBar>>,
+        worker_pbs: &mut Vec<ProgressBar>,
         out_dir_path: &Arc<PathBuf>,
         handles: &mut Vec<JoinHandle<Result<(), Error>>>,
         hash_verify: bool,
@@ -1064,14 +1050,14 @@ impl WaterBallFilePackArgsRuning {
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let w_pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
+        let pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
         let out_dir_path = out_dir_path.to_path_buf();
 
         handles.push(thread::spawn(move || -> io::Result<()> {
             let mut run_buf = vec![0u8; BUF_LEN];
 
             loop {
-                let Some(path) = Self::get_queue_path(&queue, &all_done, w_pb.as_ref()) else {
+                let Some(path) = Self::get_queue_path(&queue, &all_done, &pb) else {
                     return Ok(());
                 };
 
@@ -1134,11 +1120,9 @@ impl WaterBallFilePackArgsRuning {
                         //解包进度闭包（两分支共用）：消息标明正在解包
                         //Shared extract progress closure: message marks the extract stage
                         let extract_progress = |done: u64, total: u64| {
-                            if let Some(pb) = &w_pb {
-                                pb.set_length(total);
-                                pb.set_position(done);
-                                pb.set_message(format!("正在解包: {out_path_str}"));
-                            }
+                            pb.set_length(total);
+                            pb.set_position(done);
+                            pb.set_message(format!("正在解包: {out_path_str}"));
                         };
                         let bytes_written = if hash_verify {
                             //哈希校验可选（-H/--hash-verify）：指定时先校验再解包，
@@ -1159,11 +1143,9 @@ impl WaterBallFilePackArgsRuning {
                             };
                             let hash_ok = match rw.verify_hash(Some(
                                 &(|done, total| {
-                                    if let Some(pb) = &w_pb {
-                                        pb.set_length(total);
-                                        pb.set_position(done);
-                                        pb.set_message(format!("正在哈希校验: {out_path_str}"));
-                                    }
+                                    pb.set_length(total);
+                                    pb.set_position(done);
+                                    pb.set_message(format!("正在哈希校验: {out_path_str}"));
                                 }),
                             )) {
                                 Ok(ok) => ok,
@@ -1214,7 +1196,7 @@ impl WaterBallFilePackArgsRuning {
     fn get_queue_path(
         queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
         all_done: &Arc<AtomicBool>,
-        w_pb: Option<&ProgressBar>,
+        pb: &ProgressBar,
     ) -> Option<PathBuf> {
         let (lock, cvar) = &**queue;
         let mut q = lock
@@ -1228,25 +1210,22 @@ impl WaterBallFilePackArgsRuning {
                 cvar.notify_all();
                 return None;
             }
-            if let Some(pb) = &w_pb {
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(SPINNER_TEMPLATE)
-                        .expect("设置进度条模板失败"),
-                );
-                pb.set_message("已挂起");
-            }
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(SPINNER_TEMPLATE)
+                    .expect("设置进度条模板失败"),
+            );
+            pb.set_message("已挂起");
             q = cvar
                 .wait(q)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(pb) = &w_pb {
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .expect("设置进度条模板失败")
-                        .progress_chars("=>-"),
-                );
-            }
+
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .expect("设置进度条模板失败")
+                    .progress_chars("=>-"),
+            );
         })
     }
 
@@ -1363,7 +1342,7 @@ impl WaterBallFilePackArgsRuning {
     /// absence of any warn/error output indicates all files passed.
     fn wbfp_h(
         args: &WaterBallFilePackCommandsHashVerify,
-        mp: Option<MultiProgress>,
+        mp: MultiProgress,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use std::thread;
 
@@ -1381,7 +1360,7 @@ impl WaterBallFilePackArgsRuning {
         let mut pack = ManagerSync::open(pack_path)
             .map_err(|e| PackFileError::Other(format!("打开包文件错误: {e}")))?;
         info!("开始哈希校验");
-        Self::verify_hash(&mut pack, mp.as_ref(), thread_count)?;
+        Self::verify_hash(&mut pack, &mp, thread_count)?;
         info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");
         Ok(())
     }
@@ -1417,7 +1396,7 @@ impl WaterBallFilePackArgsRuning {
     /// achieving true discover-as-you-verify concurrency.
     fn verify_hash(
         pack: &mut ManagerSync,
-        mp: Option<&MultiProgress>,
+        mp: &MultiProgress,
         thread_count: usize,
     ) -> io::Result<()> {
         use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -1429,16 +1408,15 @@ impl WaterBallFilePackArgsRuning {
 
         // 总进度条 / Main progress bar
         let main_pb = create_pb(mp);
-        if let Some(pb) = &main_pb {
-            pb.set_length(data_len);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .expect("设置进度条模板失败")
-                    .progress_chars("=>-"),
-            );
-            pb.set_prefix("总进度");
-        }
+
+        main_pb.set_length(data_len);
+        main_pb.set_style(
+            ProgressStyle::default_bar()
+                .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                .expect("设置进度条模板失败")
+                .progress_chars("=>-"),
+        );
+        main_pb.set_prefix("总进度");
 
         // 统一工作队列 + 终止控制
         // Unified work queue + termination control
@@ -1458,18 +1436,16 @@ impl WaterBallFilePackArgsRuning {
         }
 
         // 创建子线程进度条 / Create per-worker progress bars
-        let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
+        let mut worker_pbs = Vec::with_capacity(thread_count);
         for i in 0..thread_count {
             let pb = create_pb(mp);
-            if let Some(pb) = &pb {
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .expect("设置进度条模板失败")
-                        .progress_chars("=>-"),
-                );
-                pb.set_prefix(format!("线程{i} "));
-            }
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                    .expect("设置进度条模板失败")
+                    .progress_chars("=>-"),
+            );
+            pb.set_prefix(format!("线程{i} "));
             worker_pbs.push(pb);
         }
 
@@ -1502,10 +1478,8 @@ impl WaterBallFilePackArgsRuning {
             // 限频更新：每 10 MiB 更新一次
             // Rate-limit main bar: update every 10 MiB
             if verified_len - last_pb_update_len >= 10 * 1024 * 1024 {
-                if let Some(pb) = &main_pb {
-                    pb.set_position(verified_len);
-                    pb.set_message(format!("[{verified_count}/{all_file_count}个文件]"));
-                }
+                main_pb.set_position(verified_len);
+                main_pb.set_message(format!("[{verified_count}/{all_file_count}个文件]"));
                 last_pb_update_len = verified_len;
             }
 
@@ -1530,7 +1504,7 @@ impl WaterBallFilePackArgsRuning {
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
         tx: &Sender<(String, u64, Option<bool>)>,
-        worker_pbs: &mut Vec<Option<ProgressBar>>,
+        worker_pbs: &mut Vec<ProgressBar>,
         handles: &mut Vec<JoinHandle<Result<(), Error>>>,
     ) {
         use std::thread;
@@ -1539,13 +1513,13 @@ impl WaterBallFilePackArgsRuning {
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let w_pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
+        let pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
 
         handles.push(thread::spawn(move || -> io::Result<()> {
             loop {
                 // 1. 从队列取路径（空队列时 Condvar 挂起）
                 //    Pop path from queue (Condvar suspend when empty)
-                let path = match Self::get_queue_path(&queue, &all_done, w_pb.as_ref()) {
+                let path = match Self::get_queue_path(&queue, &all_done, &pb) {
                     Some(path) => path,
                     None => return Ok(()),
                 };
@@ -1621,11 +1595,9 @@ impl WaterBallFilePackArgsRuning {
                         let path_str = path.display().to_string();
                         let result = match rw.verify_hash(Some(
                             &(|done, total| {
-                                if let Some(pb) = &w_pb {
-                                    pb.set_length(total);
-                                    pb.set_position(done);
-                                    pb.set_message(format!("\tFile path: {path_str}"));
-                                }
+                                pb.set_length(total);
+                                pb.set_position(done);
+                                pb.set_message(format!("\tFile path: {path_str}"));
                             }),
                         )) {
                             Ok(true) => Some(true),

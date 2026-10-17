@@ -63,20 +63,16 @@ const SPINNER_TEMPLATE: &str = "{spinner:.blue} {prefix:<8} {msg}";
 ///
 /// Returns `None` if `MultiProgress` is `None` (no-progress mode).
 /// The spinner auto-rotates every 100ms.
-fn create_pb(mp: Option<&MultiProgress>) -> Option<ProgressBar> {
-    if let Some(mp) = mp {
-        let pb = mp.add(ProgressBar::new_spinner());
-        pb.enable_steady_tick(Duration::from_millis(100)); // 让转标自己动起来
-        Some(pb)
-    } else {
-        None
-    }
+fn create_pb(mp: &MultiProgress) -> ProgressBar {
+    let pb = mp.add(ProgressBar::new_spinner());
+    pb.enable_steady_tick(Duration::from_millis(100)); // 让转标自己动起来
+    pb
 }
 
-pub(crate) fn cli(cli: Cli, mp: Option<MultiProgress>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Commands::Ff(args) => ff::args(args, mp),
-        Commands::Wbfp(commands) => wbfp::commands(commands, mp),
-        Commands::MP(args) => music_play::args(args, mp),
+        Commands::Ff(args) => ff::args(args),
+        Commands::Wbfp(commands) => wbfp::commands(commands),
+        Commands::MP(args) => music_play::args(args),
     }
 }

@@ -32,8 +32,12 @@ lofty = "0.25.4"
 pretty_assertions = "1.4.1"
 colored = "3.1.1"
 cpal = "0.18.2"
-symphonia = { version = "0.6.1",features = ["default"] }
+symphonia = { version = "0.6.1", features = ["default"] }
 rubato = "5.0.1"
+
+#TUI
+ratatui = "0.30.2"
+crossterm = "0.29.0"
 
 
 # package
@@ -66,8 +70,10 @@ colored = { workspace = true }
 #Audio
 lofty = { workspace = true }
 cpal = { workspace = true }
-symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"]}
-rubato = { workspace = true}
+symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"] }
+rubato = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

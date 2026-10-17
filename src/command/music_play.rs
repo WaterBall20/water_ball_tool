@@ -1,19 +1,18 @@
 use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::running::Running;
+use crate::multi_progress_init;
 use clap::{Args, ValueEnum};
-use indicatif::MultiProgress;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use std::error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize};
 use tracing::{debug, error, info, warn};
 
 mod decoder;
 mod play_list;
 mod player;
 mod running;
+pub mod tui;
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
@@ -44,7 +43,8 @@ pub(crate) enum LoopMode {
     PeriodicShuffle,
 }
 
-pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
+pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
+    let mp = multi_progress_init();
     let files = args.files;
     let volume = {
         if args.volume < 0.0 {
@@ -57,7 +57,7 @@ pub fn args(args: MusicPlayArgs, mp: Option<MultiProgress>) -> Result<(), Box<dy
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut running = Running::create(play_list, mp.as_ref())?;
+    let mut running = Running::create(play_list, &mp)?;
     running
         .next()
         .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));

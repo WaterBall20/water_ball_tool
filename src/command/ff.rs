@@ -1,4 +1,5 @@
 use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb};
+use crate::multi_progress_init;
 use clap::error::Result;
 use clap::{Args, ValueEnum};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -274,9 +275,10 @@ impl HashTypeS {
 /// 文件查找器——多线程扫描目录并输出 JSON 文件列表。
 ///
 /// File finder — multi-threaded directory scanner that outputs a JSON file list.
-pub fn args(args: FileFinderArgs, mp: Option<MultiProgress>) -> Result<(), Box<dyn error::Error>> {
+pub fn args(args: FileFinderArgs) -> Result<(), Box<dyn error::Error>> {
+    let mp = multi_progress_init();
     //进度条
-    let pb = create_pb(mp.as_ref());
+    let pb = create_pb(&mp);
     //所用的线程数
     let thread_count = if let Some(v) = args.thread_count {
         v
@@ -296,7 +298,7 @@ pub fn args(args: FileFinderArgs, mp: Option<MultiProgress>) -> Result<(), Box<d
         pb,
         thread_count,
         hash_type,
-        mp.as_ref(),
+        &mp,
     )?;
 
     //输出到输出文件(若存在参数)
@@ -325,19 +327,18 @@ pub fn args(args: FileFinderArgs, mp: Option<MultiProgress>) -> Result<(), Box<d
 pub(crate) fn search_files(
     path: &str,
     skip_symlink: bool,
-    pb: Option<ProgressBar>,
+    pb: ProgressBar,
     thread_count: usize,
     hash_type: Option<HashTypeS>,
-    mp: Option<&MultiProgress>,
+    mp: &MultiProgress,
 ) -> io::Result<FilesList> {
-    if let Some(pb) = &pb {
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg} ({pos} 个文件和目录)")
-                .expect("设置进度条模板失败"),
-        );
-        pb.set_message("搜索文件中");
-    }
+    //初始化进度条
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg} ({pos} 个文件和目录)")
+            .expect("设置进度条模板失败"),
+    );
+    pb.set_message("搜索文件中");
     let ff_thread_count = if hash_type.is_some() { 1 } else { thread_count };
     let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
     let file_count = Arc::new(AtomicU64::new(0));
@@ -419,13 +420,12 @@ pub(crate) fn search_files(
         for (add_file, add_dir) in rx {
             file_count += add_file;
             dir_count += add_dir;
-            if let Some(pb) = &pb {
-                let all_count = file_count + dir_count;
-                pb.set_position(all_count);
-                //10的倍数才更新
-                if all_count.is_multiple_of(10) {
-                    pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
-                }
+
+            let all_count = file_count + dir_count;
+            pb.set_position(all_count);
+            //10的倍数才更新
+            if all_count.is_multiple_of(10) {
+                pb.set_message(format!("已发现 {file_count} 文件和 {dir_count} 个目录"));
             }
         }
     });
@@ -461,7 +461,7 @@ pub(crate) fn search_files(
 fn hash(
     queue: &Arc<(Mutex<VecDeque<(PathBuf, FileInfo)>>, Condvar)>,
     search_end: &Arc<AtomicBool>,
-    mp: Option<&MultiProgress>,
+    mp: &MultiProgress,
     thread_count: usize,
     all_file_count: Arc<AtomicU64>,
     data_len: Arc<AtomicU64>,
@@ -470,30 +470,26 @@ fn hash(
 ) {
     // 总进度条 / Main progress bar
     let main_pb = create_pb(mp);
-    if let Some(pb) = &main_pb {
-        pb.set_length(0);
+    main_pb.set_length(0);
+    main_pb.set_style(
+        ProgressStyle::default_bar()
+            .template(PACK_PROGRESS_STYLE_TEMPLATE)
+            .expect("设置进度条模板失败")
+            .progress_chars("=>-"),
+    );
+    main_pb.set_prefix("哈希计算总进度");
+
+    // 创建子线程进度条 / Create per-worker progress bars
+    let mut worker_pbs = Vec::with_capacity(thread_count);
+    for i in 0..thread_count {
+        let pb = create_pb(mp);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(PACK_PROGRESS_STYLE_TEMPLATE)
                 .expect("设置进度条模板失败")
                 .progress_chars("=>-"),
         );
-        pb.set_prefix("哈希计算总进度");
-    }
-
-    // 创建子线程进度条 / Create per-worker progress bars
-    let mut worker_pbs: Vec<Option<ProgressBar>> = Vec::with_capacity(thread_count);
-    for i in 0..thread_count {
-        let pb = create_pb(mp);
-        if let Some(pb) = &pb {
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .expect("设置进度条模板失败")
-                    .progress_chars("=>-"),
-            );
-            pb.set_prefix(format!("线程{i}"));
-        }
+        pb.set_prefix(format!("线程{i}"));
         worker_pbs.push(pb);
     }
 
@@ -525,14 +521,13 @@ fn hash(
         file_count += 1;
 
         if written_len - last_pb_update_len >= 10 * 1024 * 1024 {
-            if let Some(pb) = &main_pb {
-                pb.set_length(data_len.load(Ordering::SeqCst));
-                pb.set_position(written_len);
-                pb.set_message(format!(
-                    "[{file_count}/{}个文件]",
-                    all_file_count.load(Ordering::SeqCst)
-                ));
-            }
+            main_pb.set_length(data_len.load(Ordering::SeqCst));
+            main_pb.set_position(written_len);
+            main_pb.set_message(format!(
+                "[{file_count}/{}个文件]",
+                all_file_count.load(Ordering::SeqCst)
+            ));
+
             last_pb_update_len = written_len;
         }
     }
@@ -546,7 +541,7 @@ fn hash_work(
     queue: &Arc<(Mutex<VecDeque<(PathBuf, FileInfo)>>, Condvar)>,
     search_end: &Arc<AtomicBool>,
     tx: &Sender<u64>,
-    worker_pbs: &mut Vec<Option<ProgressBar>>,
+    worker_pbs: &mut Vec<ProgressBar>,
     handles: &mut Vec<JoinHandle<()>>,
     mut hash_type: HashTypeS,
     results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
@@ -555,7 +550,7 @@ fn hash_work(
     let queue = queue.clone();
     let all_done = search_end.clone();
     let tx = tx.clone();
-    let w_pb = worker_pbs.pop().expect("无法获取进度条");
+    let pb = worker_pbs.pop().expect("无法获取进度条");
 
     handles.push(thread::spawn(move || {
         let mut read_buf = vec![0u8; BUF_LEN];
@@ -564,7 +559,9 @@ fn hash_work(
             //    Pop path from queue (Condvar suspend when empty)
             let (path, info) = {
                 let (lock, cvar) = &*queue;
-                let mut q = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut q = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 loop {
                     if let Some(p) = q.pop_front() {
                         break p;
@@ -574,23 +571,21 @@ fn hash_work(
                         cvar.notify_all();
                         return;
                     }
-                    if let Some(pb) = &w_pb {
-                        pb.set_style(
-                            ProgressStyle::default_bar()
-                                .template(SPINNER_TEMPLATE)
-                                .expect("设置进度条模板失败")
-                        );
-                        pb.set_message("已挂起");
-                    }
-                    q = cvar.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some(pb) = &w_pb {
-                        pb.set_style(
-                            ProgressStyle::default_bar()
-                                .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                                .expect("设置进度条模板失败")
-                                .progress_chars("=>-"),
-                        );
-                    }
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(SPINNER_TEMPLATE)
+                            .expect("设置进度条模板失败"),
+                    );
+                    pb.set_message("已挂起");
+                    q = cvar
+                        .wait(q)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                            .expect("设置进度条模板失败")
+                            .progress_chars("=>-"),
+                    );
                 }
             };
 
@@ -612,11 +607,9 @@ fn hash_work(
                 }
             };
 
-            if let Some(pb) = &w_pb {
-                pb.set_length(info.length());
-                pb.set_position(0);
-                pb.set_message(format!("正在计算哈希: {}", path.display()));
-            }
+            pb.set_length(info.length());
+            pb.set_position(0);
+            pb.set_message(format!("正在计算哈希: {}", path.display()));
 
             let mut read_len = 0;
 
@@ -640,9 +633,7 @@ fn hash_work(
                         hash_type.update(data);
                         read_len += this_read_len as u64;
 
-                        if let Some(pb) = &w_pb
-                            && read_len - pb_last_up_len > 10 * 1024 * 1024
-                        {
+                        if read_len - pb_last_up_len > 10 * 1024 * 1024 {
                             pb.set_position(read_len);
                             pb_last_up_len = read_len;
                         }
@@ -653,11 +644,7 @@ fn hash_work(
                     }
                 }
             };
-
-            //
-            if let Some(pb) = &w_pb {
-                pb.set_position(info.length());
-            }
+            pb.set_position(info.length());
             if let Err(e) = tx.send(info.length()) {
                 error!("发送更新总进度失败, err: {e}");
                 continue;

@@ -2,7 +2,7 @@ use crate::command::music_play::decoder::{
     Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Error, SAMPLE_RATE_48K, Stream, StreamConfig};
+use cpal::{Device, Error, Stream, StreamConfig};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
@@ -12,10 +12,6 @@ use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
 
 const BUF_LEN_U32: u32 = 1024;
 const BUF_LEN: usize = BUF_LEN_U32 as usize;
-const SAMPLE_RATE: u32 = SAMPLE_RATE_48K;
-const SAMPLE_RATE_F64: f64 = SAMPLE_RATE as f64;
-
-const RING_BUF_LEN: usize = SAMPLE_RATE as usize;
 
 #[derive(Clone)]
 pub(super) struct Player {
@@ -52,17 +48,28 @@ impl Player {
         device: &Device,
         config: StreamConfig,
         mut ring_buf: RingBufferWait<f32>,
-        volume: Arc<AtomicU32>,
+        content: Content,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
     ) -> Result<Stream, Error> {
         device.build_output_stream(
             config,
-            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                let len = ring_buf.try_read(data).unwrap_or(0);
-                for datum in &mut data[..len] {
-                    *datum *= f32::from_bits(volume.load(Ordering::Relaxed));
+            move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                //暂停处理
+                if !content.is_playing.load(Ordering::Acquire) {
+                    data.fill(0.0);
+                    return;
                 }
+
+                let len = ring_buf.read(data);
+                //音量处理
+                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
+                if (volume - 1.0).abs() > 0.0 {
+                    for datum in &mut data[..len] {
+                        *datum *= volume;
+                    }
+                }
+                //进度计数
                 played_samples.fetch_add(len as u64, Ordering::Relaxed);
                 data[len..].fill(0.0);
                 //检查解码是否EOF
@@ -70,6 +77,7 @@ impl Player {
                 let decoder_eof_pos = &event_content.decoder_eof_pos;
 
                 if decoder_eof.load(Ordering::Relaxed) {
+                    //安全减法
                     if len > decoder_eof_pos.load(Ordering::Acquire) {
                         decoder_eof_pos.store(0, Ordering::Relaxed);
                     } else {
@@ -109,14 +117,12 @@ impl Player {
         };
         let config = device.default_output_config()?;
         let channels = config.channels();
+        let sample_rate = config.sample_rate();
 
-        let stream_config = Arc::new(StreamConfig {
-            channels,
-            sample_rate: SAMPLE_RATE,
-            buffer_size: cpal::BufferSize::Fixed(BUF_LEN_U32),
-        });
+        let stream_config = Arc::new(config.config());
         // 在你的播放器初始化阶段
-        let ring_buffer = RingBufferWait::new_max_len(RING_BUF_LEN)?;
+        let ring_buffer =
+            RingBufferWait::new_max_len(sample_rate as usize * channels as usize * 5)?;
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let played_samples = Arc::new(AtomicU64::new(0));
@@ -132,11 +138,13 @@ impl Player {
             list,
         };
 
+        let content = Content { is_playing, volume };
+
         let stream = Arc::new(Self::create_stream(
             &device,
             *stream_config,
             ring_buffer.clone(),
-            volume.clone(),
+            content.clone(),
             played_samples.clone(),
             event_content.clone(),
         )?);
@@ -148,14 +156,14 @@ impl Player {
                 stream_config,
                 stream,
             },
-            content: Content { is_playing, volume },
+            content,
             played_samples,
             event_content,
         })
     }
 
     pub fn is_playing(&self) -> bool {
-        self.content.is_playing.load(Ordering::Relaxed)
+        self.content.is_playing.load(Ordering::Acquire)
     }
 
     pub fn is_paused(&self) -> bool {
@@ -164,14 +172,14 @@ impl Player {
 
     pub fn get_pos(&self) -> Duration {
         Duration::from_millis(
-            self.played_samples.load(Ordering::Relaxed) * 1000
+            self.played_samples.load(Ordering::Acquire) * 1000
                 / u64::from(self.sound_engine.stream_config.channels)
                 / u64::from(self.sound_engine.stream_config.sample_rate),
         )
     }
 
     pub fn volume(&self) -> f32 {
-        f32::from_bits(self.content.volume.load(Ordering::Relaxed))
+        f32::from_bits(self.content.volume.load(Ordering::Acquire))
     }
 
     pub fn set_volume(&self, volume: f32) {
