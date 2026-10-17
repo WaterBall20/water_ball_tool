@@ -496,7 +496,7 @@ fn hash(
     let (tx, rx) = mpsc::channel();
     let mut handles = Vec::with_capacity(thread_count);
 
-    for i in 0..thread_count {
+    for _i in 0..thread_count {
         let hash_type = hash_type.clone();
         hash_work(
             queue,

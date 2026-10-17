@@ -74,6 +74,7 @@ symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"] }
 rubato = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+crossbeam-channel = "0.5.17"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

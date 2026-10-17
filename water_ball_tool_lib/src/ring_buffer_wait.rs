@@ -686,7 +686,7 @@ impl<T: Copy> RingBufferWaitGuard<'_, T> /*Write*/ {
     }
 
     pub fn write_all(&mut self, buf: &[T]) -> RingBufferWaitResult<(), T> {
-        let mut buffer = &mut self.guard;
+        let buffer = &mut self.guard;
         if self.is_max_len.load(Ordering::Relaxed) {
             if buf.len() > self.max_len.load(Ordering::Relaxed) {
                 return Err(RingBufferWaitError::new(
