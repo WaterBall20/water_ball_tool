@@ -91,6 +91,10 @@ impl PostEffect for FadeEffect {
     fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
+
+    fn name(&self) -> &'static str {
+        "PadEffect"
+    }
 }
 
 impl TransportAware for FadeEffect {

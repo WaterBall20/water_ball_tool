@@ -30,7 +30,7 @@ struct SoundEngine {
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
-    post_effect_chain: Arc<Mutex<PostEffectChain>>,
+    effect_chain: Arc<Mutex<PostEffectChain>>,
 }
 
 #[derive(Clone)]
@@ -180,7 +180,7 @@ impl Player {
             list,
         };
 
-        let post_effect_chain = Arc::new(Mutex::new(PostEffectChain::new(AudioFormat::new(
+        let effect_chain = Arc::new(Mutex::new(PostEffectChain::new(AudioFormat::new(
             channels,
             sample_rate,
         ))));
@@ -205,7 +205,7 @@ impl Player {
             event_content.clone(),
             rx_cmd,
             tx_done,
-            post_effect_chain.clone(),
+            effect_chain.clone(),
         )?);
 
         let rx_cmd_thread = {
@@ -244,7 +244,7 @@ impl Player {
                 decoder,
                 stream_config,
                 stream,
-                post_effect_chain,
+                effect_chain,
             },
             content,
             played_samples,
@@ -407,7 +407,7 @@ impl Player {
         E: PostEffect + Send + 'static,
     {
         self.sound_engine
-            .post_effect_chain
+            .effect_chain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(effect);
@@ -420,6 +420,7 @@ pub trait PlayerEventSink: Send + 'static {
     where
         F: Fn(&PlayerEvent) + Send + 'static,
         Self: Sized;
+    fn type_of(&self) -> &'static str;
 }
 
 pub struct PlayerEventChannelSink(mpsc::Sender<Arc<PlayerEvent>>);
@@ -443,6 +444,9 @@ impl PlayerEventSink for PlayerEventChannelSink {
             })
             .expect("创建线程失败");
         Self(sender)
+    }
+    fn type_of(&self) -> &'static str {
+        "PlayerEventChannelSink"
     }
 }
 

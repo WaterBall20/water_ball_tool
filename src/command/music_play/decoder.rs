@@ -6,7 +6,7 @@ use std::any::Any;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
@@ -24,7 +24,8 @@ use tracing::{debug, error};
 use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
 
 pub(super) struct Decoder {
-    thread_handle: Option<std::thread::JoinHandle<()>>, //
+    path_buf: PathBuf,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
     ring_buf: RingBufferWait<f32>,
     stop: Arc<AtomicBool>,
     engine: Arc<Mutex<DecoderEngine>>,
@@ -183,6 +184,7 @@ impl Decoder {
         };
 
         Ok(Self {
+            path_buf: path.to_path_buf(),
             thread_handle: None,
             ring_buf,
             stop,
@@ -195,6 +197,11 @@ impl Decoder {
     pub fn run(&mut self) -> DecoderResult<()> {
         if self.thread_handle.is_none() {
             let thread_handle = {
+                let file_stem = self
+                    .path_buf
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown");
                 let engine = self.engine.clone();
                 let event_list = self.event_list.clone();
                 let mut ring_buf = self.ring_buf.clone();
@@ -202,7 +209,7 @@ impl Decoder {
                 let data = self.data;
                 // 4. 解码循环
                 std::thread::Builder::new()
-                    .name("decoder".to_string())
+                    .name(format!("decoder-{file_stem}"))
                     .spawn(move || -> () {
                         debug!("decoder run thread loop start");
                         //初始化
@@ -385,6 +392,7 @@ pub trait DecoderEventSink: Send + 'static {
     where
         F: Fn(&DecoderEvent) + Send + 'static,
         Self: Sized;
+    fn type_of(&self) -> &'static str;
 }
 
 pub struct DecoderEventChannelSink(Sender<Arc<DecoderEvent>>);
@@ -410,6 +418,10 @@ impl DecoderEventSink for DecoderEventChannelSink {
             .expect("创建线程失败");
         Self(sender)
     }
+
+    fn type_of(&self) -> &'static str {
+        "DecoderEventChannelSink"
+    }
 }
 
 pub struct DecoderEventDirectSink(Box<dyn Fn(&DecoderEvent) + Send + 'static>);
@@ -424,6 +436,10 @@ impl DecoderEventSink for DecoderEventDirectSink {
         F: Fn(&DecoderEvent) + Send + 'static,
     {
         Self(Box::new(f))
+    }
+
+    fn type_of(&self) -> &'static str {
+        "DecoderEventDirectSink"
     }
 }
 

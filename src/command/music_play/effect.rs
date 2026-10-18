@@ -88,8 +88,10 @@ pub trait PostEffect: Send + 'static {
     ///是否启用
     fn enabled(&self) -> bool;
 
-    //设置是否启用
+    /// 设置是否启用
     fn set_enabled(&mut self, enabled: bool);
+    /// 名称
+    fn name(&self) -> &str;
 }
 
 #[derive(Copy, Clone)]
@@ -204,6 +206,8 @@ pub trait PreEffect: Send + 'static {
 
     /// 设置是否启用
     fn set_enabled(&mut self, enabled: bool);
+    /// 名称
+    fn name(&self) -> &str;
 }
 
 pub struct PreEffectChain {

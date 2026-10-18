@@ -18,7 +18,7 @@ pub struct ResamplerEffect {
 }
 
 impl PreEffect for ResamplerEffect {
-    fn init(&mut self, input_format: AudioFormat) -> Result<(), Box<(dyn Error + 'static)>> {
+    fn init(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
         self.input_format = input_format;
         let channels = self.input_format.channels as usize;
         self.chunk_len = ResamplePlan::compute_plan(
@@ -102,7 +102,7 @@ impl PreEffect for ResamplerEffect {
         }
     }
 
-    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<(dyn Error + 'static)>> {
+    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
         self.init(input_format)
     }
 
@@ -115,6 +115,10 @@ impl PreEffect for ResamplerEffect {
             return;
         }
         self.enabled = enabled;
+    }
+
+    fn name(&self) -> &'static str {
+        "ResamplerEffect"
     }
 }
 impl ResamplerEffect {
@@ -178,8 +182,8 @@ impl ResamplePlan {
         assert!(t_play_max_sec > 0.0, "t_play_max_sec must be > 0");
 
         // 1) 两约束取小：质量下界 vs 播放时长上界
-        let n_quality = target_out_fft as f64 * fin as f64 / fout as f64;
-        let n_time = t_play_max_sec * fin as f64;
+        let n_quality = f64::from(target_out_fft) * f64::from(fin) / f64::from(fout);
+        let n_time = t_play_max_sec * f64::from(fin);
         let n_raw = n_quality.min(n_time).ceil().max(1.0) as u32;
 
         // 2) 自适应对齐
@@ -195,10 +199,10 @@ impl ResamplePlan {
         n = n.clamp(n_min, n_max);
 
         // 4) 诊断与输出缓冲上限
-        let ratio = fout as f64 / fin as f64;
-        let out_fft_equiv = (n as f64 * ratio).round() as u32;
-        let t_play_sec = n as f64 / fin as f64;
-        let out_frames_max = ((n as f64 * ratio).ceil() as u32).saturating_add(64); // 滤波器群延迟余量
+        let ratio = f64::from(fout) / f64::from(fin);
+        let out_fft_equiv = (f64::from(n) * ratio).round() as u32;
+        let t_play_sec = f64::from(n) / f64::from(fin);
+        let out_frames_max = ((f64::from(n) * ratio).ceil() as u32).saturating_add(64); // 滤波器群延迟余量
 
         ResamplePlan {
             block_frames: n,
