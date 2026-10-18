@@ -1,7 +1,9 @@
 use crate::command::music_play::decoder::{
     Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
 };
-use crate::command::music_play::effect::{Decision, PlayCmd, PostEffect, PostEffectChain};
+use crate::command::music_play::effect::{
+    AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
+};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
@@ -177,7 +179,10 @@ impl Player {
             list,
         };
 
-        let post_effect_chain = Arc::new(Mutex::new(PostEffectChain::new(channels, sample_rate)));
+        let post_effect_chain = Arc::new(Mutex::new(PostEffectChain::new(AudioFormat::new(
+            channels,
+            sample_rate,
+        ))));
 
         // 主线程 → 音频线程：transport 指令
         let (tx_cmd, rx_cmd) = crossbeam_channel::bounded::<PlayCmd>(1);

@@ -1,7 +1,9 @@
+use crate::command::music_play::effect::resampler::ResamplerEffect;
+use crate::command::music_play::effect::{AudioFormat, PreEffectChain};
 use rubato::audioadapter_buffers::SizeError;
-use rubato::audioadapter_buffers::direct::InterleavedSlice;
-use rubato::{Fft, FixedSync, ResampleError, Resampler, ResamplerConstructionError};
+use rubato::{ResampleError, ResamplerConstructionError};
 use std::any::Any;
+use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::path::Path;
@@ -12,14 +14,14 @@ use std::time::Duration;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::SeekErrorKind;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
+use symphonia::core::formats::{
+    FormatInfo, FormatOptions, FormatReader, MediaInfo, SeekMode, SeekTo, TrackType,
+};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
-use tracing::{debug, error, event};
+use tracing::{debug, error};
 use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
-
-const RESAMPLER_CHUNK_IN: usize = 1024;
 
 pub(super) struct Decoder {
     thread_handle: Option<std::thread::JoinHandle<()>>, //
@@ -34,17 +36,55 @@ struct DecoderEngine {
     format: Box<dyn FormatReader>,
     track_id: u32,
     decoder: Box<dyn AudioDecoder>,
-    resampler: Option<DecoderResampler>,
-}
-
-struct DecoderResampler {
-    fft_resampler: Fft<f32>,
-    in_buf: Vec<f32>,
+    effect_chain: PreEffectChain,
 }
 
 struct DecoderData {
-    channels: usize,
-    resampler_max_out_frames: usize,
+    input_format: AudioFormat,
+    format_info: FormatInfo,
+    media_info: MediaInfo,
+}
+
+impl Decoder {
+    fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>) {
+        let event = Arc::new(event);
+        let mut list = list.lock().expect("list is poisoned");
+        for sink in list.iter_mut() {
+            sink.emit(event.clone());
+        }
+    }
+    fn write_all_to_ring_buf(
+        ring_buf: &mut RingBufferWait<f32>,
+        stop: &Arc<AtomicBool>,
+        max_write_len: usize,
+        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        write_buf: &[f32],
+    ) -> Result<(), DecoderEventError> {
+        for chunk in write_buf.chunks(max_write_len) {
+            // 检查停止信号
+            if stop.load(Ordering::Acquire) {
+                return Err(DecoderEventError {
+                    message: "Decoder stop".to_string(),
+                    kind: DecoderEventErrorKind::DecoderStop,
+                });
+            }
+            // 分块后，每一块的长度都 ≤ CHUNK_SIZE ≤ ring 容量
+            // 因此 write_all 不会返回 WriteSizeTooLarge
+            if let Err(e) = ring_buf.write_all(chunk) {
+                // 只可能是致命错误（锁异常、溢出等），上报后退出
+                let e = DecoderEventError {
+                    message: format!("write_all failed: {e}"),
+                    kind: DecoderEventErrorKind::RingBufferError(e),
+                };
+                let event = DecoderEvent {
+                    result: Err(e.clone()),
+                };
+                Self::emit(event, event_list);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Decoder {
@@ -58,7 +98,7 @@ impl Decoder {
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
 
-        // 2. 探测格式
+        // 2. 建议探测格式
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             hint.with_extension(ext);
@@ -81,6 +121,8 @@ impl Decoder {
             kind: DecoderErrorKind::NoAudioTrack,
         })?;
         let track_id = track.id;
+        let format_info = *format.format_info();
+        let media_info = *format.media_info();
         let codec_params =
             track
                 .codec_params
@@ -111,46 +153,29 @@ impl Decoder {
                 kind: DecoderErrorKind::NoChannels,
             })?;
 
+        let input_format = AudioFormat::new(channels as u16, decoder_sample_rate);
+        let mut effect_chain = PreEffectChain::new(input_format);
+
         let needs_resampling = decoder_sample_rate != output_sample_rate;
-        let (resampler, resampler_max_out_frames) = if needs_resampling {
-            // 预分配输出缓冲区（容量取输入帧数按比例放大再留余量）
-            let fft_resampler = Fft::<f32>::new(
-                decoder_sample_rate as usize,
-                output_sample_rate as usize,
-                RESAMPLER_CHUNK_IN, // 如 1024
-                channels,
-                FixedSync::Input,
-            )?;
-            let max_out_frames = fft_resampler.output_frames_max();
-            (
-                Some(DecoderResampler {
-                    fft_resampler,
-                    in_buf: Vec::with_capacity(match ring_buf.max_len() {
-                        Some(v) => v,
-                        None => {
-                            return Err(DecoderError::new(
-                                "ring_buf no max len",
-                                DecoderErrorKind::RingBufferNoMaxLen,
-                            ));
-                        }
-                    }),
-                }),
-                max_out_frames,
-            )
-        } else {
-            (None, 0)
-        };
+        if needs_resampling {
+            //创建采样器
+            effect_chain.push(ResamplerEffect::new(AudioFormat::new(
+                u16::try_from(channels).expect("Too many channels"),
+                output_sample_rate,
+            )))?;
+        }
 
         let engine = DecoderEngine {
             format,
             track_id,
             decoder,
-            resampler,
+            effect_chain,
         };
 
         let data = DecoderData {
-            channels,
-            resampler_max_out_frames,
+            input_format,
+            format_info,
+            media_info,
         };
 
         Ok(Self {
@@ -170,22 +195,17 @@ impl Decoder {
                 let event_list = self.event_list.clone();
                 let mut ring_buf = self.ring_buf.clone();
                 let stop = self.stop.clone();
-                let channels = self.data.channels;
-                let max_out_frames = self.data.resampler_max_out_frames;
                 // 4. 解码循环
                 std::thread::Builder::new()
                     .name("decoder".to_string())
                     .spawn(move || -> () {
                         debug!("decoder run thread loop start");
                         //初始化
-                        let ring_buf_max_len = ring_buf.max_len().expect(
-                            "ring_buf max_len is \
-                        None",
-                        );
+                        let ring_buf_max_len =
+                            ring_buf.max_len().expect("ring_buf max_len is None");
                         let max_write_len = ring_buf_max_len / 4;
                         let mut buf = Vec::with_capacity(ring_buf_max_len);
-                        let mut out_buffer = vec![0.0f32; max_out_frames * channels];
-                        'root: loop {
+                        loop {
                             // 检查停止信号
                             if stop.load(Ordering::Acquire) {
                                 break;
@@ -230,35 +250,8 @@ impl Decoder {
                                     // 使用新方法进行交错转换
                                     decoded.copy_to_vec_interleaved(&mut buf);
 
-                                    // 重采样处理
-                                    if let Some(rs) = &mut engine.resampler {
-                                        rs.in_buf.extend_from_slice(&buf);
-                                        let chunk_len = channels * RESAMPLER_CHUNK_IN;
-                                        while rs.in_buf.len() >= chunk_len {
-                                            let Ok(frames_out) = Self::resampler_inner(
-                                                &event_list,
-                                                rs,
-                                                channels,
-                                                &mut out_buffer,
-                                                max_out_frames,
-                                            ) else {
-                                                break 'root;
-                                            };
-                                            rs.in_buf.drain(..chunk_len);
-                                            // 写入环形缓冲区
-                                            if Self::write_all_to_ring_buf(
-                                                &mut ring_buf,
-                                                &stop,
-                                                max_write_len,
-                                                &event_list,
-                                                &out_buffer[..frames_out * channels],
-                                            )
-                                            .is_err()
-                                            {
-                                                break 'root;
-                                            }
-                                        }
-                                    } else {
+                                    // 前效果处理
+                                    if engine.effect_chain.is_empty() {
                                         // 写入环形缓冲区
                                         if Self::write_all_to_ring_buf(
                                             &mut ring_buf,
@@ -266,6 +259,24 @@ impl Decoder {
                                             max_write_len,
                                             &event_list,
                                             &buf,
+                                        )
+                                        .is_err()
+                                        {
+                                            break;
+                                        }
+                                    } else {
+                                        let mut out_buf = Vec::new();
+                                        let len = engine.effect_chain.process(&buf, &mut out_buf);
+                                        if len == 0 {
+                                            continue;
+                                        }
+                                        // 写入环形缓冲区
+                                        if Self::write_all_to_ring_buf(
+                                            &mut ring_buf,
+                                            &stop,
+                                            max_write_len,
+                                            &event_list,
+                                            &out_buf[..len],
                                         )
                                         .is_err()
                                         {
@@ -290,108 +301,6 @@ impl Decoder {
         } else {
             Err(DecoderError::new("Running", DecoderErrorKind::Running))
         }
-    }
-
-    fn resampler_inner(
-        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
-        rs: &mut DecoderResampler,
-        channels: usize,
-        out_buffer: &mut [f32],
-        max_out_frames: usize,
-    ) -> Result<usize, DecoderEventError> {
-        let input_buf = &rs.in_buf[..RESAMPLER_CHUNK_IN * channels];
-        let input_adapter = match InterleavedSlice::new(input_buf, channels, RESAMPLER_CHUNK_IN) {
-            Ok(i) => i,
-            Err(e) => {
-                let e = DecoderEventError {
-                    message: format!("InterleavedSlice::new, err:{e}"),
-                    kind: DecoderEventErrorKind::InterleavedSliceSizeError(e),
-                };
-                Self::emit(
-                    DecoderEvent {
-                        result: Err(e.clone()),
-                    },
-                    event_list,
-                );
-                return Err(e);
-            }
-        };
-        let mut output_adapter =
-            match InterleavedSlice::new_mut(out_buffer, channels, max_out_frames) {
-                Ok(i) => i,
-                Err(e) => {
-                    let e = DecoderEventError {
-                        message: format!("InterleavedSlice::new_mut, err:{e}"),
-                        kind: DecoderEventErrorKind::InterleavedSliceSizeError(e),
-                    };
-                    Self::emit(
-                        DecoderEvent {
-                            result: Err(e.clone()),
-                        },
-                        event_list,
-                    );
-                    return Err(e);
-                }
-            };
-        let rs = &mut rs.fft_resampler;
-        let (_, frames_out) =
-            match rs.process_into_buffer(&input_adapter, &mut output_adapter, None) {
-                Ok(i) => i,
-                Err(e) => {
-                    let e = DecoderEventError {
-                        message: format!("process_into_buffer, err:{e}"),
-                        kind: DecoderEventErrorKind::ResampleError(e),
-                    };
-                    Self::emit(
-                        DecoderEvent {
-                            result: Err(e.clone()),
-                        },
-                        event_list,
-                    );
-                    return Err(e);
-                }
-            };
-        Ok(frames_out)
-    }
-
-    fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>) {
-        let event = Arc::new(event);
-        let mut list = list.lock().expect("list is poisoned");
-        for sink in list.iter_mut() {
-            sink.emit(event.clone());
-        }
-    }
-    fn write_all_to_ring_buf(
-        ring_buf: &mut RingBufferWait<f32>,
-        stop: &Arc<AtomicBool>,
-        max_write_len: usize,
-        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
-        write_buf: &[f32],
-    ) -> Result<(), DecoderEventError> {
-        for chunk in write_buf.chunks(max_write_len) {
-            // 检查停止信号
-            if stop.load(Ordering::Acquire) {
-                return Err(DecoderEventError {
-                    message: "Decoder stop".to_string(),
-                    kind: DecoderEventErrorKind::DecoderStop,
-                });
-            }
-            // 分块后，每一块的长度都 ≤ CHUNK_SIZE ≤ ring 容量
-            // 因此 write_all 不会返回 WriteSizeTooLarge
-            if let Err(e) = ring_buf.write_all(chunk) {
-                // 只可能是致命错误（锁异常、溢出等），上报后退出
-                let e = DecoderEventError {
-                    message: format!("write_all failed: {e}"),
-                    kind: DecoderEventErrorKind::RingBufferError(e),
-                };
-                let event = DecoderEvent {
-                    result: Err(e.clone()),
-                };
-                Self::emit(event, event_list);
-                return Err(e);
-            }
-        }
-        Ok(())
     }
 
     pub fn add_event(&mut self, event: Box<dyn DecoderEventSink>) {
@@ -442,10 +351,16 @@ impl Decoder {
             },
         )?;
         engine.decoder.reset();
-        if let Some(r) = &mut engine.resampler {
-            r.in_buf.clear();
-        }
+        engine.effect_chain.reset(self.data.input_format);
         Ok(r)
+    }
+
+    pub fn format_info(&self) -> &FormatInfo {
+        &self.data.format_info
+    }
+
+    pub fn media_info(&self) -> &MediaInfo {
+        &self.data.media_info
     }
 }
 
@@ -643,6 +558,7 @@ impl Display for DecoderError {
                 &format!("ResamplerConstructionError({e})")
             }
             DecoderErrorKind::RingBufferNoMaxLen => "RingBufferNoMaxLen",
+            DecoderErrorKind::Other(e) => &format!("Other({e})"),
         };
         write!(f, "DecoderError: Kind: {kind}, message: {}", self.message)
     }
@@ -693,6 +609,7 @@ pub enum DecoderErrorKind {
     NoSampleRate,
     NoChannels,
     ResamplerConstructionError(ResamplerConstructionError),
+    Other(Box<dyn Error + 'static>),
 }
 
 impl From<std::io::Error> for DecoderError {
@@ -700,6 +617,15 @@ impl From<std::io::Error> for DecoderError {
         Self {
             message: e.to_string(),
             kind: DecoderErrorKind::IOError(e),
+        }
+    }
+}
+
+impl From<Box<dyn Error + 'static>> for DecoderError {
+    fn from(e: Box<dyn Error + 'static>) -> Self {
+        Self {
+            message: e.to_string(),
+            kind: DecoderErrorKind::Other(e),
         }
     }
 }

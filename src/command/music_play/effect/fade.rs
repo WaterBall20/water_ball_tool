@@ -1,14 +1,14 @@
-use crate::command::music_play::effect::{Decision, PlayCmd, PostEffect, TransportAware};
+use crate::command::music_play::effect::{
+    AudioFormat, Decision, PlayCmd, PostEffect, TransportAware,
+};
 use std::time::Duration;
 
 pub struct FadeEffect {
     enabled: bool,
     duration: Duration,
-    sample_rate: u32,
-    channels: u16,
+    audio_format: AudioFormat,
     pos: u32,
     duration_samples: u32,
-    // transport 状态
     pending_pause: bool,
     pause_done: bool,
 }
@@ -18,8 +18,7 @@ impl FadeEffect {
         Self {
             enabled: true,
             duration: Duration::from_secs(1),
-            sample_rate: 44_000,
-            channels: 2,
+            audio_format: AudioFormat::default(),
             pos: 0,
             duration_samples: 1,
             pending_pause: false,
@@ -39,14 +38,15 @@ impl FadeEffect {
     }
 
     fn reset_duration_samples(&mut self) {
-        self.duration_samples =
-            self.sample_rate * u32::try_from(self.duration.as_millis()).unwrap_or(1_000) / 1000;
+        self.duration_samples = self.audio_format.sample_rate
+            * u32::try_from(self.duration.as_millis()).unwrap_or(1_000)
+            / 1000;
     }
 }
 
 impl PostEffect for FadeEffect {
-    fn init(&mut self, channels: u16, sample_rate: u32) {
-        self.reset(channels, sample_rate);
+    fn init(&mut self, audio_format: AudioFormat) {
+        self.reset(audio_format);
     }
 
     fn process(&mut self, buffer: &mut [f32]) {
@@ -59,7 +59,7 @@ impl PostEffect for FadeEffect {
             return;
         }
 
-        for frame in buffer.chunks_mut(self.channels as usize) {
+        for frame in buffer.chunks_mut(self.audio_format.channels as usize) {
             if self.pending_pause {
                 if self.pos > 0 {
                     self.pos = self.pos.saturating_sub(1);
@@ -75,9 +75,8 @@ impl PostEffect for FadeEffect {
         }
     }
 
-    fn reset(&mut self, channels: u16, sample_rate: u32) {
-        self.channels = channels;
-        self.sample_rate = sample_rate;
+    fn reset(&mut self, audio_format: AudioFormat) {
+        self.audio_format = audio_format;
         self.reset_duration_samples();
     }
 
