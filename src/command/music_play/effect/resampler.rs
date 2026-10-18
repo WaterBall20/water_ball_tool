@@ -21,6 +21,15 @@ impl PreEffect for ResamplerEffect {
     fn init(&mut self, input_format: AudioFormat) -> Result<(), Box<(dyn Error + 'static)>> {
         self.input_format = input_format;
         let channels = self.input_format.channels as usize;
+        self.chunk_len = ResamplePlan::compute_plan(
+            input_format.sample_rate,
+            self.output_format.sample_rate,
+            32768,
+            0.10,
+            2048,
+            16384,
+        )
+        .out_frames_max as usize;
         let resampler = Fft::<f32>::new(
             self.input_format.sample_rate as usize,
             self.output_format.sample_rate as usize,
@@ -51,7 +60,7 @@ impl PreEffect for ResamplerEffect {
         if self.in_buf.len() < chunk_len {
             return 0;
         }
-        let drain_len = (input.len() / chunk_len) * chunk_len;
+        let drain_len = (self.in_buf.len() / chunk_len) * chunk_len;
         out.clear();
         out.reserve_exact(drain_len);
         for block in self.in_buf.chunks_exact(chunk_len) {
@@ -117,7 +126,7 @@ impl ResamplerEffect {
 impl ResamplerEffect {
     pub fn new(output_format: AudioFormat) -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             error: None,
             resampler: None,
             in_buf: Vec::new(),
@@ -127,5 +136,85 @@ impl ResamplerEffect {
             max_out_frames: 0,
             chunk_len: RESAMPLER_CHUNK_LEN,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResamplePlan {
+    pub block_frames: u32,   // 每声道输入帧数（喂给 process）
+    pub out_frames_max: u32, // 每声道输出上限（分配输出缓冲用，含余量）
+    pub out_fft_equiv: u32,  // 实际输出侧等效窗口（诊断）
+    pub t_play_sec: f64,     // 单次处理对应的播放时长
+    pub period: u32,         // 输入侧最小周期（诊断）
+}
+impl ResamplePlan {
+    fn next_pow2(x: u32) -> u32 {
+        if x <= 1 {
+            return 1;
+        }
+        x.checked_next_power_of_two().unwrap_or(u32::MAX)
+    }
+
+    /// 完全动态计算重采样块大小。
+    ///
+    /// - `fin` / `fout`：任意输入/输出采样率（Hz），运行时决定
+    /// - `target_out_fft`：输出侧期望等效窗口，解码线程内用 32768，独立线程用 65536
+    /// - `t_play_max_sec`：单次处理允许的最长播放时长，解码线程内 0.08~0.15
+    /// - `n_min` / `n_max`：输入块帧数硬上下限，如 1024 / 32768
+    pub fn compute_plan(
+        fin: u32,
+        fout: u32,
+        target_out_fft: u32,
+        t_play_max_sec: f64,
+        n_min: u32,
+        n_max: u32,
+    ) -> ResamplePlan {
+        const MAX_ALIGN: u32 = 1024;
+        assert!(
+            fin > 0 && fout > 0 && target_out_fft > 0,
+            "rates must be > 0"
+        );
+        assert!(n_min > 0 && n_min <= n_max, "invalid bounds");
+        assert!(t_play_max_sec > 0.0, "t_play_max_sec must be > 0");
+
+        // 1) 两约束取小：质量下界 vs 播放时长上界
+        let n_quality = target_out_fft as f64 * fin as f64 / fout as f64;
+        let n_time = t_play_max_sec * fin as f64;
+        let n_raw = n_quality.min(n_time).ceil().max(1.0) as u32;
+
+        // 2) 自适应对齐
+        let g = Self::gcd_u32(fin, fout); // 需要 Rust 1.67+，或手写 gcd
+        let period = fin / g; // 44.1k→384k: 147；48k→384k: 1
+        let mut n = if period <= MAX_ALIGN {
+            n_raw.div_ceil(period).saturating_mul(period) // div_ceil 需要 1.73+
+        } else {
+            Self::next_pow2(n_raw)
+        };
+
+        // 3) 硬上下限
+        n = n.clamp(n_min, n_max);
+
+        // 4) 诊断与输出缓冲上限
+        let ratio = fout as f64 / fin as f64;
+        let out_fft_equiv = (n as f64 * ratio).round() as u32;
+        let t_play_sec = n as f64 / fin as f64;
+        let out_frames_max = ((n as f64 * ratio).ceil() as u32).saturating_add(64); // 滤波器群延迟余量
+
+        ResamplePlan {
+            block_frames: n,
+            out_frames_max,
+            out_fft_equiv,
+            t_play_sec,
+            period,
+        }
+    }
+
+    fn gcd_u32(mut a: u32, mut b: u32) -> u32 {
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        a
     }
 }
