@@ -70,17 +70,8 @@ impl Player {
                     data.fill(0.0);
                     return;
                 }
-
                 let len = ring_buf.read(data);
-                //音量处理
-                if (volume - 1.0).abs() > 0.0 {
-                    for datum in &mut data[..len] {
-                        *datum *= volume;
-                    }
-                }
-                //进度计数
-                played_samples.fetch_add(len as u64, Ordering::Relaxed);
-                data[len..].fill(0.0);
+
                 //效果处理
                 if let Ok(mut effect_chain) = effect_chain.try_lock() {
                     // 1. 收指令，做决策（绝不阻塞、不分配）
@@ -90,7 +81,7 @@ impl Player {
                         }
                     }
                     // 2. 处理音频
-                    effect_chain.process(data);
+                    effect_chain.process(data[..len].as_mut());
                     // 3. 上报已完成的延迟指令（Vec 预分配，复用）
                     scratch.clear();
                     effect_chain.poll_transport(&mut scratch);
@@ -99,6 +90,16 @@ impl Player {
                     }
                 }
 
+                //音量处理
+                if (volume - 1.0).abs() > 0.0 {
+                    for datum in &mut data[..len] {
+                        *datum *= volume;
+                    }
+                }
+
+                //进度计数
+                played_samples.fetch_add(len as u64, Ordering::Relaxed);
+                data[len..].fill(0.0);
                 //检查解码是否EOF
                 let decoder_eof = &event_content.decoder_eof;
                 let decoder_eof_pos = &event_content.decoder_eof_pos;

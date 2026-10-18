@@ -3,6 +3,8 @@ use std::time::Duration;
 
 pub mod fade;
 pub mod resampler;
+#[cfg(test)]
+pub mod test;
 
 #[derive(Copy, Clone)]
 pub struct AudioFormat {

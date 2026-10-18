@@ -1,5 +1,5 @@
 use crate::command::music_play::effect::resampler::ResamplerEffect;
-use crate::command::music_play::effect::{AudioFormat, PreEffectChain};
+use crate::command::music_play::effect::{AudioFormat, PreEffect, PreEffectChain};
 use rubato::audioadapter_buffers::SizeError;
 use rubato::{ResampleError, ResamplerConstructionError};
 use std::any::Any;
@@ -39,10 +39,12 @@ struct DecoderEngine {
     effect_chain: PreEffectChain,
 }
 
+#[derive(Copy, Clone)]
 struct DecoderData {
     input_format: AudioFormat,
     format_info: FormatInfo,
     media_info: MediaInfo,
+    max_ring_buf_write_len: usize,
 }
 
 impl Decoder {
@@ -154,6 +156,7 @@ impl Decoder {
             })?;
 
         let input_format = AudioFormat::new(channels as u16, decoder_sample_rate);
+        let max_ring_buf_write_len = (decoder_sample_rate / 50) as usize;
         let mut effect_chain = PreEffectChain::new(input_format);
 
         let needs_resampling = decoder_sample_rate != output_sample_rate;
@@ -176,6 +179,7 @@ impl Decoder {
             input_format,
             format_info,
             media_info,
+            max_ring_buf_write_len,
         };
 
         Ok(Self {
@@ -195,6 +199,7 @@ impl Decoder {
                 let event_list = self.event_list.clone();
                 let mut ring_buf = self.ring_buf.clone();
                 let stop = self.stop.clone();
+                let data = self.data;
                 // 4. 解码循环
                 std::thread::Builder::new()
                     .name("decoder".to_string())
@@ -203,7 +208,6 @@ impl Decoder {
                         //初始化
                         let ring_buf_max_len =
                             ring_buf.max_len().expect("ring_buf max_len is None");
-                        let max_write_len = ring_buf_max_len / 4;
                         let mut buf = Vec::with_capacity(ring_buf_max_len);
                         loop {
                             // 检查停止信号
@@ -256,7 +260,7 @@ impl Decoder {
                                         if Self::write_all_to_ring_buf(
                                             &mut ring_buf,
                                             &stop,
-                                            max_write_len,
+                                            data.max_ring_buf_write_len,
                                             &event_list,
                                             &buf,
                                         )
@@ -274,7 +278,7 @@ impl Decoder {
                                         if Self::write_all_to_ring_buf(
                                             &mut ring_buf,
                                             &stop,
-                                            max_write_len,
+                                            data.max_ring_buf_write_len,
                                             &event_list,
                                             &out_buf[..len],
                                         )
@@ -361,6 +365,17 @@ impl Decoder {
 
     pub fn media_info(&self) -> &MediaInfo {
         &self.data.media_info
+    }
+
+    pub fn add_audio_pre_effect<E>(&mut self, effect: E) -> Result<(), Box<dyn Error>>
+    where
+        E: PreEffect + Send + 'static,
+    {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effect_chain
+            .push(effect)
     }
 }
 
@@ -564,7 +579,7 @@ impl Display for DecoderError {
     }
 }
 
-impl std::error::Error for DecoderError {}
+impl Error for DecoderError {}
 
 impl From<ResamplerConstructionError> for DecoderError {
     fn from(value: ResamplerConstructionError) -> Self {
