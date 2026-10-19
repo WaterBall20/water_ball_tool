@@ -21,12 +21,13 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 use tracing::{debug, error};
+use water_ball_tool_lib::concurrent_ring::{ConcurrentRing, ConcurrentRingError};
 use water_ball_tool_lib::ring_buffer_wait::{RingBufferWait, RingBufferWaitError};
 
 pub(super) struct Decoder {
     path_buf: PathBuf,
     thread_handle: Option<std::thread::JoinHandle<()>>,
-    ring_buf: RingBufferWait<f32>,
+    ring_buf: Arc<ConcurrentRing<f32>>,
     stop: Arc<AtomicBool>,
     engine: Arc<Mutex<DecoderEngine>>,
     event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
@@ -57,7 +58,7 @@ impl Decoder {
         }
     }
     fn write_all_to_ring_buf(
-        ring_buf: &mut RingBufferWait<f32>,
+        ring_buf: &ConcurrentRing<f32>,
         stop: &Arc<AtomicBool>,
         max_write_len: usize,
         event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
@@ -92,7 +93,7 @@ impl Decoder {
 
 impl Decoder {
     pub fn new(
-        ring_buf: RingBufferWait<f32>,
+        ring_buf: Arc<ConcurrentRing<f32>>,
         path: &Path,
         output_sample_rate: u32,
     ) -> DecoderResult<Self> {
@@ -214,7 +215,7 @@ impl Decoder {
                         debug!("decoder run thread loop start");
                         //初始化
                         let ring_buf_max_len =
-                            ring_buf.max_len().expect("ring_buf max_len is None");
+                            ring_buf.max_capacity().expect("ring_buf max_len is None");
                         let mut buf = Vec::with_capacity(ring_buf_max_len);
                         loop {
                             // 检查停止信号
@@ -486,7 +487,7 @@ impl From<ResampleError> for DecoderEventError {
 }
 #[derive(Debug)]
 pub(super) enum DecoderEventErrorKind {
-    RingBufferError(RingBufferWaitError<f32>),
+    RingBufferError(ConcurrentRingError<f32>),
     /// An IO error occured while reading, writing, or seeking the stream.
     IoError(std::io::Error),
     /// The stream contained malformed data and could not be decoded or demuxed.

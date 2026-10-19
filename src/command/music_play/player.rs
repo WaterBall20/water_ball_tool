@@ -13,7 +13,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::error;
-use water_ball_tool_lib::ring_buffer_wait::RingBufferWait;
+use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 
 #[derive(Clone)]
 pub(super) struct Player {
@@ -26,7 +26,7 @@ pub(super) struct Player {
 
 #[derive(Clone)]
 struct SoundEngine {
-    ring_buffer: RingBufferWait<f32>,
+    ring_buffer: Arc<ConcurrentRing<f32>>,
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
@@ -52,7 +52,7 @@ impl Player {
     fn create_stream(
         device: &Device,
         config: StreamConfig,
-        mut ring_buf: RingBufferWait<f32>,
+        mut ring_buf: Arc<ConcurrentRing<f32>>,
         content: Content,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
@@ -163,8 +163,9 @@ impl Player {
 
         let stream_config = Arc::new(config.config());
         // 在你的播放器初始化阶段
-        let ring_buffer =
-            RingBufferWait::new_max_len(sample_rate as usize * channels as usize * 5)?;
+        let ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
+            sample_rate as usize * channels as usize * 5,
+        ));
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let played_samples = Arc::new(AtomicU64::new(0));
@@ -301,7 +302,7 @@ impl Player {
         Ok(())
     }
 
-    pub fn ring_buffer(&self) -> &RingBufferWait<f32> {
+    pub fn ring_buffer(&self) -> &Arc<ConcurrentRing<f32>> {
         &self.sound_engine.ring_buffer
     }
 
@@ -378,11 +379,7 @@ impl Player {
     pub fn clear_decoder_eof_buf(&self) {
         if self.get_decoder_eof() && self.event_content.decoder_eof_pos.load(Ordering::Acquire) != 0
         {
-            let mut ring_buf = self
-                .sound_engine
-                .ring_buffer
-                .lock()
-                .expect("ring buffer is poisoned");
+            let mut ring_buf = self.sound_engine.ring_buffer.lock();
             let remove_len = ring_buf.len();
             for _ in 0..remove_len {
                 _ = ring_buf.pop_front();
