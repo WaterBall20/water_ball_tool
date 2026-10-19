@@ -295,7 +295,9 @@ impl Player {
     }
 
     pub fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.content.tx_cmd.send(PlayCmd::Pause)?;
+        if self.content.is_playing.load(Ordering::Acquire) {
+            self.content.tx_cmd.send(PlayCmd::Pause)?;
+        }
         Ok(())
     }
 
