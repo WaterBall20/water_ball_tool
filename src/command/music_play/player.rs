@@ -1,4 +1,5 @@
 use crate::command::music_play::decoder::{Decoder, DecoderResult};
+use crate::command::music_play::effect::cross_bridge::CrossBridge;
 use crate::command::music_play::effect::resampler::ResamplerEffect;
 use crate::command::music_play::effect::runtime::{
     AudioData, PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventSink,
@@ -167,10 +168,9 @@ impl Player {
         //效果运行时
         let mut pre_effect_runtime =
             PreEffectRuntime::create(pre_effect_ring_buf.clone(), audio_ring_buffer.clone());
-        pre_effect_runtime.add_effect(ResamplerEffect::new(AudioFormat::new(
-            channels,
-            sample_rate,
-        )))?;
+        let output_format = AudioFormat::new(channels, sample_rate);
+        pre_effect_runtime.add_effect(ResamplerEffect::new(output_format))?;
+        pre_effect_runtime.add_effect(CrossBridge::new(output_format))?;
 
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
@@ -368,9 +368,11 @@ impl Player {
         if let Some(decoder) = decoder_lock.take() {
             decoder.stop()?;
         }
-        self.sound_engine
-            .pre_effect_runtime
-            .reset(*decoder.decoder_format());
+        {
+            let per = &mut self.sound_engine.pre_effect_runtime;
+            per.input_none();
+            per.reset(*decoder.decoder_format());
+        }
         self.sound_engine.audio_ring_buffer.clear();
         decoder.run()?;
         decoder_lock.replace(decoder);

@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::time::Duration;
 
+pub mod cross_bridge;
 pub mod fade;
 pub mod resampler;
 pub mod runtime;
@@ -192,7 +193,12 @@ pub trait PreEffect: Send + 'static {
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize;
 
     /// 触发EOF
-    fn input_eof(&mut self) {}
+    fn input_eof(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+        out.clear();
+        out.reserve_exact(input.len());
+        out.extend_from_slice(input);
+        input.len()
+    }
     /// 触发None
     fn input_none(&mut self) {}
 
@@ -286,14 +292,22 @@ impl PreEffectChain {
         self.output_format = input_format;
     }
 
-    pub fn input_eof(&mut self) {
-        for effect in self.effects.iter_mut() {
-            effect.input_eof();
+    pub fn input_eof(&mut self, out: &mut Vec<f32>) -> usize {
+        let mut buf1 = Vec::new();
+        let mut buf2 = Vec::new();
+        let mut this_len = 0;
+        for effect in &mut self.effects {
+            this_len = effect.input_eof(&buf1[..this_len], &mut buf2);
+            std::mem::swap(&mut buf1, &mut buf2);
         }
+        out.clear();
+        out.reserve_exact(this_len);
+        out.extend_from_slice(&buf1[..this_len]);
+        this_len
     }
 
     pub fn input_none(&mut self) {
-        for effect in self.effects.iter_mut() {
+        for effect in &mut self.effects {
             effect.input_none();
         }
     }

@@ -66,43 +66,29 @@ impl PreEffect for ResamplerEffect {
                 out.len()
             };
         };
+        let chunk_len = self.chunk_len;
         let channels = self.input_format.channels as usize;
-        let chunk_len = self.chunk_len * channels;
-        self.in_buf.extend_from_slice(input);
-        if self.in_buf.len() < chunk_len {
+        let channels_chunk_len = self.chunk_len * channels;
+        let max_out_frames = self.max_out_frames;
+        let in_buf = &mut self.in_buf;
+        let out_temp_buf = &mut self.out_temp_buf;
+        in_buf.extend_from_slice(input);
+        if in_buf.len() < channels_chunk_len {
             return 0;
         }
-        let drain_len = (self.in_buf.len() / chunk_len) * chunk_len;
+        let drain_len = (in_buf.len() / channels_chunk_len) * channels_chunk_len;
         out.clear();
         out.reserve_exact(drain_len);
-        for block in self.in_buf.chunks_exact(chunk_len) {
-            let input_adapter = match InterleavedSlice::new(block, channels, self.chunk_len) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.set_error(Box::new(e));
-                    return 0;
-                }
-            };
-            let mut output_adapter = match InterleavedSlice::new_mut(
-                &mut self.out_temp_buf,
-                channels,
-                self.max_out_frames,
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.set_error(Box::new(e));
-                    return 0;
-                }
-            };
-            let (_, frames_out) =
-                match resampler.process_into_buffer(&input_adapter, &mut output_adapter, None) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        self.set_error(Box::new(e));
-                        return 0;
-                    }
-                };
-            out.extend_from_slice(&self.out_temp_buf[..frames_out * channels]);
+        if let Err(e) = Self::process_inner(
+            in_buf,
+            out_temp_buf,
+            out,
+            chunk_len,
+            channels,
+            max_out_frames,
+            resampler,
+        ) {
+            self.set_error(e);
         }
         self.in_buf.drain(..drain_len);
         out.len()
@@ -112,6 +98,42 @@ impl PreEffect for ResamplerEffect {
         if let Err(e) = self.init(input_format) {
             self.set_error(e);
         }
+    }
+
+    fn input_eof(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+        let Some(resampler) = &mut self.resampler else {
+            out.clear();
+            out.reserve_exact(input.len());
+            out.extend_from_slice(input);
+            return out.len();
+        };
+        let channels = self.input_format.channels as usize;
+        //基本大小
+        let chunk_len = self.chunk_len;
+        let channels_chunk_len = self.chunk_len * channels;
+        let max_out_frames = self.max_out_frames;
+        let in_buf = &mut self.in_buf;
+        let out_temp_buf = &mut self.out_temp_buf;
+        let data_len = in_buf.len() + input.len();
+        //这次重采样所需大小
+        let this_input_len = (data_len / channels_chunk_len + 1) * channels_chunk_len;
+
+        in_buf.extend_from_slice(input);
+        in_buf.resize(this_input_len, 0.0);
+        if let Err(e) = Self::process_inner(
+            in_buf,
+            out_temp_buf,
+            out,
+            chunk_len,
+            channels,
+            max_out_frames,
+            resampler,
+        ) {
+            self.set_error(e);
+            return 0;
+        }
+        self.in_buf.drain(..this_input_len);
+        out.len()
     }
 
     fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
@@ -137,6 +159,26 @@ impl ResamplerEffect {
     fn set_error(&mut self, error: Box<dyn Error + 'static>) {
         self.enabled = false;
         self.error = Some(error.to_string());
+    }
+
+    fn process_inner(
+        in_buf: &[f32],
+        out_temp_buf: &mut Vec<f32>,
+        out: &mut Vec<f32>,
+        chunk_len: usize,
+        channels: usize,
+        max_out_frames: usize,
+        resampler: &mut Fft<f32>,
+    ) -> Result<(), Box<dyn Error>> {
+        for block in in_buf.chunks_exact(chunk_len * channels) {
+            let input_adapter = InterleavedSlice::new(block, channels, chunk_len)?;
+            let mut output_adapter =
+                InterleavedSlice::new_mut(out_temp_buf, channels, max_out_frames)?;
+            let (_, frames_out) =
+                resampler.process_into_buffer(&input_adapter, &mut output_adapter, None)?;
+            out.extend_from_slice(&out_temp_buf[..frames_out * channels]);
+        }
+        Ok(())
     }
 }
 impl ResamplerEffect {

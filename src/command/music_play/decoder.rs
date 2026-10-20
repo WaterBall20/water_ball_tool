@@ -74,7 +74,7 @@ impl Decoder {
             }
 
             // 因此 write_all 不会返回 WriteSizeTooLarge
-            ring_buf.push_wait(AudioData::Block(chunk.to_vec()))
+            ring_buf.push_wait(AudioData::Block(chunk.to_vec()));
         }
         Ok(())
     }

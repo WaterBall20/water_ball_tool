@@ -89,10 +89,17 @@ impl PreEffectRuntime {
                                     if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
                                         error!("Failed to write all audio data: {}", e);
                                         break;
-                                    };
+                                    }
                                 }
                                 AudioData::Eof => {
-                                    effects.input_eof();
+                                    let len = effects.input_eof(&mut out_temp_buf);
+                                    if len == 0 {
+                                        continue;
+                                    }
+                                    if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
+                                        error!("Failed to write all audio data: {}", e);
+                                        break;
+                                    }
                                     Self::emit(
                                         PreEffectRuntimeEvent {
                                             result: Ok(PreEffectRuntimeEventType::Eof),
@@ -132,11 +139,11 @@ impl PreEffectRuntime {
         Ok(())
     }
 
-    pub fn reset(&mut self, format: AudioFormat) {
+    pub fn reset(&self, format: AudioFormat) {
         self.input_buf.push_wait(AudioData::Reset(format));
     }
 
-    pub fn input_none(&mut self) {
+    pub fn input_none(&self) {
         self.input_buf.push_wait(AudioData::None);
     }
 

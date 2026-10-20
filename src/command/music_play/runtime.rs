@@ -3,6 +3,7 @@ use crate::command::music_play::decoder::{
     DecoderEventType, DecoderResult,
 };
 use crate::command::music_play::effect::fade::FadeEffect;
+use crate::command::music_play::effect::runtime::PreEffectRuntime;
 use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::player::{
     Player, PlayerEventChannelSink, PlayerEventSink, PlayerEventType,
@@ -384,6 +385,7 @@ impl PlayObject {
             &self.this_track,
             Some(&self.ui_track),
             &self.next_content,
+            self.player.pre_effect_runtime(),
         )
     }
 
@@ -394,6 +396,7 @@ impl PlayObject {
         this_track: &Arc<Mutex<Option<Track>>>,
         ui_track: Option<&Arc<Mutex<Option<Track>>>>,
         next_content: &NextContent,
+        pre_effect_runtime: &PreEffectRuntime,
     ) -> DecoderResult<Option<Track>> {
         let mut player = player;
         let mut play_list_lock = play_list
@@ -449,6 +452,7 @@ impl PlayObject {
                                     this_track,
                                     ui_track,
                                     next_content,
+                                    pre_effect_runtime,
                                 );
                             }
                             DecoderErrorAction::AutoRetry => {}
@@ -468,6 +472,7 @@ impl PlayObject {
                 let this_track = this_track.clone();
                 let player = player.clone();
                 let next_content = next_content.clone();
+                let pre_effect_runtime = pre_effect_runtime.clone();
                 decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
                     debug!("解码器事件触发：{e:?}");
                     match e.result() {
@@ -480,6 +485,7 @@ impl PlayObject {
                                     &this_track,
                                     None,
                                     &next_content,
+                                    &pre_effect_runtime,
                                 ) {
                                     error!("自动换曲发生错误，err:{e}");
                                 }
@@ -517,7 +523,9 @@ impl PlayObject {
                 }
                 error!("切换下一曲发生错误，不存在，将暂停");
             }
+            pre_effect_runtime.input_none();
             next_content.err_count.store(0, Ordering::Release);
+
             Ok(None)
         }
     }
