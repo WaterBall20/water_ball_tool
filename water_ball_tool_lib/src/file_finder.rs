@@ -337,8 +337,10 @@ impl SearchResult {
 /// with inode-chain-based symlink cycle detection.
 ///
 /// # 使用示例 / Usage Example
-/// ```ignore
+/// ```
+/// use water_ball_tool_lib::file_finder::FileFinder;
 /// use std::sync::mpsc;
+/// use std::path::Path;
 /// let (tx, rx) = mpsc::channel();
 /// let result = FileFinder.search(Path::new("./src"), true, tx, 8);
 /// ```
@@ -1089,16 +1091,23 @@ impl FileFinder {
     /// * `Err` - 路径无效 / Invalid path
     ///
     /// # 使用示例 / Usage
-    /// ```ignore
-    /// let (tx, rx) = mpsc::channel();
-    /// let (handle, stream_rx) = finder.search_stream(path, false, tx, 8)?;
-    /// for event in stream_rx {
-    ///     match event {
-    ///         SearchEvent::Entry(path, info) => { println!("发现: {}", path.display()); }
-    ///         SearchEvent::Warning(w) => { eprintln!("警告: {:?}", w); }
-    ///     }
+    /// ```
+    /// use water_ball_tool_lib::file_finder::SearchEvent;
+    /// use water_ball_tool_lib::file_finder::FileFinder;
+    /// use std::sync::mpsc;
+    /// use std::path::Path;
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let (tx, rx) = mpsc::channel();
+    ///     let (handle, stream_rx) = FileFinder.search_stream(Path::new("./src"), false, tx, 8)?;
+    ///     for event in stream_rx {
+    ///          match event {
+    ///              SearchEvent::Entry(path, info) => { println!("发现: {}", path.display()); }
+    ///              SearchEvent::Warning(w) => { eprintln!("警告: {:?}", w); }
+    ///          }
+    ///      }
+    ///     handle.join().unwrap()?; // 等待搜索完成 / wait for completion
+    ///     Ok(())
     /// }
-    /// handle.join().unwrap()?; // 等待搜索完成 / wait for completion
     /// ```
     pub fn search_stream<P: AsRef<Path>>(
         &self,

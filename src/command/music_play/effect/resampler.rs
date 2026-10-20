@@ -33,7 +33,7 @@ impl PreEffect for ResamplerEffect {
             32768,
             0.10,
             2048,
-            16384,
+            32768,
         )
         .out_frames_max as usize;
         let resampler = Fft::<f32>::new(

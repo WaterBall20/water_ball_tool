@@ -292,7 +292,7 @@ impl WaterBallFilePackArgsRuning {
             let pb = wb_pb
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pb.set_length(data_len.load(Ordering::SeqCst));
+            pb.set_length(data_len.load(Ordering::Acquire));
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template(PACK_PROGRESS_STYLE_TEMPLATE)?
@@ -405,7 +405,7 @@ impl WaterBallFilePackArgsRuning {
             if let Err(e) = ff_thread.join().expect("ff_thread join failed") {
                 error!("文件搜索线程错误：{e}");
             }
-            ff_end.store(true, Ordering::SeqCst);
+            ff_end.store(true, Ordering::Release);
             //唤醒所有线程，避免死锁
             condver.notify_all();
             wp_thread.join().expect("wp_thread join failed");
@@ -448,18 +448,18 @@ impl WaterBallFilePackArgsRuning {
                     let dir_count = dir_count.clone();
                     thread::spawn(move || {
                         for (add_file, add_dir) in rx {
-                            file_count.fetch_add(add_file, Ordering::SeqCst);
-                            dir_count.fetch_add(add_dir, Ordering::SeqCst);
+                            file_count.fetch_add(add_file, Ordering::Release);
+                            dir_count.fetch_add(add_dir, Ordering::Release);
 
-                            let all_count = file_count.load(Ordering::SeqCst)
-                                + dir_count.load(Ordering::SeqCst);
+                            let all_count = file_count.load(Ordering::Acquire)
+                                + dir_count.load(Ordering::Acquire);
                             ff_pb.set_position(all_count);
                             //10的倍数才更新
                             if all_count.is_multiple_of(100) {
                                 ff_pb.set_message(format!(
                                     "[搜索文件]已发现 {} 文件和 {} 个目录",
-                                    file_count.load(Ordering::SeqCst),
-                                    dir_count.load(Ordering::SeqCst),
+                                    file_count.load(Ordering::Acquire),
+                                    dir_count.load(Ordering::Acquire),
                                 ));
                             }
                         }
@@ -471,7 +471,7 @@ impl WaterBallFilePackArgsRuning {
                         SearchEvent::Entry(path, info) => {
                             //只有文件才会加入队列
                             if let FileKind::File { .. } = info.file_kind() {
-                                data_len.fetch_add(info.length(), Ordering::SeqCst);
+                                data_len.fetch_add(info.length(), Ordering::Release);
                                 results
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -492,11 +492,12 @@ impl WaterBallFilePackArgsRuning {
                     .join()
                     .expect("search_stream_handle join failed")?;
                 info!(
-                    "文件搜索已完成: {}个文件，{}个目录",
-                    file_count.load(Ordering::SeqCst),
-                    data_len.load(Ordering::SeqCst)
+                    "文件搜索已完成: {}个文件，{}个目录, 大小:{}",
+                    file_count.load(Ordering::Acquire),
+                    dir_count.load(Ordering::Acquire),
+                    data_len.load(Ordering::Acquire)
                 );
-                ff_end.store(true, Ordering::SeqCst);
+                ff_end.store(true, Ordering::Release);
                 //唤醒所有线程，避免死锁
                 condver.notify_all();
                 Ok(())
@@ -583,7 +584,7 @@ impl WaterBallFilePackArgsRuning {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     //总大小与实际写入量对齐（源文件可能在复制期间增长）
-                    let mut total = data_len.load(Ordering::SeqCst);
+                    let mut total = data_len.load(Ordering::Acquire);
                     if write_len > total {
                         total = write_len;
                     }
@@ -591,7 +592,7 @@ impl WaterBallFilePackArgsRuning {
                     pb.set_position(write_len);
                     pb.set_message(format!(
                         "[{write_file_count}/{}个文件]",
-                        file_count.load(Ordering::SeqCst),
+                        file_count.load(Ordering::Acquire),
                     ));
                     last_write_len = write_len;
                 }
@@ -659,7 +660,7 @@ impl WaterBallFilePackArgsRuning {
                     //进入挂起
                     loop {
                         //判断搜索是否结束, 确定是否退出线程
-                        if ff_end.load(Ordering::SeqCst) {
+                        if ff_end.load(Ordering::Acquire) {
                             //唤醒所有线程，避免死锁
                             condver.notify_all();
                             break 'write_pack;
@@ -1065,8 +1066,8 @@ impl WaterBallFilePackArgsRuning {
                     Ok(v) => v,
                     Err(err) => {
                         error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                         continue;
@@ -1088,8 +1089,8 @@ impl WaterBallFilePackArgsRuning {
                                     r#"无法获取虚拟路径"{}"的子项名称, err:{err}"#,
                                     path.display()
                                 );
-                                if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                    all_done.store(true, Ordering::SeqCst);
+                                if pending.fetch_sub(1, Ordering::Release) == 1 {
+                                    all_done.store(true, Ordering::Release);
                                     queue.1.notify_all();
                                 }
                                 continue;
@@ -1098,7 +1099,7 @@ impl WaterBallFilePackArgsRuning {
 
                         let n = children.len();
                         if n > 0 {
-                            pending.fetch_add(n, Ordering::SeqCst);
+                            pending.fetch_add(n, Ordering::Release);
                             let mut q = queue
                                 .0
                                 .lock()
@@ -1108,8 +1109,8 @@ impl WaterBallFilePackArgsRuning {
                             }
                             queue.1.notify_all();
                         }
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                     }
@@ -1134,8 +1135,8 @@ impl WaterBallFilePackArgsRuning {
                                 Err(err) => {
                                     error!("无法打开虚拟文件\"{}\", err: {err:?}", path.display());
                                     let _ = tx.send(0u64);
-                                    if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                        all_done.store(true, Ordering::SeqCst);
+                                    if pending.fetch_sub(1, Ordering::Release) == 1 {
+                                        all_done.store(true, Ordering::Release);
                                         queue.1.notify_all();
                                     }
                                     continue;
@@ -1183,8 +1184,8 @@ impl WaterBallFilePackArgsRuning {
 
                         let _ = tx.send(bytes_written.unwrap_or(0));
 
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                     }
@@ -1206,7 +1207,7 @@ impl WaterBallFilePackArgsRuning {
             if let Some(p) = q.pop_front() {
                 break p;
             }
-            if all_done.load(Ordering::SeqCst) {
+            if all_done.load(Ordering::Acquire) {
                 cvar.notify_all();
                 return None;
             }
@@ -1530,8 +1531,8 @@ impl WaterBallFilePackArgsRuning {
                     Ok(v) => v,
                     Err(err) => {
                         error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                         continue;
@@ -1549,8 +1550,8 @@ impl WaterBallFilePackArgsRuning {
                                     r#"无法获取虚拟路径"{}"的子项名称, err:{err}"#,
                                     path.display()
                                 );
-                                if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                    all_done.store(true, Ordering::SeqCst);
+                                if pending.fetch_sub(1, Ordering::Release) == 1 {
+                                    all_done.store(true, Ordering::Release);
                                     queue.1.notify_all();
                                 }
                                 continue;
@@ -1559,7 +1560,7 @@ impl WaterBallFilePackArgsRuning {
 
                         let n = children.len();
                         if n > 0 {
-                            pending.fetch_add(n, Ordering::SeqCst);
+                            pending.fetch_add(n, Ordering::Release);
                             let mut q = queue
                                 .0
                                 .lock()
@@ -1571,8 +1572,8 @@ impl WaterBallFilePackArgsRuning {
                             queue.1.notify_all();
                         }
                         // 目录自身处理完毕 / Directory itself resolved
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                     }
@@ -1582,8 +1583,8 @@ impl WaterBallFilePackArgsRuning {
                             Err(err) => {
                                 error!("无法获取包文件读写器，err: {err}");
                                 let _ = tx.send((path.display().to_string(), 0u64, None));
-                                if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                                    all_done.store(true, Ordering::SeqCst);
+                                if pending.fetch_sub(1, Ordering::Release) == 1 {
+                                    all_done.store(true, Ordering::Release);
                                     queue.1.notify_all();
                                 }
                                 continue;
@@ -1613,8 +1614,8 @@ impl WaterBallFilePackArgsRuning {
 
                         let _ = tx.send((path.display().to_string(), file_len, result));
                         // 文件处理完毕 / File resolved
-                        if pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-                            all_done.store(true, Ordering::SeqCst);
+                        if pending.fetch_sub(1, Ordering::Release) == 1 {
+                            all_done.store(true, Ordering::Release);
                             queue.1.notify_all();
                         }
                     }

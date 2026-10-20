@@ -199,7 +199,7 @@ pub trait PreEffect: Send + 'static {
     /// 重置
     fn reset(&mut self, input_format: AudioFormat);
     /// 对于
-    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<(dyn Error + 'static)>> {
+    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
         self.reset(input_format);
         Ok(())
     }
@@ -238,7 +238,7 @@ impl PreEffectChain {
         self.effects.is_empty()
     }
 
-    pub fn push<E: PreEffect>(&mut self, e: E) -> Result<(), Box<(dyn Error + 'static)>> {
+    pub fn push<E: PreEffect>(&mut self, e: E) -> Result<(), Box<dyn Error + 'static>> {
         let mut e = e;
         e.init(self.input_formats[self.input_formats.len() - 1])?;
         let output_format = e.output_format();
