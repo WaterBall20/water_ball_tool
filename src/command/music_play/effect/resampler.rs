@@ -1,6 +1,7 @@
 use crate::command::music_play::effect::{AudioFormat, PreEffect};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
+use std::cmp::PartialEq;
 use std::error::Error;
 
 const RESAMPLER_CHUNK_LEN: usize = 1024;
@@ -20,6 +21,11 @@ pub struct ResamplerEffect {
 impl PreEffect for ResamplerEffect {
     fn init(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
         self.input_format = input_format;
+        self.in_buf.clear();
+        if self.output_format == input_format {
+            self.resampler.take();
+            return Ok(());
+        }
         let channels = self.input_format.channels as usize;
         self.chunk_len = ResamplePlan::compute_plan(
             input_format.sample_rate,
@@ -38,7 +44,6 @@ impl PreEffect for ResamplerEffect {
             FixedSync::Input,
         )?;
         self.max_out_frames = resampler.output_frames_max();
-        self.in_buf.clear();
         self.in_buf.reserve_exact(self.max_out_frames * 2);
         self.out_temp_buf.resize(self.max_out_frames * 2, 0.0);
         self.resampler = Some(resampler);
@@ -52,7 +57,14 @@ impl PreEffect for ResamplerEffect {
 
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
         let Some(resampler) = &mut self.resampler else {
-            return 0;
+            return if self.error.is_some() {
+                0
+            } else {
+                out.clear();
+                out.reserve_exact(input.len());
+                out.extend_from_slice(input);
+                out.len()
+            };
         };
         let channels = self.input_format.channels as usize;
         let chunk_len = self.chunk_len * channels;

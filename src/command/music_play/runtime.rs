@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use std::{io, thread};
 use tracing::{debug, error, info};
 
-pub(super) struct Running {
+pub(super) struct Runtime {
     play_object: Arc<Mutex<PlayObject>>,
     thread_control: ThreadControl,
 }
@@ -56,13 +56,13 @@ struct ThreadControl {
     condvar: Arc<Condvar>,
 }
 
-impl Drop for Running {
+impl Drop for Runtime {
     fn drop(&mut self) {
         _ = self.run_stop_inner();
     }
 }
 
-impl Running {
+impl Runtime {
     ///创建运行时
     pub(super) fn create(play_list: PlayList, mp: &MultiProgress) -> Result<Self, Box<dyn Error>> {
         let mut player = Player::new()?;
@@ -401,13 +401,13 @@ impl PlayObject {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let next_id = &next_content.next_id;
         //临界区处理
-        while player.get_decoder_eof() {
+        while player.get_pre_effect_item_eof() {
             if play_end {
                 //自旋等待
                 thread::sleep(Duration::from_millis(1));
             } else {
                 //缓冲区部分清理
-                player.clear_decoder_eof_buf();
+                player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
                 if let Some(ui_track) = &ui_track {
                     let this_track = this_track
@@ -431,9 +431,9 @@ impl PlayObject {
 
             let mut decoder = loop {
                 let decoder = Decoder::new(
-                    player.ring_buffer().clone(),
+                    player.pre_effect_ring_buffer().clone(),
                     t.track().path(),
-                    player.get_sample_rate(),
+                    player.pre_effect_runtime().clone(),
                 );
                 match decoder {
                     Ok(decoder) => break decoder,

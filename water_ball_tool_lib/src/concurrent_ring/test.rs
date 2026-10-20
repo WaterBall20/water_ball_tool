@@ -28,19 +28,19 @@ impl Drop for DropCounter {
 fn expect_ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,
-        Err(e) => panic!("expected Ok, got Err: {:?}", e),
+        Err(e) => panic!("expected Ok, got Err: {e:?}"),
     }
 }
 
-/// 断言 Result 为 Err，返回错误（等价 unwrap_err）。
-fn expect_err<T: std::fmt::Debug, E>(r: Result<T, E>) -> E {
+/// 断言 Result 为 Err，返回错误（不要求 `T: Debug`——`ConcurrentRing` 未实现 Debug）。
+fn expect_err<T, E>(r: Result<T, E>) -> E {
     match r {
-        Ok(v) => panic!("expected Err, got Ok: {:?}", v),
+        Ok(_) => panic!("expected Err, got Ok"),
         Err(e) => e,
     }
 }
 
-/// 断言 Option 为 Some，返回内部值（等价 unwrap）。
+/// 断言 Option 为 Some，返回内部值。
 fn expect_some<T>(v: Option<T>) -> T {
     match v {
         Some(x) => x,
@@ -48,7 +48,7 @@ fn expect_some<T>(v: Option<T>) -> T {
     }
 }
 
-/// join 一个 JoinHandle，若线程 panic 则在此 panic。
+/// join 一个 JoinHandle。
 fn join_ok<T>(h: thread::JoinHandle<T>) -> T {
     match h.join() {
         Ok(v) => v,
@@ -56,14 +56,10 @@ fn join_ok<T>(h: thread::JoinHandle<T>) -> T {
     }
 }
 
-/// `send` 失败则 panic。
 fn send_ok<T>(tx: &mpsc::Sender<T>, v: T) {
-    if tx.send(v).is_err() {
-        panic!("send failed: receiver dropped");
-    }
+    assert!(tx.send(v).is_ok(), "send failed: receiver dropped");
 }
 
-/// `recv` 失败则 panic。
 fn recv_ok<T>(rx: &mpsc::Receiver<T>) -> T {
     match rx.recv() {
         Ok(v) => v,
@@ -71,7 +67,6 @@ fn recv_ok<T>(rx: &mpsc::Receiver<T>) -> T {
     }
 }
 
-/// `recv_timeout` 失败则 panic。
 fn recv_timeout_ok<T>(rx: &mpsc::Receiver<T>, dur: Duration) -> T {
     match rx.recv_timeout(dur) {
         Ok(v) => v,
@@ -82,14 +77,14 @@ fn recv_timeout_ok<T>(rx: &mpsc::Receiver<T>, dur: Duration) -> T {
 // ==================== 构造与边界 ====================
 
 #[test]
-#[should_panic(expected = "capacity must be non-zero")]
-fn new_zero_capacity_panics() {
-    let _ = ConcurrentRing::<u32>::new_max_capacity(0);
+fn new_zero_capacity_returns_err() {
+    let err = expect_err(ConcurrentRing::<u32>::new_max_capacity(0));
+    assert!(matches!(err.kind, ConcurrentRingErrorKind::MaxCapacityZero));
 }
 
 #[test]
 fn new_capacity_one() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(1);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
     assert_eq!(ring.capacity(), 1);
     assert!(ring.is_empty());
     assert!(!ring.is_full());
@@ -97,7 +92,7 @@ fn new_capacity_one() {
 
 #[test]
 fn capacity_one_alternates() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(1);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
     for i in 0..10 {
         assert!(ring.push(i).is_ok());
         assert!(ring.is_full());
@@ -110,7 +105,7 @@ fn capacity_one_alternates() {
 
 #[test]
 fn push_pop_fifo() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
     assert!(ring.push(2).is_ok());
     assert_eq!(ring.pop(), Some(1));
@@ -120,7 +115,7 @@ fn push_pop_fifo() {
 
 #[test]
 fn push_returns_value_when_full() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     assert!(ring.push(1).is_ok());
     assert!(ring.push(2).is_ok());
     let err = expect_err(ring.push(3));
@@ -129,13 +124,13 @@ fn push_returns_value_when_full() {
 
 #[test]
 fn pop_returns_none_when_empty() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     assert_eq!(ring.pop(), None);
 }
 
 #[test]
 fn push_pop_wraps_many_rounds() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     for round in 0..10u32 {
         for i in 0..4 {
             assert!(ring.push(round * 4 + i).is_ok());
@@ -146,11 +141,11 @@ fn push_pop_wraps_many_rounds() {
     }
 }
 
-// ==================== write / read ====================
+// ==================== write / read 批量 ====================
 
 #[test]
 fn write_read_fifo() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(8);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(8));
     assert_eq!(ring.write(&[1, 2, 3, 4]), 4);
     let mut buf = [0u32; 4];
     assert_eq!(ring.read(&mut buf), 4);
@@ -159,7 +154,7 @@ fn write_read_fifo() {
 
 #[test]
 fn write_partial_when_not_enough_space() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
     assert!(ring.push(2).is_ok());
     assert!(ring.push(3).is_ok());
@@ -171,21 +166,21 @@ fn write_partial_when_not_enough_space() {
 
 #[test]
 fn write_returns_zero_when_full() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     ring.write(&[1, 2]);
     assert_eq!(ring.write(&[99]), 0);
 }
 
 #[test]
 fn write_empty_slice_returns_zero() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert_eq!(ring.write(&[]), 0);
     assert!(ring.is_empty());
 }
 
 #[test]
 fn read_partial_when_out_smaller() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     let mut small = [0u32; 2];
     assert_eq!(ring.read(&mut small), 2);
@@ -196,7 +191,7 @@ fn read_partial_when_out_smaller() {
 
 #[test]
 fn read_returns_zero_when_empty() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let mut buf = [0u32; 4];
     assert_eq!(ring.read(&mut buf), 0);
     assert_eq!(ring.borrow(&mut buf), 0);
@@ -204,7 +199,7 @@ fn read_returns_zero_when_empty() {
 
 #[test]
 fn write_wraps_around() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
     assert!(ring.push(2).is_ok());
     assert_eq!(ring.pop(), Some(1));
@@ -217,7 +212,7 @@ fn write_wraps_around() {
 
 #[test]
 fn read_wraps_around() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     assert_eq!(ring.read(&mut [0u32; 2]), 2);
     ring.write(&[5, 6]);
@@ -230,7 +225,7 @@ fn read_wraps_around() {
 
 #[test]
 fn borrow_does_not_advance_read_pos() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut buf = [0u32; 3];
     assert_eq!(ring.borrow(&mut buf), 3);
@@ -245,7 +240,7 @@ fn borrow_does_not_advance_read_pos() {
 
 #[test]
 fn borrow_wraps_around() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     assert_eq!(ring.read(&mut [0u32; 2]), 2);
     ring.write(&[5, 6]);
@@ -256,7 +251,7 @@ fn borrow_wraps_around() {
 
 #[test]
 fn borrow_partial_when_out_smaller() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     let mut small = [0u32; 2];
     assert_eq!(ring.borrow(&mut small), 2);
@@ -268,7 +263,7 @@ fn borrow_partial_when_out_smaller() {
 
 #[test]
 fn read_and_borrow_consistency() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     for v in 1..=4 {
         assert!(ring.push(v).is_ok());
     }
@@ -291,13 +286,13 @@ fn read_and_borrow_consistency() {
 
 #[test]
 fn write_wait_empty_returns_zero() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert_eq!(ring.write_wait(&[]), 0);
 }
 
 #[test]
 fn write_wait_returns_written_count_with_space() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert_eq!(ring.write_wait(&[1, 2, 3]), 3);
     let mut buf = [0u32; 3];
     assert_eq!(ring.read(&mut buf), 3);
@@ -306,14 +301,14 @@ fn write_wait_returns_written_count_with_space() {
 
 #[test]
 fn write_wait_partial_when_insufficient_space() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     assert_eq!(ring.write_wait(&[10, 20, 30]), 1);
 }
 
 #[test]
 fn write_wait_blocks_then_writes() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(2));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
     ring.write(&[1, 2]);
     assert!(ring.is_full());
     let r = ring.clone();
@@ -330,14 +325,14 @@ fn write_wait_blocks_then_writes() {
 
 #[test]
 fn read_wait_empty_slice_returns_zero() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let mut empty: [u32; 0] = [];
     assert_eq!(ring.read_wait(&mut empty), 0);
 }
 
 #[test]
 fn read_wait_returns_read_count_with_data() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut buf = [0u32; 4];
     assert_eq!(ring.read_wait(&mut buf), 3);
@@ -346,7 +341,7 @@ fn read_wait_returns_read_count_with_data() {
 
 #[test]
 fn read_wait_blocks_then_reads() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(2));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
     let r = ring.clone();
     let reader = thread::spawn(move || {
         let mut buf = [0u32; 2];
@@ -365,13 +360,13 @@ fn read_wait_blocks_then_reads() {
 
 #[test]
 fn write_all_empty_ok() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     assert!(ring.write_all(&[]).is_ok());
 }
 
 #[test]
 fn write_all_writes_everything_when_space() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.write_all(&[1, 2, 3, 4]).is_ok());
     let mut buf = [0u32; 4];
     assert_eq!(ring.read(&mut buf), 4);
@@ -380,7 +375,7 @@ fn write_all_writes_everything_when_space() {
 
 #[test]
 fn write_all_too_large_returns_too_large() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     let err = expect_err(ring.write_all(&[1, 2, 3]));
     assert!(matches!(err.kind, ConcurrentRingErrorKind::TooLarge));
     assert!(ring.is_empty());
@@ -388,7 +383,7 @@ fn write_all_too_large_returns_too_large() {
 
 #[test]
 fn write_all_blocks_until_all_written() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(4));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
     let r = ring.clone();
     let reader = thread::spawn(move || {
         let mut got = Vec::new();
@@ -408,14 +403,14 @@ fn write_all_blocks_until_all_written() {
 
 #[test]
 fn read_exact_empty_ok() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     let mut empty: [u32; 0] = [];
     assert!(ring.read_exact(&mut empty).is_ok());
 }
 
 #[test]
 fn read_exact_reads_everything_when_data() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut buf = [0u32; 3];
     assert!(ring.read_exact(&mut buf).is_ok());
@@ -425,7 +420,7 @@ fn read_exact_reads_everything_when_data() {
 
 #[test]
 fn read_exact_too_large_returns_too_large() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     let mut buf = [0u32; 3];
     let err = expect_err(ring.read_exact(&mut buf));
     assert!(matches!(err.kind, ConcurrentRingErrorKind::TooLarge));
@@ -433,7 +428,7 @@ fn read_exact_too_large_returns_too_large() {
 
 #[test]
 fn read_exact_blocks_until_filled() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(4));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
     ring.write(&[1, 2]);
     let r = ring.clone();
     let writer = thread::spawn(move || {
@@ -450,7 +445,7 @@ fn read_exact_blocks_until_filled() {
 
 #[test]
 fn clear_empties_buffer() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     assert_eq!(ring.len(), 3);
     ring.clear();
@@ -464,7 +459,7 @@ fn clear_empties_buffer() {
 
 #[test]
 fn clear_on_empty_is_noop() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.clear();
     assert!(ring.is_empty());
     assert!(ring.push(1).is_ok());
@@ -474,7 +469,7 @@ fn clear_on_empty_is_noop() {
 #[test]
 fn clear_drops_all_values() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let ring = ConcurrentRing::<DropCounter>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
     assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
     assert!(ring.push(DropCounter::new(2, counter.clone())).is_ok());
     assert!(ring.push(DropCounter::new(3, counter.clone())).is_ok());
@@ -485,7 +480,7 @@ fn clear_drops_all_values() {
 
 #[test]
 fn clear_wakes_blocked_writers() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(2));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
     ring.write(&[1, 2]);
     assert!(ring.is_full());
     let r = ring.clone();
@@ -507,7 +502,7 @@ fn clear_wakes_blocked_writers() {
 fn drop_initialized_values_on_ring_drop() {
     let counter = Arc::new(AtomicUsize::new(0));
     {
-        let ring = ConcurrentRing::<DropCounter>::new_max_capacity(4);
+        let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
         assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
         assert!(ring.push(DropCounter::new(2, counter.clone())).is_ok());
         assert!(ring.push(DropCounter::new(3, counter.clone())).is_ok());
@@ -523,7 +518,7 @@ fn drop_initialized_values_on_ring_drop() {
 fn no_double_drop_after_pop() {
     let counter = Arc::new(AtomicUsize::new(0));
     {
-        let ring = ConcurrentRing::<DropCounter>::new_max_capacity(2);
+        let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(2));
         assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
         let _ = expect_some(ring.pop());
     }
@@ -534,7 +529,7 @@ fn no_double_drop_after_pop() {
 fn empty_ring_drop_no_leak() {
     let counter = Arc::new(AtomicUsize::new(0));
     {
-        let _ring = ConcurrentRing::<DropCounter>::new_max_capacity(4);
+        let _ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
     }
     assert_eq!(counter.load(Ordering::SeqCst), 0);
 }
@@ -542,7 +537,7 @@ fn empty_ring_drop_no_leak() {
 #[test]
 fn repeated_push_pop_no_leak() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let ring = ConcurrentRing::<DropCounter>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(2));
     for _ in 0..100 {
         assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
         let v = expect_some(ring.pop());
@@ -555,7 +550,7 @@ fn repeated_push_pop_no_leak() {
 
 #[test]
 fn concurrent_mpsc_push_pop() {
-    let ring = Arc::new(ConcurrentRing::<usize>::new_max_capacity(64));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<usize>::new_max_capacity(64)));
     let n_producers = 4;
     let per_producer = 500;
     let total = n_producers * per_producer;
@@ -601,7 +596,7 @@ fn concurrent_mpsc_push_pop() {
 
 #[test]
 fn concurrent_write_read_roundtrip() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(32));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(32)));
     let rounds = 200;
 
     let writer = {
@@ -642,7 +637,7 @@ fn concurrent_write_read_roundtrip() {
 
 #[test]
 fn concurrent_borrow_with_writer_and_reader() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(16));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(16)));
     let total = 2000;
 
     let writer = {
@@ -695,7 +690,7 @@ fn concurrent_borrow_with_writer_and_reader() {
 
 #[test]
 fn locks_not_poisoned_after_concurrent_use() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(8));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
     let handles: Vec<_> = (0..4)
         .map(|t| {
             let r = ring.clone();
@@ -718,7 +713,7 @@ fn locks_not_poisoned_after_concurrent_use() {
 
 #[test]
 fn concurrent_write_wait_read_wait() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(8));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
     let total = 1000;
 
     let writers: Vec<_> = (0..2)
@@ -762,7 +757,7 @@ fn concurrent_write_wait_read_wait() {
 
 #[test]
 fn lock_guard_basic_size() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
     assert!(ring.push(2).is_ok());
     assert!(ring.push(3).is_ok());
@@ -775,7 +770,7 @@ fn lock_guard_basic_size() {
 
 #[test]
 fn lock_guard_empty_and_full() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     {
         let g = ring.lock();
         assert!(g.is_empty());
@@ -794,7 +789,7 @@ fn lock_guard_empty_and_full() {
 
 #[test]
 fn lock_guard_index() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[10, 20, 30]);
     let mut g = ring.lock();
     assert_eq!(g[0], 10);
@@ -815,7 +810,7 @@ fn lock_guard_index() {
 #[test]
 #[should_panic(expected = "out of bounds")]
 fn lock_guard_index_out_of_bounds_panics() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(2);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     assert!(ring.push(1).is_ok());
     let g = ring.lock();
     let _ = g[5];
@@ -823,7 +818,7 @@ fn lock_guard_index_out_of_bounds_panics() {
 
 #[test]
 fn lock_guard_front_back() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     {
         let g = ring.lock();
         assert_eq!(g.front(), None);
@@ -850,7 +845,7 @@ fn lock_guard_front_back() {
 
 #[test]
 fn lock_guard_push_pop_back() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(3);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(3));
     let mut g = ring.lock();
     assert!(g.push_back(1).is_ok());
     assert!(g.push_back(2).is_ok());
@@ -864,7 +859,7 @@ fn lock_guard_push_pop_back() {
 
 #[test]
 fn lock_guard_push_pop_front() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(3);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(3));
     let mut g = ring.lock();
     assert!(g.push_front(3).is_ok());
     assert!(g.push_front(2).is_ok());
@@ -881,7 +876,7 @@ fn lock_guard_push_pop_front() {
 
 #[test]
 fn lock_guard_push_front_wraps() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut g = ring.lock();
     assert!(g.push_front(0).is_ok());
@@ -893,7 +888,7 @@ fn lock_guard_push_front_wraps() {
 
 #[test]
 fn lock_guard_pop_back_after_wrap() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     ring.pop();
     assert!(ring.push(5).is_ok());
@@ -911,7 +906,7 @@ fn lock_guard_pop_back_after_wrap() {
 
 #[test]
 fn lock_guard_mixed_operations() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let mut g = ring.lock();
     assert!(g.push_back(1).is_ok());
     assert!(g.push_back(2).is_ok());
@@ -928,7 +923,7 @@ fn lock_guard_mixed_operations() {
 #[test]
 fn lock_guard_clear() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let ring = ConcurrentRing::<DropCounter>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
     assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
     assert!(ring.push(DropCounter::new(2, counter.clone())).is_ok());
     assert!(ring.push(DropCounter::new(3, counter.clone())).is_ok());
@@ -943,7 +938,7 @@ fn lock_guard_clear() {
 
 #[test]
 fn lock_guard_clear_then_reuse() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     {
         let mut g = ring.lock();
@@ -961,7 +956,7 @@ fn lock_guard_clear_then_reuse() {
 
 #[test]
 fn lock_guard_as_slices_no_wrap() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let g = ring.lock();
     let (a, b) = g.as_slices();
@@ -971,7 +966,7 @@ fn lock_guard_as_slices_no_wrap() {
 
 #[test]
 fn lock_guard_as_slices_wraps() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     ring.pop();
     assert!(ring.push(5).is_ok());
@@ -983,7 +978,7 @@ fn lock_guard_as_slices_wraps() {
 
 #[test]
 fn lock_guard_as_slices_empty() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let g = ring.lock();
     let (a, b) = g.as_slices();
     assert!(a.is_empty());
@@ -992,7 +987,7 @@ fn lock_guard_as_slices_empty() {
 
 #[test]
 fn lock_guard_as_mut_slices() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3, 4]);
     ring.pop();
     assert!(ring.push(5).is_ok());
@@ -1013,7 +1008,7 @@ fn lock_guard_as_mut_slices() {
 
 #[test]
 fn lock_guard_iter() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[10, 20, 30, 40]);
     ring.pop();
     assert!(ring.push(50).is_ok());
@@ -1026,7 +1021,7 @@ fn lock_guard_iter() {
 
 #[test]
 fn lock_guard_iter_empty() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let g = ring.lock();
     assert_eq!(g.iter().count(), 0);
     assert_eq!(g.iter().len(), 0);
@@ -1034,7 +1029,7 @@ fn lock_guard_iter_empty() {
 
 #[test]
 fn lock_guard_iter_mut() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     {
         let mut g = ring.lock();
@@ -1049,7 +1044,7 @@ fn lock_guard_iter_mut() {
 
 #[test]
 fn lock_guard_into_iterator() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     {
         let g = ring.lock();
@@ -1072,7 +1067,7 @@ fn lock_guard_into_iterator() {
 
 #[test]
 fn lock_guard_does_not_consume() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     {
         let g = ring.lock();
@@ -1087,7 +1082,7 @@ fn lock_guard_does_not_consume() {
 
 #[test]
 fn lock_blocks_other_threads() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(4));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
     assert!(ring.push(1).is_ok());
 
     let (started_tx, started_rx) = mpsc::channel();
@@ -1116,7 +1111,7 @@ fn lock_blocks_other_threads() {
 
 #[test]
 fn guard_drop_restores_access() {
-    let ring = ConcurrentRing::<u32>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
     {
         let _g = ring.lock();
@@ -1129,7 +1124,7 @@ fn guard_drop_restores_access() {
 
 #[test]
 fn lock_guard_does_not_leak_when_panicking() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(4));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
     let r = ring.clone();
     let t = thread::spawn(move || {
         let mut g = r.lock();
@@ -1142,7 +1137,7 @@ fn lock_guard_does_not_leak_when_panicking() {
 
 #[test]
 fn lock_guard_concurrent_readers_and_writer_are_serialized() {
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(8));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
     let total = 2000;
 
     let writer = {
@@ -1185,7 +1180,7 @@ fn lock_guard_concurrent_readers_and_writer_are_serialized() {
 #[test]
 fn lock_guard_drop_counter_through_clear() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let ring = ConcurrentRing::<DropCounter>::new_max_capacity(4);
+    let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
     for i in 0..3 {
         assert!(ring.push(DropCounter::new(i, counter.clone())).is_ok());
     }
@@ -1205,31 +1200,474 @@ fn lock_guard_drop_counter_through_clear() {
 
 #[test]
 fn poisoned_mutex_is_recovered() {
-    // 故意在一个锁内部 panic，触发毒化；
-    // 通过 lock_recover 应能在后续访问时解毒，不 panic。
-    let ring = Arc::new(ConcurrentRing::<u32>::new_max_capacity(4));
+    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
     let r = ring.clone();
     let t = thread::spawn(move || {
         let mut g = r.lock();
         assert!(g.push_back(1).is_ok());
-        // 模拟临界区 panic：Guard 在此 drop，Mutex/RwLock 被毒化。
         panic!("intentional panic while holding lock");
     });
-    // 等待线程 panic 完成（其 drop 让锁毒化）。
     if t.join().is_ok() {
         panic!("expected thread to panic");
     }
 
-    // 主线程正常获取 Guard——helper 内部 clear_poison + into_inner，
-    // 若未解毒则 lock_recover 返回的也是毒化锁，不会 panic，
-    // 但重复访问依然工作；且我们验证了后续连续访问也不 panic。
+    // helper 内部 clear_poison，后续访问不应 panic。
     {
         let g = ring.lock();
         assert_eq!(g.len(), 1);
         assert_eq!(g[0], 1);
     }
-    // 再次访问，验证 poisoning 标志已被清除（后续 lock 直接 Ok）。
     assert!(ring.push(2).is_ok());
     assert_eq!(ring.pop(), Some(1));
     assert_eq!(ring.pop(), Some(2));
+}
+
+// ==================== 动态扩容（不定长模式） ====================
+
+#[test]
+fn new_starts_with_zero_capacity() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert_eq!(ring.capacity(), 0);
+    assert_eq!(ring.max_capacity(), None);
+    assert_eq!(ring.len(), 0);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn push_grows_from_zero() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert_eq!(ring.capacity(), 0);
+    assert!(ring.push(1).is_ok());
+    assert!(ring.capacity() >= 1);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring.pop(), Some(1));
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn repeated_push_keeps_data_intact() {
+    // 从 0 容量开始，连续 push 1000 次，跨越多次扩容，验证 FIFO 完整性。
+    let ring = ConcurrentRing::<u32>::new();
+    let n = 1000u32;
+    for i in 0..n {
+        assert!(ring.push(i).is_ok(), "push {} failed", i);
+    }
+    assert!(ring.capacity() >= n as usize);
+    assert_eq!(ring.len(), n as usize);
+    for i in 0..n {
+        assert_eq!(ring.pop(), Some(i), "FIFO order broken at {}", i);
+    }
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn repeated_push_with_interleaved_pops() {
+    // 边 push 边 pop，跨越多次扩容，验证数据完整且顺序正确。
+    let ring = ConcurrentRing::<u32>::new();
+    let n = 500u32;
+    let mut popped = 0u32;
+    for i in 0..n {
+        assert!(ring.push(i).is_ok());
+        if i % 3 == 2 {
+            assert_eq!(ring.pop(), Some(popped));
+            popped += 1;
+        }
+    }
+    let remaining = n - popped;
+    assert_eq!(ring.len(), remaining as usize);
+    for i in 0..remaining {
+        assert_eq!(ring.pop(), Some(popped + i));
+    }
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn write_grows_and_data_intact() {
+    let ring = ConcurrentRing::<u32>::new();
+    let data: Vec<u32> = (0..500).collect();
+    let mut written = 0;
+    while written < data.len() {
+        let n = ring.write(&data[written..]);
+        assert!(n > 0, "write returned 0 in indefinite mode");
+        written += n;
+    }
+    assert!(ring.capacity() >= data.len());
+
+    let mut out = vec![0u32; data.len()];
+    let mut read = 0;
+    while read < out.len() {
+        let n = ring.read(&mut out[read..]);
+        assert!(n > 0);
+        read += n;
+    }
+    assert_eq!(out, data);
+}
+
+#[test]
+fn push_wait_grows_automatically() {
+    let ring = ConcurrentRing::<u32>::new();
+    for i in 0..100 {
+        ring.push_wait(i);
+    }
+    assert!(ring.capacity() >= 100);
+    assert_eq!(ring.len(), 100);
+    for i in 0..100 {
+        assert_eq!(ring.pop(), Some(i));
+    }
+}
+
+#[test]
+fn write_wait_grows_automatically() {
+    let ring = ConcurrentRing::<u32>::new();
+    let data: Vec<u32> = (0..100).collect();
+    let mut written = 0;
+    while written < data.len() {
+        let n = ring.write_wait(&data[written..]);
+        assert!(n > 0, "write_wait returned 0");
+        written += n;
+    }
+    assert!(ring.capacity() >= 100);
+
+    let mut out = vec![0u32; 100];
+    let mut read = 0;
+    while read < out.len() {
+        let n = ring.read_wait(&mut out[read..]);
+        assert!(n > 0);
+        read += n;
+    }
+    assert_eq!(out, data);
+}
+
+#[test]
+fn write_all_grows_automatically() {
+    let ring = ConcurrentRing::<u32>::new();
+    let data: Vec<u32> = (0..1000).collect();
+    assert!(ring.write_all(&data).is_ok());
+    assert!(ring.capacity() >= 1000);
+    let mut out = vec![0u32; 1000];
+    assert_eq!(ring.read(&mut out), 1000);
+    assert_eq!(out, data);
+}
+
+#[test]
+fn reserve_grows_explicitly() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert!(ring.reserve(200).is_ok());
+    assert!(ring.capacity() >= 200);
+    // 之后的 200 次 push 都在快路径，不再触发扩容
+    for i in 0..200 {
+        assert!(ring.push(i).is_ok());
+    }
+    for i in 0..200 {
+        assert_eq!(ring.pop(), Some(i));
+    }
+}
+
+#[test]
+fn reserve_multiple_times() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert!(ring.reserve(10).is_ok());
+    assert!(ring.capacity() >= 10);
+    assert!(ring.reserve(20).is_ok());
+    assert!(ring.capacity() >= 20);
+    assert!(ring.reserve(100).is_ok());
+    assert!(ring.capacity() >= 100);
+}
+
+#[test]
+fn enable_max_capacity_full_lifecycle() {
+    let ring = ConcurrentRing::<u32>::new();
+
+    // 填入 5 个
+    for i in 0..5 {
+        assert!(ring.push(i).is_ok());
+    }
+    assert_eq!(ring.len(), 5);
+
+    // 上限 3 < len 5：参数错误
+    let err = expect_err(ring.enable_max_capacity(3));
+    assert!(matches!(err.kind, ConcurrentRingErrorKind::TooLarge));
+
+    // 上限 10：成功并自动扩容到 ≥10
+    assert!(ring.enable_max_capacity(10).is_ok());
+    assert_eq!(ring.max_capacity(), Some(10));
+    assert!(ring.capacity() >= 10);
+
+    // 再写 5 个到满
+    for i in 5..10 {
+        assert!(ring.push(i).is_ok());
+    }
+    assert!(ring.is_full());
+
+    // 满后 push：Full
+    let err = expect_err(ring.push(10));
+    assert!(matches!(err.kind, ConcurrentRingErrorKind::Full(10)));
+
+    // 关闭上限
+    ring.disable_max_capacity();
+    assert_eq!(ring.max_capacity(), None);
+
+    // 现在可以再扩
+    assert!(ring.push(10).is_ok());
+    assert_eq!(ring.len(), 11);
+    for i in 0..11 {
+        assert_eq!(ring.pop(), Some(i));
+    }
+}
+
+#[test]
+fn guard_push_back_grows_in_indefinite_mode() {
+    let ring = ConcurrentRing::<u32>::new();
+    {
+        let mut g = ring.lock();
+        for i in 0..100 {
+            assert!(g.push_back(i).is_ok());
+        }
+        assert_eq!(g.len(), 100);
+        // 迭代验证数据顺序
+        let v: Vec<u32> = g.iter().copied().collect();
+        assert_eq!(v, (0..100).collect::<Vec<_>>());
+    }
+    // 取出再验证
+    for i in 0..100 {
+        assert_eq!(ring.pop(), Some(i));
+    }
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn guard_push_front_grows_in_indefinite_mode() {
+    let ring = ConcurrentRing::<u32>::new();
+    {
+        let mut g = ring.lock();
+        assert!(g.push_back(100).is_ok());
+        assert!(g.push_back(101).is_ok());
+        assert!(g.push_back(102).is_ok());
+        // 依次从头部插入 49, 48, ..., 40，跨越多次扩容
+        for i in 0..10 {
+            assert!(g.push_front(49 - i).is_ok());
+        }
+        assert_eq!(g.len(), 13);
+        let v: Vec<u32> = g.iter().copied().collect();
+        let expected: Vec<u32> = (40u32..50).chain(100..=102).collect();
+        assert_eq!(v, expected);
+    }
+    // 通过 read 再验证
+    let mut out = [0u32; 13];
+    assert_eq!(ring.read(&mut out), 13);
+    let expected: Vec<u32> = (40u32..50).chain(100..=102).collect();
+    assert_eq!(out.to_vec(), expected);
+}
+
+#[test]
+fn drop_counter_during_resize() {
+    // 扩容搬移不 drop 任何元素，pop 时 drop 一次。
+    let counter = Arc::new(AtomicUsize::new(0));
+    let ring = ConcurrentRing::<DropCounter>::new();
+
+    for i in 0..100 {
+        assert!(ring.push(DropCounter::new(i, counter.clone())).is_ok());
+    }
+    // 多次扩容后，100 个元素都仍在 ring 内，无一被 drop
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    assert_eq!(ring.len(), 100);
+
+    for _ in 0..100 {
+        let _v = ring.pop();
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 100);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn drop_counter_through_clear_in_indefinite_mode() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let ring = ConcurrentRing::<DropCounter>::new();
+    for i in 0..50 {
+        assert!(ring.push(DropCounter::new(i, counter.clone())).is_ok());
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    ring.clear();
+    assert_eq!(counter.load(Ordering::SeqCst), 50);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn try_push_grows_in_indefinite_mode() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert!(ring.try_push(1).is_ok());
+    assert!(ring.try_push(2).is_ok());
+    assert!(ring.try_push(3).is_ok());
+    assert_eq!(ring.pop(), Some(1));
+    assert_eq!(ring.pop(), Some(2));
+    assert_eq!(ring.pop(), Some(3));
+}
+
+#[test]
+fn try_write_grows_in_indefinite_mode() {
+    let ring = ConcurrentRing::<u32>::new();
+    let data = [10u32, 20, 30, 40, 50];
+    let n = expect_ok(ring.try_write(&data));
+    assert_eq!(n, 5);
+    assert!(ring.capacity() >= 5);
+    let mut out = [0u32; 5];
+    assert_eq!(ring.read(&mut out), 5);
+    assert_eq!(out, data);
+}
+
+// ---------- 并发扩容 ----------
+
+#[test]
+fn concurrent_push_to_indefinite_mode() {
+    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let n_threads = 4;
+    let per_thread = 200;
+    let total = n_threads * per_thread;
+
+    let handles: Vec<_> = (0..n_threads)
+        .map(|t| {
+            let r = ring.clone();
+            thread::spawn(move || {
+                for i in 0..per_thread {
+                    let v = t * per_thread + i;
+                    loop {
+                        match r.push(v) {
+                            Ok(()) => break,
+                            Err(_) => spin_loop(),
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        join_ok(h);
+    }
+
+    assert_eq!(ring.len(), total);
+
+    // 收集所有元素，验证完整（排序后与 0..total 对比）
+    let mut got: Vec<usize> = Vec::with_capacity(total);
+    while let Some(v) = ring.pop() {
+        got.push(v);
+    }
+    got.sort();
+    assert_eq!(got, (0..total).collect::<Vec<_>>());
+}
+
+#[test]
+fn concurrent_write_to_indefinite_mode() {
+    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let n_threads = 4;
+    let per_thread = 200;
+    let total = n_threads * per_thread;
+
+    let handles: Vec<_> = (0..n_threads)
+        .map(|t| {
+            let r = ring.clone();
+            thread::spawn(move || {
+                let mut written = 0;
+                while written < per_thread {
+                    let batch: Vec<usize> =
+                        (written..per_thread).map(|i| t * per_thread + i).collect();
+                    let n = r.write(&batch);
+                    assert!(n > 0, "write returned 0 in indefinite mode");
+                    written += n;
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        join_ok(h);
+    }
+
+    assert_eq!(ring.len(), total);
+    let mut got: Vec<usize> = Vec::with_capacity(total);
+    while let Some(v) = ring.pop() {
+        got.push(v);
+    }
+    got.sort();
+    assert_eq!(got, (0..total).collect::<Vec<_>>());
+}
+
+#[test]
+fn concurrent_producer_consumer_indefinite() {
+    // 生产者持续 push（触发扩容），消费者持续 pop，验证数据完整。
+    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let n_producers = 2;
+    let per_producer = 300;
+    let total = n_producers * per_producer;
+
+    let producers: Vec<_> = (0..n_producers)
+        .map(|t| {
+            let r = ring.clone();
+            thread::spawn(move || {
+                for i in 0..per_producer {
+                    let v = t * per_producer + i;
+                    loop {
+                        match r.push(v) {
+                            Ok(()) => break,
+                            Err(_) => spin_loop(),
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let consumer = {
+        let r = ring.clone();
+        thread::spawn(move || {
+            let mut got = Vec::with_capacity(total);
+            while got.len() < total {
+                if let Some(v) = r.pop() {
+                    got.push(v);
+                } else {
+                    spin_loop();
+                }
+            }
+            got
+        })
+    };
+
+    for p in producers {
+        join_ok(p);
+    }
+    let mut got = join_ok(consumer);
+    got.sort();
+    assert_eq!(got, (0..total).collect::<Vec<_>>());
+}
+
+#[test]
+fn concurrent_push_wait_to_indefinite_mode() {
+    // push_wait 在不定长模式下自动扩容，多线程并发写入全部数据。
+    let ring = Arc::new(ConcurrentRing::<u32>::new());
+    let n_threads = 3;
+    let per_thread = 150;
+    let total = n_threads * per_thread;
+
+    let handles: Vec<_> = (0..n_threads)
+        .map(|t| {
+            let r = ring.clone();
+            thread::spawn(move || {
+                for i in 0..per_thread {
+                    r.push_wait((t * per_thread + i) as u32);
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        join_ok(h);
+    }
+
+    assert_eq!(ring.len(), total);
+    let mut got: Vec<u32> = Vec::with_capacity(total);
+    while let Some(v) = ring.pop() {
+        got.push(v);
+    }
+    got.sort();
+    assert_eq!(got, (0..total as u32).collect::<Vec<_>>());
 }

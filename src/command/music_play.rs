@@ -1,5 +1,5 @@
 use crate::command::music_play::play_list::{PlayList, Track};
-use crate::command::music_play::running::Running;
+use crate::command::music_play::runtime::Runtime;
 use crate::multi_progress_init;
 use clap::{Args, ValueEnum};
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -12,7 +12,7 @@ mod decoder;
 pub mod effect;
 mod play_list;
 mod player;
-mod running;
+mod runtime;
 pub mod tui;
 
 #[derive(Args, Debug)]
@@ -58,11 +58,11 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut running = Running::create(play_list, &mp)?;
-    running
+    let mut runtime = Runtime::create(play_list, &mp)?;
+    runtime
         .next()
         .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));
-    running.set_volume(volume);
+    runtime.set_volume(volume);
 
     //交互处理
     loop {
@@ -71,26 +71,26 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
         match input.trim() {
             "next" | "n" => {
                 debug!("开始执行换曲");
-                running.next().unwrap_or_else(|e| {
-                    error!("换曲发生错误");
+                runtime.next().unwrap_or_else(|e| {
+                    error!("换曲发生错误: err:{e}");
                 });
             }
             "Play" | "P" => {
                 debug!("播放");
-                running.play().unwrap_or_else(|e| {
+                runtime.play().unwrap_or_else(|e| {
                     error!("播放发生错误：err: {e}");
                 });
             }
             "pause" | "p" => {
                 debug!("暂停");
-                running.pause().unwrap_or_else(|e| {
+                runtime.pause().unwrap_or_else(|e| {
                     error!("暂停发生错误: err: {e}");
                 });
             }
             "exit" => {
                 debug!("退出");
-                running.run_stop().unwrap_or_else(|e| {
-                    error!("停止播放发生错误");
+                runtime.run_stop().unwrap_or_else(|e| {
+                    error!("停止播放发生错误: err: {e:?}");
                 });
                 break;
             }

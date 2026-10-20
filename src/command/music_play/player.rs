@@ -1,5 +1,8 @@
-use crate::command::music_play::decoder::{
-    Decoder, DecoderEventDirectSink, DecoderEventSink, DecoderEventType, DecoderResult,
+use crate::command::music_play::decoder::{Decoder, DecoderResult};
+use crate::command::music_play::effect::resampler::ResamplerEffect;
+use crate::command::music_play::effect::runtime::{
+    AudioData, PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventSink,
+    PreEffectRuntimeEventType,
 };
 use crate::command::music_play::effect::{
     AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
@@ -26,11 +29,13 @@ pub(super) struct Player {
 
 #[derive(Clone)]
 struct SoundEngine {
-    ring_buffer: Arc<ConcurrentRing<f32>>,
+    pre_effect_ring_buf: Arc<ConcurrentRing<AudioData>>,
+    audio_ring_buffer: Arc<ConcurrentRing<f32>>,
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
     effect_chain: Arc<Mutex<PostEffectChain>>,
+    pre_effect_runtime: PreEffectRuntime,
 }
 
 #[derive(Clone)]
@@ -43,8 +48,8 @@ struct Content {
 /// 事件控制
 #[derive(Clone)]
 struct EventContent {
-    decoder_eof: Arc<AtomicBool>,
-    decoder_eof_pos: Arc<AtomicUsize>,
+    pre_effect_item_eof: Arc<AtomicBool>,
+    pre_effect_item_eof_pos: Arc<AtomicUsize>,
     list: Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>,
 }
 
@@ -52,7 +57,7 @@ impl Player {
     fn create_stream(
         device: &Device,
         config: StreamConfig,
-        mut ring_buf: Arc<ConcurrentRing<f32>>,
+        ring_buf: Arc<ConcurrentRing<f32>>,
         content: Content,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
@@ -70,7 +75,10 @@ impl Player {
                     data.fill(0.0);
                     return;
                 }
-                let len = ring_buf.read(data);
+                let Ok(len) = ring_buf.try_read(data) else {
+                    data.fill(0.0);
+                    return;
+                };
 
                 //效果处理
                 if let Ok(mut effect_chain) = effect_chain.try_lock() {
@@ -101,19 +109,19 @@ impl Player {
                 played_samples.fetch_add(len as u64, Ordering::Relaxed);
                 data[len..].fill(0.0);
                 //检查解码是否EOF
-                let decoder_eof = &event_content.decoder_eof;
-                let decoder_eof_pos = &event_content.decoder_eof_pos;
+                let pre_effect_item_eof = &event_content.pre_effect_item_eof;
+                let pre_effect_item_eof_pos = &event_content.pre_effect_item_eof_pos;
 
-                if decoder_eof.load(Ordering::Relaxed) {
+                if pre_effect_item_eof.load(Ordering::Relaxed) {
                     //安全减法
-                    if len > decoder_eof_pos.load(Ordering::Acquire) {
-                        decoder_eof_pos.store(0, Ordering::Relaxed);
+                    if len > pre_effect_item_eof_pos.load(Ordering::Acquire) {
+                        pre_effect_item_eof_pos.store(0, Ordering::Relaxed);
                     } else {
-                        decoder_eof_pos.fetch_sub(len, Ordering::Relaxed);
+                        pre_effect_item_eof_pos.fetch_sub(len, Ordering::Relaxed);
                     }
-                    if decoder_eof_pos.load(Ordering::Acquire) == 0 {
+                    if pre_effect_item_eof_pos.load(Ordering::Acquire) == 0 {
                         //触发事件和重置
-                        decoder_eof.store(false, Ordering::Relaxed);
+                        pre_effect_item_eof.store(false, Ordering::Relaxed);
                         played_samples.store(0, Ordering::Relaxed);
                         Self::emit(
                             PlayerEvent {
@@ -136,20 +144,6 @@ impl Player {
             sink.emit(event.clone());
         }
     }
-
-    fn add_decoder_event_inner(&self, decoder: &mut Decoder) {
-        let decoder_eof_pos = self.event_content.decoder_eof_pos.clone();
-        let decoder_eof = self.event_content.decoder_eof.clone();
-        let ring_buf = self.sound_engine.ring_buffer.clone();
-        decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
-            if let Ok(e) = e.result()
-                && let DecoderEventType::Eof = e
-            {
-                decoder_eof_pos.store(ring_buf.len(), Ordering::Relaxed);
-                decoder_eof.store(true, Ordering::Relaxed);
-            }
-        })));
-    }
 }
 impl Player {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -162,22 +156,51 @@ impl Player {
         let sample_rate = config.sample_rate();
 
         let stream_config = Arc::new(config.config());
+
         // 在你的播放器初始化阶段
-        let ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
+        //效果缓冲区
+        let pre_effect_ring_buf = Arc::new(ConcurrentRing::new_max_capacity(10)?);
+        //声音缓冲区
+        let audio_ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
             sample_rate as usize * channels as usize * 5,
-        ));
+        )?);
+        //效果运行时
+        let mut pre_effect_runtime =
+            PreEffectRuntime::create(pre_effect_ring_buf.clone(), audio_ring_buffer.clone());
+        pre_effect_runtime.add_effect(ResamplerEffect::new(AudioFormat::new(
+            channels,
+            sample_rate,
+        )))?;
+
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let played_samples = Arc::new(AtomicU64::new(0));
         let is_playing = Arc::new(AtomicBool::new(false));
 
-        let decoder_eof = Arc::new(AtomicBool::new(false));
-        let decoder_eof_pos = Arc::new(AtomicUsize::new(0));
+        let pre_effect_item_eof = Arc::new(AtomicBool::new(false));
+        let pre_effect_item_eof_pos = Arc::new(AtomicUsize::new(0));
         let list = Arc::new(Mutex::new(Vec::new()));
 
+        {
+            let pre_effect_item_eof = pre_effect_item_eof.clone();
+            let pre_effect_item_eof_pos = pre_effect_item_eof_pos.clone();
+            let audio_ring_buffer = audio_ring_buffer.clone();
+            pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(
+                move |e| {
+                    if let Ok(e) = e.result()
+                        && let PreEffectRuntimeEventType::Eof = e
+                    {
+                        pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Relaxed);
+                        pre_effect_item_eof.store(true, Ordering::Relaxed);
+                    }
+                },
+            )));
+            pre_effect_runtime.run();
+        }
+
         let event_content = EventContent {
-            decoder_eof,
-            decoder_eof_pos,
+            pre_effect_item_eof,
+            pre_effect_item_eof_pos,
             list,
         };
 
@@ -200,7 +223,7 @@ impl Player {
         let stream = Arc::new(Self::create_stream(
             &device,
             *stream_config,
-            ring_buffer.clone(),
+            audio_ring_buffer.clone(),
             content.clone(),
             played_samples.clone(),
             event_content.clone(),
@@ -241,11 +264,13 @@ impl Player {
 
         Ok(Self {
             sound_engine: SoundEngine {
-                ring_buffer,
+                pre_effect_ring_buf,
+                audio_ring_buffer,
                 decoder,
                 stream_config,
                 stream,
                 effect_chain,
+                pre_effect_runtime,
             },
             content,
             played_samples,
@@ -302,10 +327,17 @@ impl Player {
         Ok(())
     }
 
-    pub fn ring_buffer(&self) -> &Arc<ConcurrentRing<f32>> {
-        &self.sound_engine.ring_buffer
+    pub fn audio_ring_buffer(&self) -> &Arc<ConcurrentRing<f32>> {
+        &self.sound_engine.audio_ring_buffer
     }
 
+    pub fn pre_effect_ring_buffer(&self) -> &Arc<ConcurrentRing<AudioData>> {
+        &self.sound_engine.pre_effect_ring_buf
+    }
+
+    pub fn pre_effect_runtime(&self) -> &PreEffectRuntime {
+        &self.sound_engine.pre_effect_runtime
+    }
     pub fn stop(mut self) -> DecoderResult<()> {
         self.try_stop()
     }
@@ -320,6 +352,9 @@ impl Player {
         {
             decoder.stop()?;
         }
+        if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
+            error!("stop pre_effect runtime error: {e:?}");
+        };
         Ok(())
     }
 
@@ -333,7 +368,10 @@ impl Player {
         if let Some(decoder) = decoder_lock.take() {
             decoder.stop()?;
         }
-        self.add_decoder_event_inner(&mut decoder);
+        self.sound_engine
+            .pre_effect_runtime
+            .reset(*decoder.decoder_format());
+        self.sound_engine.audio_ring_buffer.clear();
         decoder.run()?;
         decoder_lock.replace(decoder);
         self.played_samples.store(0, Ordering::Relaxed);
@@ -348,7 +386,9 @@ impl Player {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         decoder_lock.take();
-        self.add_decoder_event_inner(&mut decoder);
+        self.sound_engine
+            .pre_effect_runtime
+            .reset(*decoder.decoder_format());
         decoder.run()?;
         decoder_lock.replace(decoder);
         Ok(())
@@ -371,24 +411,33 @@ impl Player {
         self.sound_engine.stream_config.sample_rate
     }
 
-    pub fn get_decoder_eof(&self) -> bool {
-        self.event_content.decoder_eof.load(Ordering::Acquire)
+    pub fn get_pre_effect_item_eof(&self) -> bool {
+        self.event_content
+            .pre_effect_item_eof
+            .load(Ordering::Acquire)
     }
 
     /// 清理解码结束剩余在缓冲区的数据并重置
-    pub fn clear_decoder_eof_buf(&self) {
-        if self.get_decoder_eof() && self.event_content.decoder_eof_pos.load(Ordering::Acquire) != 0
+    pub fn clear_pre_effect_item_eof_buf(&self) {
+        if self.get_pre_effect_item_eof()
+            && self
+                .event_content
+                .pre_effect_item_eof_pos
+                .load(Ordering::Acquire)
+                != 0
         {
-            let mut ring_buf = self.sound_engine.ring_buffer.lock();
+            self.pre_effect_ring_buffer().clear();
+            self.pre_effect_ring_buffer().push_wait(AudioData::None);
+            let mut ring_buf = self.sound_engine.audio_ring_buffer.lock();
             let remove_len = ring_buf.len();
             for _ in 0..remove_len {
                 _ = ring_buf.pop_front();
             }
             self.event_content
-                .decoder_eof
+                .pre_effect_item_eof
                 .store(false, Ordering::Release);
             self.event_content
-                .decoder_eof_pos
+                .pre_effect_item_eof_pos
                 .store(0, Ordering::Release);
         }
     }

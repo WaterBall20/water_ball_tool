@@ -3,10 +3,11 @@ use std::time::Duration;
 
 pub mod fade;
 pub mod resampler;
+pub mod runtime;
 #[cfg(test)]
 pub mod test;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct AudioFormat {
     channels: u16,
     sample_rate: u32,
@@ -190,8 +191,10 @@ pub trait PreEffect: Send + 'static {
     /// 允许产出 0 帧（内部缓冲未凑够）或多帧（上采样）。
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize;
 
-    /// 排空内部延迟（重采样器尾部、FIR 缓冲），追加到 out
-    fn flush(&mut self, out: &mut Vec<f32>) {}
+    /// 触发EOF
+    fn input_eof(&mut self) {}
+    /// 触发None
+    fn input_none(&mut self) {}
 
     /// 重置
     fn reset(&mut self, input_format: AudioFormat);
@@ -219,11 +222,11 @@ pub struct PreEffectChain {
 }
 
 impl PreEffectChain {
-    pub fn new(input_format: AudioFormat) -> Self {
+    pub fn new() -> Self {
         Self {
             effects: Vec::new(),
-            input_formats: vec![input_format],
-            output_format: input_format,
+            input_formats: vec![AudioFormat::default()],
+            output_format: AudioFormat::default(),
         }
     }
 
@@ -250,8 +253,12 @@ impl PreEffectChain {
     }
 
     pub fn process(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
+        //效果器不存在就复制数据
         if self.effects.is_empty() {
-            return 0;
+            output.clear();
+            output.reserve_exact(input.len());
+            output.extend_from_slice(input);
+            return input.len();
         }
         let mut input_temp_buf = input.to_vec();
         let mut output_temp_buf = Vec::with_capacity(input.len().max(output.len()));
@@ -277,5 +284,17 @@ impl PreEffectChain {
             self.input_formats[index + 1] = input_format;
         }
         self.output_format = input_format;
+    }
+
+    pub fn input_eof(&mut self) {
+        for effect in self.effects.iter_mut() {
+            effect.input_eof();
+        }
+    }
+
+    pub fn input_none(&mut self) {
+        for effect in self.effects.iter_mut() {
+            effect.input_none();
+        }
     }
 }
