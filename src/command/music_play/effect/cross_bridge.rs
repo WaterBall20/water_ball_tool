@@ -105,7 +105,7 @@ impl CrossBridge {
             return;
         }
 
-        let sample_rate = self.output_format.sample_rate as f64;
+        let sample_rate = f64::from(self.output_format.sample_rate);
         if sample_rate <= 0.0 {
             self.buf_max_len = 0;
             return;

@@ -2998,7 +2998,6 @@ dependencies = [
  "cpal",
  "crc32fast",
  "crossbeam-channel",
- "crossterm",
  "indicatif",
  "lofty",
  "md-5",

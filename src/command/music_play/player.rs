@@ -9,7 +9,7 @@ use crate::command::music_play::effect::{
     AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Stream, StreamConfig};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -70,59 +70,65 @@ impl Player {
         device.build_output_stream(
             config,
             move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
-                //暂停处理
-                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
-                if !content.is_playing.load(Ordering::Acquire) || volume == 0.0 {
-                    data.fill(0.0);
-                    return;
-                }
-                let Ok(len) = ring_buf.try_read(data) else {
-                    data.fill(0.0);
-                    return;
-                };
-
-                //效果处理
+                // 1. 先消费 transport 命令，不受播放状态/音量/数据/clear 锁门控
                 if let Ok(mut effect_chain) = effect_chain.try_lock() {
-                    // 1. 收指令，做决策（绝不阻塞、不分配）
                     while let Ok(cmd) = rx_cmd.try_recv() {
                         if matches!(effect_chain.dispatch_transport(cmd), Decision::Pass) {
                             let _ = tx_done.try_send(cmd);
                         }
                     }
-                    // 2. 处理音频
-                    effect_chain.process(data[..len].as_mut());
-                    // 3. 上报已完成的延迟指令（Vec 预分配，复用）
-                    scratch.clear();
-                    effect_chain.poll_transport(&mut scratch);
-                    for cmd in scratch.drain(..) {
-                        let _ = tx_done.try_send(cmd);
-                    }
                 }
 
-                //音量处理
-                if (volume - 1.0).abs() > 0.0 {
-                    for datum in &mut data[..len] {
-                        *datum *= volume;
+                // 2. 暂停/静音/读数据
+                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
+                let is_playing = content.is_playing.load(Ordering::Acquire);
+                let len = if is_playing && volume != 0.0 {
+                    match ring_buf.try_read(data) {
+                        Ok(len) => len,
+                        Err(_) => {
+                            data.fill(0.0);
+                            0
+                        }
                     }
+                } else {
+                    data.fill(0.0);
+                    0
+                };
+
+                // 3. 效果处理（仅当有数据）
+                if len > 0 {
+                    if let Ok(mut effect_chain) = effect_chain.try_lock() {
+                        effect_chain.process(data[..len].as_mut());
+                        scratch.clear();
+                        effect_chain.poll_transport(&mut scratch);
+                        for cmd in scratch.drain(..) {
+                            let _ = tx_done.try_send(cmd);
+                        }
+                    }
+
+                    if (volume - 1.0).abs() > 0.0 {
+                        for datum in &mut data[..len] {
+                            *datum *= volume;
+                        }
+                    }
+
+                    played_samples.fetch_add(len as u64, Ordering::Relaxed);
+                    data[len..].fill(0.0);
                 }
 
-                //进度计数
-                played_samples.fetch_add(len as u64, Ordering::Relaxed);
-                data[len..].fill(0.0);
-                //检查解码是否EOF
+                // 4. EOF 检查（无论 try_read 成功/失败都走）
                 let pre_effect_item_eof = &event_content.pre_effect_item_eof;
                 let pre_effect_item_eof_pos = &event_content.pre_effect_item_eof_pos;
 
-                if pre_effect_item_eof.load(Ordering::Relaxed) {
-                    //安全减法
-                    if len > pre_effect_item_eof_pos.load(Ordering::Acquire) {
+                if pre_effect_item_eof.load(Ordering::Acquire) {
+                    let pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
+                    if len >= pos {
                         pre_effect_item_eof_pos.store(0, Ordering::Relaxed);
                     } else {
                         pre_effect_item_eof_pos.fetch_sub(len, Ordering::Relaxed);
                     }
                     if pre_effect_item_eof_pos.load(Ordering::Acquire) == 0 {
-                        //触发事件和重置
-                        pre_effect_item_eof.store(false, Ordering::Relaxed);
+                        pre_effect_item_eof.store(false, Ordering::Release);
                         played_samples.store(0, Ordering::Relaxed);
                         Self::emit(
                             PlayerEvent {
@@ -140,7 +146,9 @@ impl Player {
 
     fn emit(event: PlayerEvent, list: &Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>) {
         let event = Arc::new(event);
-        let mut list = list.lock().expect("list is poisoned");
+        let mut list = list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for sink in list.iter_mut() {
             sink.emit(event.clone());
         }
@@ -150,12 +158,18 @@ impl Player {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
-            panic!("No output device available");
+            return Err("No output device available".into());
         };
         let config = device.default_output_config()?;
+        if config.sample_format() != SampleFormat::F32 {
+            return Err(format!(
+                "Unsupported sample format {:?}, only F32 is supported",
+                config.sample_format()
+            )
+            .into());
+        }
         let channels = config.channels();
         let sample_rate = config.sample_rate();
-
         let stream_config = Arc::new(config.config());
 
         // 在你的播放器初始化阶段
@@ -163,7 +177,7 @@ impl Player {
         let pre_effect_ring_buf = Arc::new(ConcurrentRing::new_max_capacity(10)?);
         //声音缓冲区
         let audio_ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
-            sample_rate as usize * channels as usize * 5,
+            sample_rate as usize * channels as usize,
         )?);
         //效果运行时
         let mut pre_effect_runtime =
@@ -190,8 +204,8 @@ impl Player {
                     if let Ok(e) = e.result()
                         && let PreEffectRuntimeEventType::Eof = e
                     {
-                        pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Relaxed);
-                        pre_effect_item_eof.store(true, Ordering::Relaxed);
+                        pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Release);
+                        pre_effect_item_eof.store(true, Ordering::Release);
                     }
                 },
             )));
@@ -212,7 +226,7 @@ impl Player {
         // 主线程 → 音频线程：transport 指令
         let (tx_cmd, rx_cmd) = crossbeam_channel::bounded::<PlayCmd>(1);
         // 音频线程 → 主线程：已放行的指令
-        let (tx_done, rx_done) = crossbeam_channel::bounded::<PlayCmd>(8);
+        let (tx_done, rx_done) = crossbeam_channel::unbounded::<PlayCmd>();
 
         let content = Content {
             is_playing: is_playing.clone(),
@@ -253,12 +267,13 @@ impl Player {
                                     }
                                 }
                                 PlayCmd::Seek(_) => {
-                                    todo!();
+                                    // C3: 不 panic
+                                    error!("Seek is not implemented");
                                 }
                             }
                         }
                     })
-                    .expect(r#"无法创建"rx_cmd"线程"#),
+                    .map_err(|e| format!("无法创建 rx_cmd 线程: {e}"))?,
             )
         };
 
@@ -299,30 +314,48 @@ impl Player {
         f32::from_bits(self.content.volume.load(Ordering::Acquire))
     }
 
+    pub fn volume_percent(&self) -> f32 {
+        self.volume() * 100.0
+    }
+
+    /// 归一化音量，范围 [0.0, 1.0]，越界 clamp，NaN 视为 1.0
     pub fn set_volume(&self, volume: f32) {
-        //安全范围处理
-        let volume = if volume > 1.0 {
-            (volume / 100.0).min(1.0)
-        } else if volume < 0.0 {
-            0.0
+        let volume = if volume.is_nan() {
+            1.0
         } else {
-            volume
+            volume.clamp(0.0, 1.0)
         };
         self.content
             .volume
             .store(volume.to_bits(), Ordering::Relaxed);
     }
 
+    /// 百分比音量，范围 [0.0, 100.0]，越界 clamp，NaN 视为 100.0
+    pub fn set_volume_percent(&self, percent: f32) {
+        let percent = if percent.is_nan() {
+            100.0
+        } else {
+            percent.clamp(0.0, 100.0)
+        };
+        self.set_volume(percent / 100.0);
+    }
+
     pub fn play(&self) -> Result<(), Box<dyn std::error::Error>> {
-        _ = self.content.tx_cmd.try_send(PlayCmd::Play);
-        self.content.is_playing.store(true, Ordering::Relaxed);
+        self.content
+            .tx_cmd
+            .try_send(PlayCmd::Play)
+            .map_err(|e| format!("send Play command failed: {e:?}"))?;
         self.sound_engine.stream.play()?;
+        self.content.is_playing.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     pub fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.content.is_playing.load(Ordering::Acquire) {
-            self.content.tx_cmd.send(PlayCmd::Pause)?;
+            self.content
+                .tx_cmd
+                .try_send(PlayCmd::Pause)
+                .map_err(|e| format!("send Pause command failed: {e:?}"))?;
         }
         Ok(())
     }
@@ -374,12 +407,30 @@ impl Player {
             per.reset(*decoder.decoder_format());
         }
         self.sound_engine.audio_ring_buffer.clear();
+        // A5: 作废旧自动 Eof 状态
+        self.event_content
+            .pre_effect_item_eof
+            .store(false, Ordering::Release);
+        self.event_content
+            .pre_effect_item_eof_pos
+            .store(0, Ordering::Release);
+        // B3: 在启动新 decoder 之前清零进度
+        self.played_samples.store(0, Ordering::Relaxed);
         decoder.run()?;
         decoder_lock.replace(decoder);
-        self.played_samples.store(0, Ordering::Relaxed);
         Ok(())
     }
 
+    /// 无缝切换 decoder：保留输入/输出缓冲区，让旧曲尾音播完后接新曲。
+    ///
+    /// # 前置条件（必须由调用方保证）
+    ///
+    /// 必须在旧 decoder **已自然 EOF**（已 push 完所有数据并退出解码线程）后调用。
+    /// 本方法不调用 `Decoder::stop()`、不清空缓冲区，因此无法唤醒阻塞在
+    /// `push_wait` 上的旧解码线程。在旧 decoder 尚未 EOF 时调用会导致旧解码线程
+    /// **永久阻塞（线程泄漏）**，且 `reset` 会与旧线程 push 竞争。
+    ///
+    /// 手动切换 / 需要丢弃旧曲尾音 / 无法保证已 EOF 时，请使用 `set_decoder`。
     pub fn set_decoder_no_clear(&mut self, decoder: Decoder) -> DecoderResult<()> {
         let mut decoder = decoder;
         let mut decoder_lock = self
@@ -397,16 +448,7 @@ impl Player {
     }
 
     pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn std::error::Error>> {
-        todo!();
-        let mut decoder = self
-            .sound_engine
-            .decoder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(decoder) = &mut *decoder {
-            let pos = decoder.try_seek(pos)?.actual_ts;
-        }
-        Ok(())
+        Err("Seek is not implemented".into())
     }
 
     pub fn get_sample_rate(&self) -> u32 {

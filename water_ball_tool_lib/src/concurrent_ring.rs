@@ -1039,29 +1039,33 @@ impl<T> ConcurrentRing<T> {
         self.is_max_cap.store(false, Ordering::Release);
         self.max_cap.store(0, Ordering::Release);
     }
-
     pub fn clear(&self) {
         {
             let _wg = self.lock_write_lock();
             let _rg = self.lock_read_gate_write();
             let r = self.read_pos.load(Ordering::Acquire);
             let w = self.write_pos.load(Ordering::Acquire);
-            let cap = self.cap.load(Ordering::Acquire);
-            // SAFETY: Guard 持有 `write_lock` + `read_gate.write`，在 Guard 的
-            // 整个生命周期内，`grow_locked`（需全锁）无法执行，故 `slots` 的
-            // `Box<[Slot<T>]>` 不会被替换；解引用得到覆盖当前槽位数组的
-            // `&[Slot<T>]` 安全。生命周期由 `&self` 短借用绑定，不越过 Guard。
-            let slots = unsafe { self.slots_ref() };
-            let mut i = r;
-            while i != w {
-                let idx = i % cap;
-                // SAFETY: 双排他数据锁已持有；[r, w) 内已初始化，take 后立即 drop。
-                unsafe {
-                    slots[idx].take();
+
+            if std::mem::needs_drop::<T>() {
+                let cap = self.cap.load(Ordering::Acquire);
+                // SAFETY: 持全锁独占 slots；[r, w) 内已初始化，take 后立即 drop。
+                let slots = unsafe { self.slots_ref() };
+                let mut i = r;
+                while i != w {
+                    let idx = i % cap;
+                    // SAFETY: idx 位于 [r, w) 内，槽位已初始化。
+                    unsafe {
+                        slots[idx].take();
+                    }
+                    i = i.wrapping_add(1);
                 }
-                i = i.wrapping_add(1);
+                self.read_pos.store(w, Ordering::Release);
+            } else {
+                // T 无 drop glue：无需逐槽 take，O(1)。
+                // 槽位内的旧字节仍在，但逻辑上视为未初始化；
+                // 后续 push/write 会用 MaybeUninit::write 覆盖（不读旧值）。
+                self.read_pos.store(w, Ordering::Release);
             }
-            self.read_pos.store(w, Ordering::Release);
         }
         self.wake_writers();
     }
