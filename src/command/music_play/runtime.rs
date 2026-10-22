@@ -12,7 +12,7 @@ use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
 use std::any::Any;
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
@@ -20,8 +20,11 @@ use std::{io, thread};
 use tracing::{debug, error, info};
 
 pub(super) struct Runtime {
-    play_object: Arc<Mutex<PlayObject>>,
+    play_object: Arc<PlayObject>,
     thread_control: ThreadControl,
+    ui_content: Arc<Mutex<UIContent>>,
+    // 停止标志
+    run_stop: Arc<AtomicBool>,
 }
 
 struct PlayObject {
@@ -29,18 +32,8 @@ struct PlayObject {
     play_list: Arc<Mutex<PlayList>>,
     // 播放器
     player: Player,
-    // 停止标志
-    run_stop: bool,
     //这次歌曲
     this_track: Arc<Mutex<Option<Track>>>,
-    //UI这次歌曲
-    ui_track: Arc<Mutex<Option<Track>>>,
-    // 上次进度
-    last_play_pos: Duration,
-    // 上次进度相等次数
-    last_play_pos_eq_count: usize,
-    // 上次进度相等起始时间
-    last_pos_eq_start_time: Duration,
     next_content: NextContent,
 }
 
@@ -57,6 +50,17 @@ struct ThreadControl {
     condvar: Arc<Condvar>,
 }
 
+struct UIContent {
+    //UI这次歌曲
+    ui_track: Option<Track>,
+    // 上次进度
+    last_play_pos: Duration,
+    // 上次进度相等次数
+    last_play_pos_eq_count: usize,
+    // 上次进度相等起始时间
+    last_pos_eq_start_time: Duration,
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         _ = self.run_stop_inner();
@@ -65,7 +69,10 @@ impl Drop for Runtime {
 
 impl Runtime {
     ///创建运行时
-    pub(super) fn create(play_list: PlayList, mp: &MultiProgress) -> Result<Self, Box<dyn Error>> {
+    pub(super) fn create(
+        play_list: PlayList,
+        mp: &MultiProgress,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut player = Player::new()?;
 
         let this_track = Arc::new(Mutex::new(None));
@@ -95,28 +102,36 @@ impl Runtime {
         //添加效果(淡出淡入)
         player.add_audio_post_effect(FadeEffect::new());
 
-        let play_object = Arc::new(Mutex::new(PlayObject {
+        let play_object = Arc::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player,
-            run_stop: false,
             this_track,
-            ui_track,
-            last_play_pos: Duration::default(),
-            last_play_pos_eq_count: 0,
-            last_pos_eq_start_time: Duration::default(),
             next_content: NextContent {
                 next_id: Arc::new(AtomicUsize::new(0)),
                 err_count: Arc::new(AtomicUsize::new(0)),
             },
-        }));
+        });
         //控制变量
         let condvar = Arc::new(Condvar::new());
+        let run_stop = Arc::new(AtomicBool::new(false));
+        let ui_content = Arc::new(Mutex::new(UIContent {
+            ui_track: None,
+            last_play_pos: Duration::from_millis(0),
+            last_play_pos_eq_count: 0,
+            last_pos_eq_start_time: Duration::from_millis(0),
+        }));
         //创建线程
         //UI线程
         let ui_thread = {
             let condvar = condvar.clone();
             let play_object = play_object.clone();
-            Self::create_ui_thread(condvar, play_object, mp)
+            Self::create_ui_thread(
+                condvar,
+                play_object,
+                mp,
+                run_stop.clone(),
+                ui_content.clone(),
+            )
         }?;
         let thread_control = ThreadControl {
             ui_thread: Some(ui_thread),
@@ -125,13 +140,17 @@ impl Runtime {
         Ok(Self {
             play_object,
             thread_control,
+            ui_content,
+            run_stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn create_ui_thread(
         condvar: Arc<Condvar>,
-        play_object: Arc<Mutex<PlayObject>>,
+        play_object: Arc<PlayObject>,
         mp: &MultiProgress,
+        run_stop: Arc<AtomicBool>,
+        ui_content: Arc<Mutex<UIContent>>,
     ) -> io::Result<JoinHandle<()>> {
         let pb = crate::command::create_pb(mp);
         thread::Builder::new().name("ui".to_string()).spawn(move || {
@@ -143,28 +162,27 @@ impl Runtime {
                 );
                 pb.set_prefix("暂停中");
             loop {
-                let mut play_object = play_object
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if play_object.run_stop {
+                let mut ui_content = ui_content.lock().unwrap_or_else
+                (std::sync::PoisonError::into_inner);
+                if run_stop.load(Ordering::Acquire) {
                     break; // 如果正在释放就退出线程
                 }
                 let play_pos = play_object.player.get_pos();
                 // 挂起检查
-                if play_object.last_play_pos == play_pos {
+                if ui_content.last_play_pos == play_pos {
                     //检查是否是最初
-                    if play_object.last_play_pos_eq_count == 0 {
-                        play_object.last_pos_eq_start_time = SystemTime::now()
+                    if ui_content.last_play_pos_eq_count == 0 {
+                        ui_content.last_pos_eq_start_time = SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .unwrap_or_default();
                     }
-                    play_object.last_play_pos_eq_count += 1;
+                    ui_content.last_play_pos_eq_count += 1;
                     //次数检查和超时检查
-                    if play_object.last_play_pos_eq_count > 3
+                    if ui_content.last_play_pos_eq_count > 3
                         && SystemTime::now()
                             .duration_since(SystemTime::UNIX_EPOCH)
                             .unwrap_or_default()
-                            .checked_sub(play_object.last_pos_eq_start_time)
+                        .checked_sub(ui_content.last_pos_eq_start_time)
                             .unwrap_or_default()
                             > Duration::from_secs(10)
                     {
@@ -172,9 +190,9 @@ impl Runtime {
                     }
                 } else {
                     //重置数量
-                    play_object.last_play_pos_eq_count = 0;
+                    ui_content.last_play_pos_eq_count = 0;
                 }
-                play_object.last_play_pos = play_pos;
+                ui_content.last_play_pos = play_pos;
                 let track_lock = play_object
                     .this_track
                     .lock()
@@ -221,20 +239,20 @@ impl Runtime {
                         ));
 
                     drop(track_lock);
-                    play_object = condvar
-                        .wait_timeout(play_object, Duration::from_millis(50))
+                    ui_content = condvar
+                        .wait_timeout(ui_content, Duration::from_millis(50))
                         .expect("Condvar won't fail")
                         .0;
                 } else {
                         pb.set_prefix("异常暂停中");
                     drop(track_lock);
-                    play_object = condvar.wait(play_object).expect("Condvar won't fail");
+                    ui_content = condvar.wait(ui_content).expect("Condvar won't fail");
                 }
                 //暂停时挂起
-                if !play_object.player.is_playing() && !play_object.run_stop {
+                if !play_object.player.is_playing() && !run_stop.load(Ordering::Acquire) {
                     pb.set_prefix("暂停中");
-                    play_object = condvar.wait(play_object).expect("Condvar won't fail");
-                    if play_object.run_stop {
+                    ui_content = condvar.wait(ui_content).expect("Condvar won't fail");
+                    if run_stop.load(Ordering::Acquire) {
                         break; // 如果正在释放就退出线程
                     }
                     pb.set_prefix("播放中");
@@ -247,31 +265,25 @@ impl Runtime {
 
     /// 播放
     pub(super) fn play(&mut self) -> Result<(), Box<dyn Error>> {
-        self.play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .play()?;
+        self.play_object.play()?;
         self.thread_control.condvar.notify_all();
         Ok(())
     }
 
     /// 暂停
     pub(super) fn pause(&mut self) -> Result<(), Box<dyn Error>> {
-        self.play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pause()?;
+        self.play_object.pause()?;
         self.thread_control.condvar.notify_all();
         Ok(())
     }
 
     /// 下一曲
     pub(super) fn next(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut play_object = self
-            .play_object
+        let mut ui_content = self
+            .ui_content
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let r = play_object.next()?;
+        let r = self.play_object.next(&mut ui_content.ui_track)?;
         if let Some(track) = r {
             info!(
                 "换曲为, Title: {}, Artist: {}, \
@@ -281,48 +293,30 @@ impl Runtime {
                 track.path().display()
             );
         }
-        drop(play_object);
         self.thread_control.condvar.notify_all();
         Ok(())
     }
 
     /// 获取音量
     pub fn volume(&self) -> f32 {
-        self.play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .volume()
+        self.play_object.volume()
     }
 
     /// 设置音量
-    pub(super) fn set_volume(&mut self, value: f32) {
-        self.play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .set_volume(value);
+    pub(super) fn set_volume(&self, value: f32) {
+        self.play_object.set_volume(value);
     }
 
     /// 增加音量
-    pub(super) fn add_volume(&mut self, value: f32) {
-        let mut play_object = self
-            .play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let this_volume = play_object.player.volume();
+    pub(super) fn add_volume(&self, value: f32) {
+        let this_volume = self.play_object.player.volume();
         let new_volume = this_volume + value;
-        play_object.set_volume(new_volume.clamp(0.0, 1.0));
+        self.play_object.set_volume(new_volume.clamp(0.0, 1.0));
     }
 
     /// 增加进度
     pub(super) fn add_pos(&mut self, value: Duration) -> Result<(), Box<dyn Error>> {
         todo!();
-        let play_object = self
-            .play_object
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let this_pos = play_object.player.get_pos();
-        let new_pos = this_pos + value;
-        play_object.player.try_seek(new_pos)
     }
 
     /// 等待线程
@@ -341,13 +335,12 @@ impl Runtime {
 
     fn run_stop_inner(&mut self) -> Result<(), Box<dyn Any + Send + 'static>> {
         {
-            let mut play_object = self
-                .play_object
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            play_object.run_stop = true;
-            _ = play_object.pause();
-            play_object.player.try_stop().expect("停止播放发生错误");
+            self.run_stop.store(true, Ordering::Release);
+            _ = self.play_object.pause();
+            self.play_object
+                .player
+                .try_stop()
+                .expect("停止播放发生错误");
         }
         self.thread_control.condvar.notify_all();
         self.join_thread()?;
@@ -357,12 +350,12 @@ impl Runtime {
 }
 impl PlayObject {
     ///播放
-    fn play(&mut self) -> Result<(), Box<dyn Error>> {
+    fn play(&self) -> Result<(), Box<dyn Error>> {
         self.player.play()
     }
 
     ///暂停
-    fn pause(&mut self) -> Result<(), Box<dyn Error>> {
+    fn pause(&self) -> Result<(), Box<dyn Error>> {
         self.player.pause()
     }
 
@@ -372,18 +365,18 @@ impl PlayObject {
     }
 
     /// 设置音量
-    fn set_volume(&mut self, value: f32) {
+    fn set_volume(&self, value: f32) {
         self.player.set_volume(value);
     }
 
     ///下一曲
-    fn next(&mut self) -> DecoderResult<Option<Track>> {
+    fn next(&self, ui_track: &mut Option<Track>) -> DecoderResult<Option<Track>> {
         Self::next_inner(
             &self.play_list,
             false,
             self.player.clone(),
             &self.this_track,
-            Some(&self.ui_track),
+            Some(ui_track),
             &self.next_content,
             self.player.pre_effect_runtime(),
         )
@@ -394,7 +387,7 @@ impl PlayObject {
         play_end: bool,
         player: Player,
         this_track: &Arc<Mutex<Option<Track>>>,
-        ui_track: Option<&Arc<Mutex<Option<Track>>>>,
+        ui_track: Option<&mut Option<Track>>,
         next_content: &NextContent,
         pre_effect_runtime: &PreEffectRuntime,
     ) -> DecoderResult<Option<Track>> {
@@ -412,20 +405,18 @@ impl PlayObject {
                 //缓冲区部分清理
                 player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
-                if let Some(ui_track) = &ui_track {
+                if let Some(ui_track) = ui_track {
                     let this_track = this_track
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    *ui_track
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = this_track;
+                    *ui_track = this_track;
                 }
                 return Ok(this_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone());
-            };
+            }
         }
         let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
         if let Some(t) = &track {

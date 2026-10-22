@@ -50,15 +50,20 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     let volume = {
         if args.volume < 0.0 {
             panic!("参数错误：声音参数不能小于0")
-        } else if args.volume > 100.0 {
-            panic!("参数错误：声音参数不能大于100")
+        } else if args.volume > 1.0 {
+            panic!("参数错误：声音参数不能大于1")
         }
         args.volume
     };
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut runtime = Runtime::create(play_list, &mp)?;
+    let mut runtime = match Runtime::create(play_list, &mp) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            return Err(format!("创建运行时失败：{e:?}").into());
+        }
+    };
     runtime
         .next()
         .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));

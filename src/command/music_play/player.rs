@@ -155,7 +155,7 @@ impl Player {
     }
 }
 impl Player {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
             return Err("No output device available".into());
@@ -371,11 +371,11 @@ impl Player {
     pub fn pre_effect_runtime(&self) -> &PreEffectRuntime {
         &self.sound_engine.pre_effect_runtime
     }
-    pub fn stop(mut self) -> DecoderResult<()> {
+    pub fn stop(self) -> DecoderResult<()> {
         self.try_stop()
     }
 
-    pub fn try_stop(&mut self) -> DecoderResult<()> {
+    pub fn try_stop(&self) -> DecoderResult<()> {
         if let Some(decoder) = self
             .sound_engine
             .decoder

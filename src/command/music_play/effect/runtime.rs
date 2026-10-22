@@ -147,7 +147,7 @@ impl PreEffectRuntime {
         self.input_buf.push_wait(AudioData::None);
     }
 
-    pub fn add_effect<E>(&mut self, effect: E) -> Result<(), Box<dyn Error>>
+    pub fn add_effect<E>(&mut self, effect: E) -> Result<(), Box<dyn Error + Send + Sync>>
     where
         E: PreEffect + Send + 'static,
     {
