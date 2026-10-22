@@ -58,7 +58,12 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;
-    let mut runtime = Runtime::create(play_list, &mp)?;
+    let mut runtime = match Runtime::create(play_list, &mp) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            return Err(format!("创建运行时失败：{e:?}").into());
+        }
+    };
     runtime
         .next()
         .unwrap_or_else(|e| error!("初始化播放发生错误： {e}"));

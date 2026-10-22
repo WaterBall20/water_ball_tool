@@ -15,7 +15,7 @@ pub struct CrossBridge {
 }
 
 impl PreEffect for CrossBridge {
-    fn init(&mut self, _: AudioFormat) -> Result<(), Box<dyn Error>> {
+    fn init(&mut self, _: AudioFormat) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         self.set_duration(self.duration);
         Ok(())
     }

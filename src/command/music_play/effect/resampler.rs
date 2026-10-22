@@ -80,7 +80,10 @@ impl ResamplerEffect {
 }
 
 impl PreEffect for ResamplerEffect {
-    fn init(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
+    fn init(
+        &mut self,
+        input_format: AudioFormat,
+    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
         if input_format.channels == 0 {
             return Err("channels must be > 0".into());
         }
@@ -270,9 +273,9 @@ impl PreEffect for ResamplerEffect {
         }
     }
 
-    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
+    /*    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
         self.init(input_format)
-    }
+    }*/
 
     fn enabled(&self) -> bool {
         self.enabled
