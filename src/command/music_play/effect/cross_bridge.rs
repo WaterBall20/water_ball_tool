@@ -12,10 +12,13 @@ pub struct CrossBridge {
     output_format: AudioFormat,
     duration: Duration,
     is_effect: bool,
+    // 预计算增益表，按 sample 索引，长度 = buf_max_len
+    gain_out: Vec<f32>,
+    gain_in: Vec<f32>,
 }
 
 impl PreEffect for CrossBridge {
-    fn init(&mut self, _: AudioFormat) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    fn init(&mut self, _: AudioFormat) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.set_duration(self.duration);
         Ok(())
     }
@@ -57,10 +60,8 @@ impl PreEffect for CrossBridge {
 
     fn reset(&mut self, _input_format: AudioFormat) {
         // reset 在每首歌开始输入数据前调用。
-        // 若 is_effect = true，说明上一首的 input_eof 已触发，
-        // buf 里是 A 的尾部，正在等本首数据做交叉。
-        // 此时必须保留 buf、b_buf 和 is_effect，否则交叉失效。
-        // 非交叉状态才清理残留。
+        // 若 is_effect = true，说明上一首 input_eof 已触发，
+        // buf 里是 A 尾部，正在等本首数据做交叉，必须保留。
         if !self.is_effect {
             self.b_buf.clear();
             self.buf.clear();
@@ -90,10 +91,13 @@ impl CrossBridge {
             output_format,
             duration: Duration::from_secs(1),
             is_effect: false,
+            gain_out: Vec::new(),
+            gain_in: Vec::new(),
         }
     }
 
-    /// duration 钳到 [1 帧, 60s]，四舍五入到最近样本并整帧对齐
+    /// duration 钳到 [1 帧, 60s]，四舍五入到最近样本并整帧对齐；
+    /// 同时预计算等功率增益表。
     pub fn set_duration(&mut self, duration: Duration) {
         if duration.is_zero() {
             return;
@@ -105,7 +109,7 @@ impl CrossBridge {
             return;
         }
 
-        let sample_rate = f64::from(self.output_format.sample_rate);
+        let sample_rate = self.output_format.sample_rate as f64;
         if sample_rate <= 0.0 {
             self.buf_max_len = 0;
             return;
@@ -124,34 +128,62 @@ impl CrossBridge {
         self.buf.reserve_exact(self.buf_max_len);
         self.b_buf.clear();
         self.b_buf.reserve_exact(self.buf_max_len);
+
+        // 预计算等功率增益表，按 sample 展开
+        self.gain_out.clear();
+        self.gain_in.clear();
+        self.gain_out.reserve_exact(self.buf_max_len);
+        self.gain_in.reserve_exact(self.buf_max_len);
+
+        let denom = (frames - 1).max(1) as f32;
+        for i in 0..frames {
+            let t = if frames <= 1 { 1.0 } else { i as f32 / denom };
+            let theta = t * FRAC_PI_2;
+            let g_out = theta.cos();
+            let g_in = theta.sin();
+            for _ in 0..channels {
+                self.gain_out.push(g_out);
+                self.gain_in.push(g_in);
+            }
+        }
     }
 
     /// 延迟线核心：把 input 追加到 buf，超出 buf_max_len 的部分按时间顺序写入 out。
-    /// 不清空 out，返回 out.len()；缓冲不满时直接入队，返回 out.len()（即 0）。
+    /// 不清空 out，返回 out.len()。
     fn process_normal_append(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
         let this_len = self.buf.len();
 
         if this_len + input.len() <= self.buf_max_len {
-            for v in input {
-                self.buf.push_back(*v);
-            }
+            self.buf.extend(input.iter().copied());
             return out.len();
         }
 
         let out_len = this_len + input.len() - self.buf_max_len;
         let pop_len = out_len.min(this_len);
+        let in_to_out_len = out_len - pop_len;
 
-        for _ in 0..pop_len {
-            out.push(self.buf.pop_front().expect("buf is empty"));
+        out.reserve(out_len);
+
+        // 批量从 buf 头部取出 pop_len 个，走 memcpy
+        if pop_len > 0 {
+            {
+                let (front, back) = self.buf.as_slices();
+                let n1 = front.len().min(pop_len);
+                let n2 = (pop_len - n1).min(back.len());
+                out.extend_from_slice(&front[..n1]);
+                if n2 > 0 {
+                    out.extend_from_slice(&back[..n2]);
+                }
+            }
+            self.buf.drain(..pop_len);
         }
 
-        let in_to_out_len = out_len.saturating_sub(pop_len);
         if in_to_out_len > 0 {
             out.extend_from_slice(&input[..in_to_out_len]);
         }
 
-        for v in &input[in_to_out_len..] {
-            self.buf.push_back(*v);
+        if in_to_out_len < input.len() {
+            self.buf.extend(input[in_to_out_len..].iter().copied());
         }
 
         out.len()
@@ -164,7 +196,7 @@ impl CrossBridge {
 
     /// 交叉：
     /// 1) 等待期间 buf 不可变，target = buf.len() 稳定；
-    /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变）；
+    /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变），查预计算增益表；
     /// 3) input_rest 走与非交叉完全一致的延迟线逻辑。
     fn process_crossfade(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
         let channels = self.output_format.channels as usize;
@@ -189,34 +221,21 @@ impl CrossBridge {
         self.b_buf.extend_from_slice(&input[..needed]);
         let input_rest = &input[needed..];
 
-        // 交叉计算：原地写回 buf
-        let cross_frames = target / channels;
-        if cross_frames > 0 {
-            let denom = (cross_frames - 1).max(1) as f32;
-            let (buf, b_buf) = (&mut self.buf, &self.b_buf);
+        // 交叉计算：拉平到 sample 索引，查表 + FMA
+        {
+            let (buf, b_buf, gain_out, gain_in) =
+                (&mut self.buf, &self.b_buf, &self.gain_out, &self.gain_in);
             let buf_slice = buf.make_contiguous();
+            debug_assert!(target <= gain_out.len());
 
-            for i in 0..cross_frames {
-                let t = if cross_frames <= 1 {
-                    1.0
-                } else {
-                    i as f32 / denom
-                };
-                let theta = t * FRAC_PI_2;
-                let g_out = theta.cos();
-                let g_in = theta.sin();
-                let base = i * channels;
-                for ch in 0..channels {
-                    let idx = base + ch;
-                    buf_slice[idx] = buf_slice[idx] * g_out + b_buf[idx] * g_in;
-                }
+            for idx in 0..target {
+                buf_slice[idx] = buf_slice[idx] * gain_out[idx] + b_buf[idx] * gain_in[idx];
             }
         }
 
         self.b_buf.clear();
         self.is_effect = false;
 
-        // input_rest 与非交叉计算完全一致
         out.clear();
         self.process_normal_append(input_rest, out)
     }

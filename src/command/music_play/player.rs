@@ -387,7 +387,7 @@ impl Player {
         }
         if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
             error!("stop pre_effect runtime error: {e:?}");
-        };
+        }
         Ok(())
     }
 

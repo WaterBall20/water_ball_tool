@@ -30,7 +30,7 @@ pub(super) struct Decoder {
     stop: Arc<AtomicBool>,
     engine: Arc<Mutex<DecoderEngine>>,
     event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
-    effect_running: PreEffectRuntime,
+    effect_runtime: PreEffectRuntime,
     data: DecoderData,
 }
 
@@ -45,7 +45,7 @@ struct DecoderData {
     decoder_format: AudioFormat,
     format_info: FormatInfo,
     media_info: MediaInfo,
-    max_ring_buf_write_len: usize,
+    ring_buf_write_len: usize,
 }
 
 impl Decoder {
@@ -59,23 +59,25 @@ impl Decoder {
     fn write_all_to_ring_buf(
         ring_buf: &ConcurrentRing<AudioData>,
         stop: &Arc<AtomicBool>,
-        max_write_len: usize,
         event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
         write_buf: &[f32],
     ) -> Result<(), DecoderEventError> {
-        // 分块写入
-        for chunk in write_buf.chunks(max_write_len) {
-            // 检查停止信号
-            if stop.load(Ordering::Acquire) {
-                return Err(DecoderEventError {
-                    message: "Decoder stop".to_string(),
-                    kind: DecoderEventErrorKind::DecoderStop,
-                });
-            }
-
-            // 因此 write_all 不会返回 WriteSizeTooLarge
-            ring_buf.push_wait(AudioData::Block(chunk.to_vec()));
+        // 检查停止信号
+        if stop.load(Ordering::Acquire) {
+            let e = DecoderEventError {
+                message: "Decoder stop".to_string(),
+                kind: DecoderEventErrorKind::DecoderStop,
+            };
+            Self::emit(
+                DecoderEvent {
+                    result: Err(e.clone()),
+                },
+                &event_list,
+            );
+            return Err(e);
         }
+
+        ring_buf.push_wait(AudioData::Block(write_buf.to_vec()));
         Ok(())
     }
 }
@@ -84,7 +86,7 @@ impl Decoder {
     pub fn new(
         ring_buf: Arc<ConcurrentRing<AudioData>>,
         path: &Path,
-        effect_running: PreEffectRuntime,
+        effect_runtime: PreEffectRuntime,
     ) -> DecoderResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         // 1. 打开文件 & 创建 MSS
@@ -147,7 +149,7 @@ impl Decoder {
             })?;
 
         let decoder_format = AudioFormat::new(channels as u16, decoder_sample_rate);
-        let max_ring_buf_write_len = (decoder_sample_rate / 50) as usize;
+        let ring_buf_write_len = (decoder_sample_rate / 50) as usize;
 
         let engine = DecoderEngine {
             format,
@@ -159,7 +161,7 @@ impl Decoder {
             decoder_format,
             format_info,
             media_info,
-            max_ring_buf_write_len,
+            ring_buf_write_len,
         };
 
         Ok(Self {
@@ -169,7 +171,7 @@ impl Decoder {
             stop,
             engine: Arc::new(Mutex::new(engine)),
             event_list: Arc::new(Mutex::new(Vec::new())),
-            effect_running,
+            effect_runtime,
             data,
         })
     }
@@ -193,9 +195,9 @@ impl Decoder {
                     .spawn(move || -> () {
                         debug!("decoder run thread loop start");
                         //初始化
-                        let ring_buf_max_len =
-                            ring_buf.max_capacity().expect("ring_buf max_len is None");
-                        let mut buf = Vec::with_capacity(ring_buf_max_len);
+                        let ring_buf_write_len = data.ring_buf_write_len;
+                        let mut buf = Vec::with_capacity(ring_buf_write_len);
+                        let mut out_buf = Vec::with_capacity(ring_buf_write_len);
                         loop {
                             // 检查停止信号
                             if stop.load(Ordering::Acquire) {
@@ -241,24 +243,49 @@ impl Decoder {
                                 Ok(decoded) => {
                                     // 使用新方法进行交错转换
                                     decoded.copy_to_vec_interleaved(&mut buf);
+                                    out_buf.extend_from_slice(&buf);
+                                    if out_buf.len() < ring_buf_write_len {
+                                        continue;
+                                    }
+
                                     // 写入环形缓冲区
                                     if Self::write_all_to_ring_buf(
                                         &ring_buf,
                                         &stop,
-                                        data.max_ring_buf_write_len,
                                         &event_list,
-                                        &buf,
+                                        &out_buf,
                                     )
                                     .is_err()
                                     {
                                         break;
                                     }
+                                    out_buf.clear();
                                 }
                                 Err(symphonia::core::errors::Error::DecodeError(e)) => {
                                     error!("Decode error (skipping frame): {e}");
+                                    Self::emit(
+                                        DecoderEvent {
+                                            result: Err(DecoderEventError {
+                                                message: format!(
+                                                    "Decode error (skipping frame): {e}"
+                                                ),
+                                                kind: DecoderEventErrorKind::DecodeError(e),
+                                            }),
+                                        },
+                                        &event_list,
+                                    );
                                 }
                                 Err(e) => {
                                     error!("Fatal decode error: {e}");
+                                    Self::emit(
+                                        DecoderEvent {
+                                            result: Err(DecoderEventError {
+                                                message: format!("Fatal decode error, err:{e}"),
+                                                kind: DecoderEventErrorKind::from(e),
+                                            }),
+                                        },
+                                        &event_list,
+                                    );
                                     break;
                                 }
                             }
@@ -269,7 +296,10 @@ impl Decoder {
             self.thread_handle = Some(thread_handle);
             Ok(())
         } else {
-            Err(DecoderError::new("Runtime", DecoderErrorKind::Runtime))
+            Err(DecoderError::new(
+                "Decoder is running",
+                DecoderErrorKind::Running,
+            ))
         }
     }
 
@@ -326,7 +356,7 @@ impl Decoder {
             },
         )?;
         engine.decoder.reset();
-        self.effect_running.reset(self.data.decoder_format);
+        self.effect_runtime.reset(self.data.decoder_format);
         Ok(r)
     }
 
@@ -470,7 +500,7 @@ impl Clone for DecoderEventErrorKind {
                 SeekErrorKind::ForwardOnly => SeekErrorKind::ForwardOnly,
                 SeekErrorKind::OutOfRange => SeekErrorKind::OutOfRange,
                 SeekErrorKind::InvalidTrack => SeekErrorKind::InvalidTrack,
-                _ => panic!("克隆失败，存在没有列举的类型, kind: {e:?}"),
+                _ => panic!("未定义错误, kind: {e:?}"),
             }),
             Self::Unsupported(e) => Self::Unsupported(e),
             Self::LimitError(e) => Self::LimitError(e),
@@ -518,6 +548,20 @@ impl Clone for DecoderEventErrorKind {
     }
 }
 
+impl From<symphonia::core::errors::Error> for DecoderEventErrorKind {
+    fn from(value: symphonia::core::errors::Error) -> Self {
+        match value {
+            symphonia::core::errors::Error::IoError(e) => Self::IoError(e),
+            symphonia::core::errors::Error::DecodeError(e) => Self::DecodeError(e),
+            symphonia::core::errors::Error::SeekError(e) => Self::SeekError(e),
+            symphonia::core::errors::Error::Unsupported(e) => Self::Unsupported(e),
+            symphonia::core::errors::Error::LimitError(e) => Self::LimitError(e),
+            symphonia::core::errors::Error::ResetRequired => Self::ResetRequired,
+            _ => panic!("未定义错误, kind: {value:?}"),
+        }
+    }
+}
+
 pub(super) type DecoderResult<T> = Result<T, DecoderError>;
 
 #[derive(Debug)]
@@ -529,7 +573,7 @@ pub(super) struct DecoderError {
 impl Display for DecoderError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let kind = match &self.kind {
-            DecoderErrorKind::Runtime => "Runtime",
+            DecoderErrorKind::Running => "Running",
             DecoderErrorKind::IOError(e) => &format!("IOError({e})"),
             DecoderErrorKind::ThreadJoinError(e) => &format!("ThreadJoinError({e:?})"),
             DecoderErrorKind::NoAudioTrack => "NoAudioTrack",
@@ -583,7 +627,7 @@ impl DecoderError {
 #[derive(Debug)]
 pub enum DecoderErrorKind {
     RingBufferNoMaxLen,
-    Runtime,
+    Running,
     IOError(std::io::Error),
     ThreadJoinError(Box<dyn Any + Send + 'static>),
     NoAudioTrack,

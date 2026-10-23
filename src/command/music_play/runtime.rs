@@ -141,7 +141,7 @@ impl Runtime {
             play_object,
             thread_control,
             ui_content,
-            run_stop: Arc::new(AtomicBool::new(false)),
+            run_stop,
         })
     }
 

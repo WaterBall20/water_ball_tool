@@ -28,6 +28,14 @@ impl AudioFormat {
             sample_rate,
         }
     }
+
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 }
 
 /*pub struct AudioBuffer {
