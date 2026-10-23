@@ -32,8 +32,8 @@ struct PlayObject {
     play_list: Arc<Mutex<PlayList>>,
     // 播放器
     player: Player,
-    //这次歌曲
-    this_track: Arc<Mutex<Option<Track>>>,
+    //解码中的歌曲
+    decoder_track: Arc<Mutex<Option<Track>>>,
     next_content: NextContent,
 }
 
@@ -75,11 +75,11 @@ impl Runtime {
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut player = Player::new()?;
 
-        let this_track = Arc::new(Mutex::new(None));
+        let decoder_track = Arc::new(Mutex::new(None));
         let ui_track = Arc::new(Mutex::new(None));
         //注册事件
         {
-            let this_track = this_track.clone();
+            let this_track = decoder_track.clone();
             let ui_track = ui_track.clone();
             player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
                 debug!("播放事件触发: {e:?}");
@@ -105,7 +105,7 @@ impl Runtime {
         let play_object = Arc::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player,
-            this_track,
+            decoder_track,
             next_content: NextContent {
                 next_id: Arc::new(AtomicUsize::new(0)),
                 err_count: Arc::new(AtomicUsize::new(0)),
@@ -194,7 +194,7 @@ impl Runtime {
                 }
                 ui_content.last_play_pos = play_pos;
                 let track_lock = play_object
-                    .this_track
+                    .decoder_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(track) = &*track_lock {
@@ -375,7 +375,7 @@ impl PlayObject {
             &self.play_list,
             false,
             self.player.clone(),
-            &self.this_track,
+            &self.decoder_track,
             Some(ui_track),
             &self.next_content,
             self.player.pre_effect_runtime(),
@@ -386,7 +386,7 @@ impl PlayObject {
         play_list: &Arc<Mutex<PlayList>>,
         play_end: bool,
         player: Player,
-        this_track: &Arc<Mutex<Option<Track>>>,
+        decoder_track: &Arc<Mutex<Option<Track>>>,
         ui_track: Option<&mut Option<Track>>,
         next_content: &NextContent,
         pre_effect_runtime: &PreEffectRuntime,
@@ -406,13 +406,13 @@ impl PlayObject {
                 player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
                 if let Some(ui_track) = ui_track {
-                    let this_track = this_track
+                    let decoder_track = decoder_track
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    *ui_track = this_track;
+                    *ui_track = decoder_track;
                 }
-                return Ok(this_track
+                return Ok(decoder_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone());
@@ -440,7 +440,7 @@ impl PlayObject {
                                     play_list,
                                     play_end,
                                     player.clone(),
-                                    this_track,
+                                    decoder_track,
                                     ui_track,
                                     next_content,
                                     pre_effect_runtime,
@@ -460,7 +460,8 @@ impl PlayObject {
 
             let play_list = play_list.clone();
             {
-                let this_track = this_track.clone();
+                let track = t.track().clone();
+                let decoder_track = decoder_track.clone();
                 let player = player.clone();
                 let next_content = next_content.clone();
                 let pre_effect_runtime = pre_effect_runtime.clone();
@@ -473,13 +474,16 @@ impl PlayObject {
                                     &play_list,
                                     true,
                                     player.clone(),
-                                    &this_track,
+                                    &decoder_track,
                                     None,
                                     &next_content,
                                     &pre_effect_runtime,
                                 ) {
                                     error!("自动换曲发生错误，err:{e}");
                                 }
+                            }
+                            DecoderEventType::Stop => {
+                                debug!("解码退出事件, track: {track:?}");
                             }
                         },
                         Err(err) => {
@@ -496,7 +500,7 @@ impl PlayObject {
             } else {
                 player.set_decoder(decoder)?;
             }
-            this_track
+            decoder_track
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .replace(t.track().clone());
@@ -514,7 +518,7 @@ impl PlayObject {
                 }
                 error!("切换下一曲发生错误，不存在，将暂停");
             }
-            pre_effect_runtime.input_none();
+            pre_effect_runtime.send_no_next();
             next_content.err_count.store(0, Ordering::Release);
 
             Ok(None)

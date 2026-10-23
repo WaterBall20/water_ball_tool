@@ -1,12 +1,12 @@
 use crate::command::music_play::decoder::{Decoder, DecoderResult};
-use crate::command::music_play::effect::cross_bridge::CrossBridge;
+use crate::command::music_play::effect::cross_bridge::CrossBridgeEffect;
 use crate::command::music_play::effect::resampler::ResamplerEffect;
 use crate::command::music_play::effect::runtime::{
-    AudioData, PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventSink,
+    PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventSink,
     PreEffectRuntimeEventType,
 };
 use crate::command::music_play::effect::{
-    AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
+    AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
@@ -83,12 +83,11 @@ impl Player {
                 let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
                 let is_playing = content.is_playing.load(Ordering::Acquire);
                 let len = if is_playing && volume != 0.0 {
-                    match ring_buf.try_read(data) {
-                        Ok(len) => len,
-                        Err(_) => {
-                            data.fill(0.0);
-                            0
-                        }
+                    if let Ok(len) = ring_buf.try_read(data) {
+                        len
+                    } else {
+                        data.fill(0.0);
+                        0
                     }
                 } else {
                     data.fill(0.0);
@@ -184,7 +183,7 @@ impl Player {
             PreEffectRuntime::create(pre_effect_ring_buf.clone(), audio_ring_buffer.clone());
         let output_format = AudioFormat::new(channels, sample_rate);
         pre_effect_runtime.add_effect(ResamplerEffect::new(output_format))?;
-        pre_effect_runtime.add_effect(CrossBridge::new(output_format))?;
+        pre_effect_runtime.add_effect(CrossBridgeEffect::new(output_format))?;
 
         let decoder = Arc::new(Mutex::new(None));
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
@@ -403,7 +402,7 @@ impl Player {
         }
         {
             let per = &mut self.sound_engine.pre_effect_runtime;
-            per.input_none();
+            per.send_skip();
             per.reset(*decoder.decoder_format());
         }
         self.sound_engine.audio_ring_buffer.clear();
@@ -471,7 +470,7 @@ impl Player {
                 != 0
         {
             self.pre_effect_ring_buffer().clear();
-            self.pre_effect_ring_buffer().push_wait(AudioData::None);
+            self.sound_engine.pre_effect_runtime.send_skip();
             let mut ring_buf = self.sound_engine.audio_ring_buffer.lock();
             let remove_len = ring_buf.len();
             for _ in 0..remove_len {

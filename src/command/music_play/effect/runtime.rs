@@ -1,6 +1,10 @@
-use crate::command::music_play::effect::{AudioFormat, PreEffect, PreEffectChain};
+use crate::command::music_play::effect::{
+    AudioData, AudioFormat, PreEffect, PreEffectChain, PreEffectDiscontinuity, PreEffectError,
+    PreEffectInfo,
+};
 use std::any::Any;
 use std::error::Error;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
@@ -17,12 +21,6 @@ pub struct PreEffectRuntime {
     event_list: Arc<Mutex<Vec<Box<dyn PreEffectRuntimeEventSink>>>>,
 }
 
-pub enum AudioData {
-    Block(Vec<f32>),
-    Eof,
-    Reset(AudioFormat),
-    None,
-}
 impl PreEffectRuntime {
     fn emit(
         event: PreEffectRuntimeEvent,
@@ -35,6 +33,14 @@ impl PreEffectRuntime {
         }
     }
 }
+
+impl PreEffectRuntime {
+    fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) {
+        self.input_buf.clear();
+        self.input_buf.push_wait(audio_data);
+    }
+}
+
 impl PreEffectRuntime {
     pub fn create(
         input_buf: Arc<ConcurrentRing<AudioData>>,
@@ -91,8 +97,14 @@ impl PreEffectRuntime {
                                         break;
                                     }
                                 }
-                                AudioData::Eof => {
-                                    let len = effects.input_eof(&mut out_temp_buf);
+                                AudioData::Eof
+                                | AudioData::NoNext
+                                | AudioData::Skip
+                                | AudioData::Seek => {
+                                    let len = effects.on_discontinuity(
+                                        &mut out_temp_buf,
+                                        PreEffectDiscontinuity::try_from(&data).expect("逻辑错误"),
+                                    );
                                     if len == 0 {
                                         continue;
                                     }
@@ -100,16 +112,27 @@ impl PreEffectRuntime {
                                         error!("Failed to write all audio data: {}", e);
                                         break;
                                     }
-                                    Self::emit(
-                                        PreEffectRuntimeEvent {
-                                            result: Ok(PreEffectRuntimeEventType::Eof),
-                                        },
-                                        &event_list,
-                                    );
+                                    if let AudioData::Eof = &data {
+                                        Self::emit(
+                                            PreEffectRuntimeEvent {
+                                                result: Ok(PreEffectRuntimeEventType::Eof),
+                                            },
+                                            &event_list,
+                                        );
+                                    }
                                 }
-                                AudioData::Reset(input_format) => effects.reset(input_format),
-                                AudioData::None => {
-                                    effects.input_none();
+                                AudioData::Reset(input_format) => {
+                                    if let Err(e) = effects.reset(input_format) {
+                                        Self::emit(
+                                            PreEffectRuntimeEvent {
+                                                result: Err(PreEffectRuntimeEventError::new(
+                                                    "Reset pre effect err",
+                                                    PreEffectRuntimeEventErrorKind::from(e),
+                                                )),
+                                            },
+                                            &event_list,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -124,7 +147,7 @@ impl PreEffectRuntime {
         self.stop.store(true, Ordering::Release);
         self.input_buf.clear();
         self.audio_buf.clear();
-        _ = self.input_buf.push(AudioData::None);
+        _ = self.input_buf.push(AudioData::NoNext);
         if let Some(join_handle) = self
             .effect_thread
             .lock()
@@ -139,12 +162,16 @@ impl PreEffectRuntime {
         Ok(())
     }
 
-    pub fn reset(&self, format: AudioFormat) {
-        self.input_buf.push_wait(AudioData::Reset(format));
+    pub fn send_skip(&self) {
+        self.send_input_and_clear_buf_inner(AudioData::Skip)
     }
 
-    pub fn input_none(&self) {
-        self.input_buf.push_wait(AudioData::None);
+    pub fn send_no_next(&self) {
+        self.send_input_and_clear_buf_inner(AudioData::NoNext)
+    }
+
+    pub fn reset(&self, format: AudioFormat) {
+        self.input_buf.push_wait(AudioData::Reset(format));
     }
 
     pub fn add_effect<E>(&mut self, effect: E) -> Result<(), Box<dyn Error + Send + Sync>>
@@ -184,7 +211,53 @@ pub struct PreEffectRuntimeEventError {
     kind: PreEffectRuntimeEventErrorKind,
 }
 
-pub enum PreEffectRuntimeEventErrorKind {}
+impl PreEffectRuntimeEventError {
+    pub fn new(message: &str, kind: PreEffectRuntimeEventErrorKind) -> Self {
+        Self {
+            message: message.to_string(),
+            kind,
+        }
+    }
+
+    pub fn kind(&self) -> &PreEffectRuntimeEventErrorKind {
+        &self.kind
+    }
+
+    pub fn message(&self) -> &String {
+        &self.message
+    }
+}
+
+impl Debug for PreEffectRuntimeEventError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let kind = match self.kind() {
+            PreEffectRuntimeEventErrorKind::ResetErrors(e) => &format!("ResetError({e:?})"),
+        };
+        write!(
+            f,
+            "PreEffectRuntimeEventError, kind: {kind}, message: {}",
+            self.message
+        )
+    }
+}
+
+impl Display for PreEffectRuntimeEventError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PreEffectRuntimeEventError : {}", self.message)
+    }
+}
+
+impl Error for PreEffectRuntimeEventError {}
+
+pub enum PreEffectRuntimeEventErrorKind {
+    ResetErrors(Vec<(PreEffectInfo, PreEffectError)>),
+}
+
+impl From<Vec<(PreEffectInfo, PreEffectError)>> for PreEffectRuntimeEventErrorKind {
+    fn from(value: Vec<(PreEffectInfo, PreEffectError)>) -> Self {
+        Self::ResetErrors(value)
+    }
+}
 
 pub trait PreEffectRuntimeEventSink: Send + 'static {
     fn emit(&mut self, event: Arc<PreEffectRuntimeEvent>);
