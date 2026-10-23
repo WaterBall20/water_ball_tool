@@ -32,8 +32,8 @@ struct PlayObject {
     play_list: Arc<Mutex<PlayList>>,
     // 播放器
     player: Player,
-    //这次歌曲
-    this_track: Arc<Mutex<Option<Track>>>,
+    //解码中的歌曲
+    decoder_track: Arc<Mutex<Option<Track>>>,
     next_content: NextContent,
 }
 
@@ -74,38 +74,12 @@ impl Runtime {
         mp: &MultiProgress,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut player = Player::new()?;
-
-        let this_track = Arc::new(Mutex::new(None));
-        let ui_track = Arc::new(Mutex::new(None));
-        //注册事件
-        {
-            let this_track = this_track.clone();
-            let ui_track = ui_track.clone();
-            player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
-                debug!("播放事件触发: {e:?}");
-                if let Ok(e) = e.result() {
-                    match e {
-                        PlayerEventType::TrackEnded => {
-                            ui_track
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .clone_from(
-                                    &this_track
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                                );
-                        }
-                    }
-                }
-            })));
-        }
-        //添加效果(淡出淡入)
-        player.add_audio_post_effect(FadeEffect::new());
+        let decoder_track = Arc::new(Mutex::new(None));
 
         let play_object = Arc::new(PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
-            player,
-            this_track,
+            player: player.clone(),
+            decoder_track: decoder_track.clone(),
             next_content: NextContent {
                 next_id: Arc::new(AtomicUsize::new(0)),
                 err_count: Arc::new(AtomicUsize::new(0)),
@@ -137,6 +111,33 @@ impl Runtime {
             ui_thread: Some(ui_thread),
             condvar,
         };
+
+        //注册事件
+        {
+            let decoder_track = decoder_track.clone();
+            let ui_content = ui_content.clone();
+            player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
+                debug!("播放事件触发: {e:?}");
+                if let Ok(e) = e.result() {
+                    match e {
+                        PlayerEventType::TrackEnded => {
+                            ui_content
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .ui_track
+                                .clone_from(
+                                    &decoder_track
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                                );
+                        }
+                    }
+                }
+            })));
+        }
+        //添加效果(淡出淡入)
+        player.add_audio_post_effect(FadeEffect::new());
+
         Ok(Self {
             play_object,
             thread_control,
@@ -193,60 +194,55 @@ impl Runtime {
                     ui_content.last_play_pos_eq_count = 0;
                 }
                 ui_content.last_play_pos = play_pos;
-                let track_lock = play_object
-                    .this_track
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(track) = &*track_lock {
+                if let Some(track) = &ui_content.ui_track {
                     let track_dur = *track.duration();
 
-                        let play_pos_millis = play_pos.as_millis();
-                        let play_pos_secs = play_pos_millis / 1000;
-                        let play_pos_minutes = play_pos_secs / 60;
-                        let track_dur_millis = track_dur.as_millis();
-                        let track_dur_secs = track_dur_millis / 1000;
-                        let track_dur_minutes = track_dur_secs / 60;
-                        pb.set_length(u64::try_from(track_dur_millis).unwrap_or(u64::MAX));
-                        pb.set_position(u64::try_from(play_pos_millis).unwrap_or(u64::MAX));
+                    let play_pos_millis = play_pos.as_millis();
+                    let play_pos_secs = play_pos_millis / 1000;
+                    let play_pos_minutes = play_pos_secs / 60;
+                    let track_dur_millis = track_dur.as_millis();
+                    let track_dur_secs = track_dur_millis / 1000;
+                    let track_dur_minutes = track_dur_secs / 60;
+                    pb.set_length(u64::try_from(track_dur_millis).unwrap_or(u64::MAX));
+                    pb.set_position(u64::try_from(play_pos_millis).unwrap_or(u64::MAX));
 
-                        // ---- 各字段分别着色 / Per-field coloring ----
-                        let time_str = format!(
-                            "{:>2}:{:0>2} / {:>2}:{:0>2}",
-                            play_pos_minutes,
-                            play_pos_secs % 60,
-                            track_dur_minutes,
-                            track_dur_secs % 60,
-                        )
-                        .cyan(); // 时间: 青色
+                    // ---- 各字段分别着色 / Per-field coloring ----
+                    let time_str = format!(
+                        "{:>2}:{:0>2} / {:>2}:{:0>2}",
+                        play_pos_minutes,
+                        play_pos_secs % 60,
+                        track_dur_minutes,
+                        track_dur_secs % 60,
+                    ).cyan(); // 时间: 青色
 
-                        let volume_str =
+                    let volume_str =
                             format!("volume: {:.0}%", play_object.player.volume() * 100.0).yellow();
-                        // 音量: 黄色
+                    // 音量: 黄色
 
-                        let title_str = track.title().bright_white().bold(); // 标题: 加粗亮白 (最醒目)
-                        let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
-                        let path_str = track.path().display().to_string().dimmed(); // 路径: 暗淡弱化
+                    let title_str = track.title().bright_white().bold(); // 标题: 加粗亮白 (最醒目)
+                    let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
+                    let path_str = track.path().display().to_string().dimmed(); // 路径: 暗淡弱化
 
-                        // ---- 拼装为 msg ----
-                        pb.set_message(format!(
-                            "[{time_str}] [{volume_str}]\
-                            \n{label_title}  : {title_str}\
-                            \n{label_artist} : {artist_str}\
-                            \n{label_path}   : {path_str}",
-                            label_title = "Title".green(),
-                            label_artist = "Artist".green(),
-                            label_path = "Path".green(),
-                        ));
+                    // ---- 拼装为 msg ----
+                    pb.set_message(format!(
+                        "[{time_str}] [{volume_str}]\
+                        \n{label_title}  : {title_str}\
+                        \n{label_artist} : {artist_str}\
+                        \n{label_path}   : {path_str}",
+                        label_title = "Title".green(),
+                        label_artist = "Artist".green(),
+                        label_path = "Path".green(),
+                    ));
 
-                    drop(track_lock);
+
                     ui_content = condvar
                         .wait_timeout(ui_content, Duration::from_millis(50))
                         .expect("Condvar won't fail")
                         .0;
                 } else {
                         pb.set_prefix("异常暂停中");
-                    drop(track_lock);
                     ui_content = condvar.wait(ui_content).expect("Condvar won't fail");
+                    continue;
                 }
                 //暂停时挂起
                 if !play_object.player.is_playing() && !run_stop.load(Ordering::Acquire) {
@@ -283,7 +279,9 @@ impl Runtime {
             .ui_content
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let r = self.play_object.next(&mut ui_content.ui_track)?;
+        let r = self
+            .play_object
+            .next(&mut ui_content.ui_track, &self.thread_control.condvar)?;
         if let Some(track) = r {
             info!(
                 "换曲为, Title: {}, Artist: {}, \
@@ -370,15 +368,20 @@ impl PlayObject {
     }
 
     ///下一曲
-    fn next(&self, ui_track: &mut Option<Track>) -> DecoderResult<Option<Track>> {
+    fn next(
+        &self,
+        ui_track: &mut Option<Track>,
+        condvar: &Arc<Condvar>,
+    ) -> DecoderResult<Option<Track>> {
         Self::next_inner(
             &self.play_list,
             false,
             self.player.clone(),
-            &self.this_track,
+            &self.decoder_track,
             Some(ui_track),
             &self.next_content,
             self.player.pre_effect_runtime(),
+            condvar,
         )
     }
 
@@ -386,10 +389,11 @@ impl PlayObject {
         play_list: &Arc<Mutex<PlayList>>,
         play_end: bool,
         player: Player,
-        this_track: &Arc<Mutex<Option<Track>>>,
+        decoder_track: &Arc<Mutex<Option<Track>>>,
         ui_track: Option<&mut Option<Track>>,
         next_content: &NextContent,
         pre_effect_runtime: &PreEffectRuntime,
+        condvar: &Arc<Condvar>,
     ) -> DecoderResult<Option<Track>> {
         let mut player = player;
         let mut play_list_lock = play_list
@@ -406,13 +410,13 @@ impl PlayObject {
                 player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
                 if let Some(ui_track) = ui_track {
-                    let this_track = this_track
+                    let decoder_track = decoder_track
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    *ui_track = this_track;
+                    *ui_track = decoder_track;
                 }
-                return Ok(this_track
+                return Ok(decoder_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone());
@@ -440,10 +444,11 @@ impl PlayObject {
                                     play_list,
                                     play_end,
                                     player.clone(),
-                                    this_track,
+                                    decoder_track,
                                     ui_track,
                                     next_content,
                                     pre_effect_runtime,
+                                    condvar,
                                 );
                             }
                             DecoderErrorAction::AutoRetry => {}
@@ -458,9 +463,11 @@ impl PlayObject {
                 }
             };
 
-            let play_list = play_list.clone();
             {
-                let this_track = this_track.clone();
+                let condvar = condvar.clone();
+                let play_list = play_list.clone();
+                let track = t.track().clone();
+                let decoder_track = decoder_track.clone();
                 let player = player.clone();
                 let next_content = next_content.clone();
                 let pre_effect_runtime = pre_effect_runtime.clone();
@@ -473,13 +480,17 @@ impl PlayObject {
                                     &play_list,
                                     true,
                                     player.clone(),
-                                    &this_track,
+                                    &decoder_track,
                                     None,
                                     &next_content,
                                     &pre_effect_runtime,
+                                    &condvar,
                                 ) {
                                     error!("自动换曲发生错误，err:{e}");
                                 }
+                            }
+                            DecoderEventType::Stop => {
+                                debug!("解码退出事件, track: {track:?}");
                             }
                         },
                         Err(err) => {
@@ -494,9 +505,13 @@ impl PlayObject {
             if play_end {
                 player.set_decoder_no_clear(decoder)?;
             } else {
+                if let Some(ui_track) = ui_track {
+                    ui_track.replace(t.track().clone());
+                    condvar.notify_all();
+                }
                 player.set_decoder(decoder)?;
             }
-            this_track
+            decoder_track
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .replace(t.track().clone());
@@ -514,7 +529,7 @@ impl PlayObject {
                 }
                 error!("切换下一曲发生错误，不存在，将暂停");
             }
-            pre_effect_runtime.input_none();
+            pre_effect_runtime.send_no_next();
             next_content.err_count.store(0, Ordering::Release);
 
             Ok(None)

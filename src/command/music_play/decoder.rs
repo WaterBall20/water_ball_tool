@@ -1,5 +1,5 @@
-use crate::command::music_play::effect::AudioFormat;
-use crate::command::music_play::effect::runtime::{AudioData, PreEffectRuntime};
+use crate::command::music_play::effect::runtime::PreEffectRuntime;
+use crate::command::music_play::effect::{AudioData, AudioFormat};
 use rubato::audioadapter_buffers::SizeError;
 use rubato::{ResampleError, ResamplerConstructionError};
 use std::any::Any;
@@ -70,9 +70,9 @@ impl Decoder {
             };
             Self::emit(
                 DecoderEvent {
-                    result: Err(e.clone()),
+                    result: Ok(DecoderEventType::Stop),
                 },
-                &event_list,
+                event_list,
             );
             return Err(e);
         }
@@ -324,8 +324,7 @@ impl Decoder {
     pub fn stop(self) -> DecoderResult<()> {
         let mut s = self;
         s.stop.store(true, Ordering::Release);
-        s.ring_buf.clear();
-        s.ring_buf.push_wait(AudioData::None);
+        s.effect_runtime.send_skip();
         s.join()
     }
 
@@ -443,6 +442,7 @@ impl DecoderEvent {
 #[derive(Debug, Clone)]
 pub(super) enum DecoderEventType {
     Eof,
+    Stop,
 }
 
 #[derive(Debug, Clone)]

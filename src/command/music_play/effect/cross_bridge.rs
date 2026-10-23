@@ -1,15 +1,16 @@
-use crate::command::music_play::effect::{AudioFormat, PreEffect};
+use crate::command::music_play::effect::{
+    AudioFormat, PreEffect, PreEffectDiscontinuity, PreEffectInfo, PreEffectOutputFormat,
+};
 use std::collections::VecDeque;
 use std::error::Error;
 use std::f32::consts::FRAC_PI_2;
 use std::time::Duration;
 
-pub struct CrossBridge {
-    enabled: bool,
+pub struct CrossBridgeEffect {
+    info: PreEffectInfo,
     buf: VecDeque<f32>,
     b_buf: Vec<f32>,
     buf_max_len: usize,
-    output_format: AudioFormat,
     duration: Duration,
     is_effect: bool,
     // 预计算增益表，按 sample 索引，长度 = buf_max_len
@@ -17,14 +18,31 @@ pub struct CrossBridge {
     gain_in: Vec<f32>,
 }
 
-impl PreEffect for CrossBridge {
-    fn init(&mut self, _: AudioFormat) -> Result<(), Box<dyn Error + Send + Sync>> {
+impl PreEffect for CrossBridgeEffect {
+    fn init(
+        &mut self,
+        _: AudioFormat,
+    ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync>> {
         self.set_duration(self.duration);
-        Ok(())
+        Ok(PreEffectOutputFormat {
+            output_format: self.info.output_format,
+        })
     }
 
-    fn output_format(&self) -> AudioFormat {
-        self.output_format
+    fn reset(
+        &mut self,
+        _input_format: AudioFormat,
+    ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync + 'static>> {
+        // reset 在每首歌开始输入数据前调用。
+        // 若 is_effect = true，说明上一首 input_eof 已触发，
+        // buf 里是 A 尾部，正在等本首数据做交叉，必须保留。
+        if !self.is_effect {
+            self.b_buf.clear();
+            self.buf.clear();
+        }
+        Ok(PreEffectOutputFormat {
+            output_format: self.info.output_format,
+        })
     }
 
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
@@ -35,60 +53,70 @@ impl PreEffect for CrossBridge {
         }
     }
 
-    fn input_eof(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
-        if self.is_effect {
+    fn on_discontinuity(
+        &mut self,
+        input: &[f32],
+        out: &mut Vec<f32>,
+        kind: PreEffectDiscontinuity,
+    ) -> usize {
+        if PreEffectDiscontinuity::Skip == kind {
             self.is_effect = false;
             self.b_buf.clear();
-        }
-
-        let n = self.process_normal(input, out);
-
-        if self.buf.is_empty() {
-            return n;
-        }
-
-        self.is_effect = true;
-        self.b_buf.clear();
-        n
-    }
-
-    fn input_none(&mut self) {
-        self.is_effect = false;
-        self.b_buf.clear();
-        self.buf.clear();
-    }
-
-    fn reset(&mut self, _input_format: AudioFormat) {
-        // reset 在每首歌开始输入数据前调用。
-        // 若 is_effect = true，说明上一首 input_eof 已触发，
-        // buf 里是 A 尾部，正在等本首数据做交叉，必须保留。
-        if !self.is_effect {
-            self.b_buf.clear();
             self.buf.clear();
+            0
+        } else if PreEffectDiscontinuity::NoNext == kind {
+            let out_len = self.buf.len() + input.len();
+            out.reserve_exact(out_len);
+            for v in self.buf.drain(..) {
+                out.push(v);
+            }
+            out.extend_from_slice(input);
+            out.len()
+        } else {
+            if self.is_effect {
+                self.is_effect = false;
+                self.b_buf.clear();
+            }
+
+            let n = self.process_normal(input, out);
+
+            if self.buf.is_empty() {
+                return n;
+            }
+
+            self.is_effect = true;
+            self.b_buf.clear();
+            n
         }
+    }
+
+    fn info(&self) -> &PreEffectInfo {
+        &self.info
     }
 
     fn enabled(&self) -> bool {
-        self.enabled
+        self.info.enabled
     }
 
     fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    fn name(&self) -> &'static str {
-        "CrossBridge"
+        self.info.enabled = enabled;
     }
 }
 
-impl CrossBridge {
+impl CrossBridgeEffect {
     pub fn new(output_format: AudioFormat) -> Self {
         Self {
-            enabled: true,
+            info: PreEffectInfo {
+                name: "CrossBridge".to_string(),
+                enabled: true,
+                input_format: Default::default(),
+                output_format,
+                latency_samples: 0,
+                tail_samples: 0,
+            },
             buf: VecDeque::new(),
             b_buf: Vec::new(),
             buf_max_len: 0,
-            output_format,
             duration: Duration::from_secs(1),
             is_effect: false,
             gain_out: Vec::new(),
@@ -103,13 +131,13 @@ impl CrossBridge {
             return;
         }
 
-        let channels = self.output_format.channels as usize;
+        let channels = self.info.output_format.channels as usize;
         if channels == 0 {
             self.buf_max_len = 0;
             return;
         }
 
-        let sample_rate = self.output_format.sample_rate as f64;
+        let sample_rate = self.info.output_format.sample_rate as f64;
         if sample_rate <= 0.0 {
             self.buf_max_len = 0;
             return;
@@ -199,7 +227,7 @@ impl CrossBridge {
     /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变），查预计算增益表；
     /// 3) input_rest 走与非交叉完全一致的延迟线逻辑。
     fn process_crossfade(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
-        let channels = self.output_format.channels as usize;
+        let channels = self.info.output_format.channels as usize;
         let target = self.buf.len();
 
         if channels == 0 || target == 0 {

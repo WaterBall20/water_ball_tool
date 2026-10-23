@@ -1,4 +1,6 @@
-use crate::command::music_play::effect::{AudioFormat, PreEffect};
+use crate::command::music_play::effect::{
+    AudioFormat, PreEffect, PreEffectDiscontinuity, PreEffectInfo, PreEffectOutputFormat,
+};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
 use std::cmp::PartialEq;
@@ -8,15 +10,13 @@ use std::error::Error;
 const RESAMPLER_CHUNK_LEN: usize = 1024;
 
 pub struct ResamplerEffect {
-    enabled: bool,
+    info: PreEffectInfo,
     error: Option<String>,
     resampler: Option<Fft<f32>>,
     /// 当前 resampler 对应的输入格式；output_format 构造后固定，无需单列
     resampler_input_format: Option<AudioFormat>,
     in_buf: VecDeque<f32>,
     out_temp_buf: Vec<f32>,
-    input_format: AudioFormat,
-    output_format: AudioFormat,
     max_out_frames: usize,
     chunk_len: usize,
 }
@@ -24,21 +24,26 @@ pub struct ResamplerEffect {
 impl ResamplerEffect {
     pub fn new(output_format: AudioFormat) -> Self {
         Self {
-            enabled: true,
+            info: PreEffectInfo {
+                name: "ResamplerEffect".to_string(),
+                enabled: true,
+                input_format: Default::default(),
+                output_format,
+                latency_samples: 0,
+                tail_samples: 0,
+            },
             error: None,
             resampler: None,
             resampler_input_format: None,
             in_buf: VecDeque::new(),
             out_temp_buf: Vec::new(),
-            input_format: AudioFormat::default(),
-            output_format,
             max_out_frames: 0,
             chunk_len: RESAMPLER_CHUNK_LEN,
         }
     }
 
     fn set_error(&mut self, error: Box<dyn Error + 'static>) {
-        self.enabled = false;
+        self.info.enabled = false;
         self.error = Some(error.to_string());
     }
 
@@ -75,7 +80,9 @@ impl ResamplerEffect {
 
     /// 直通 = 出错 / 格式相同 / 无重采样器
     fn is_passthrough(&self) -> bool {
-        self.error.is_some() || self.output_format == self.input_format || self.resampler.is_none()
+        self.error.is_some()
+            || self.info.output_format == self.info.input_format
+            || self.resampler.is_none()
     }
 }
 
@@ -83,7 +90,7 @@ impl PreEffect for ResamplerEffect {
     fn init(
         &mut self,
         input_format: AudioFormat,
-    ) -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
+    ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync + 'static>> {
         if input_format.channels == 0 {
             return Err("channels must be > 0".into());
         }
@@ -91,15 +98,17 @@ impl PreEffect for ResamplerEffect {
         self.in_buf.clear();
 
         // 直通：保留 resampler 供后续切回复用，不 take()
-        if self.output_format == input_format {
-            self.input_format = input_format;
-            return Ok(());
+        if self.info.output_format == input_format {
+            self.info.input_format = input_format;
+            return Ok(PreEffectOutputFormat {
+                output_format: self.info.output_format,
+            });
         }
 
         let channels = input_format.channels as usize;
         let plan = ResamplePlan::compute_plan(
             input_format.sample_rate,
-            self.output_format.sample_rate,
+            self.info.output_format.sample_rate,
             32768,
             0.10,
             2048,
@@ -109,19 +118,21 @@ impl PreEffect for ResamplerEffect {
 
         // 命中：已有 resampler 且输入格式相同（output_format 固定），复用 + reset
         if self.resampler.is_some() && self.resampler_input_format == Some(input_format) {
-            self.input_format = input_format;
+            self.info.input_format = input_format;
             self.in_buf.reserve(chunk_len * channels * 2);
             if let Some(r) = &mut self.resampler {
                 r.reset();
             }
             self.error.take();
-            return Ok(());
+            return Ok(PreEffectOutputFormat {
+                output_format: self.info.output_format,
+            });
         }
 
         // 未命中：先构造到局部，成功后再一次性提交，保证 init 原子性
         let resampler = Fft::<f32>::new(
             input_format.sample_rate as usize,
-            self.output_format.sample_rate as usize,
+            self.info.output_format.sample_rate as usize,
             chunk_len,
             channels,
             FixedSync::Input,
@@ -133,7 +144,7 @@ impl PreEffect for ResamplerEffect {
         in_buf.reserve(chunk_len * channels * 2);
 
         // 提交
-        self.input_format = input_format;
+        self.info.input_format = input_format;
         self.chunk_len = chunk_len;
         self.max_out_frames = max_out_frames;
         self.out_temp_buf = out_temp_buf;
@@ -141,11 +152,16 @@ impl PreEffect for ResamplerEffect {
         self.resampler = Some(resampler);
         self.resampler_input_format = Some(input_format);
         self.error.take();
-        Ok(())
+        Ok(PreEffectOutputFormat {
+            output_format: self.info.output_format,
+        })
     }
 
-    fn output_format(&self) -> AudioFormat {
-        self.output_format
+    fn reset(
+        &mut self,
+        input_format: AudioFormat,
+    ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync + 'static>> {
+        self.init(input_format)
     }
 
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
@@ -154,14 +170,14 @@ impl PreEffect for ResamplerEffect {
             return 0;
         }
 
-        if self.output_format == self.input_format || self.resampler.is_none() {
+        if self.info.output_format == self.info.input_format || self.resampler.is_none() {
             out.clear();
             out.reserve_exact(input.len());
             out.extend_from_slice(input);
             return out.len();
         }
 
-        let channels = self.input_format.channels as usize;
+        let channels = self.info.input_format.channels as usize;
         if channels == 0 {
             out.clear();
             return 0;
@@ -210,7 +226,15 @@ impl PreEffect for ResamplerEffect {
         out.len()
     }
 
-    fn input_eof(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+    fn on_discontinuity(
+        &mut self,
+        input: &[f32],
+        out: &mut Vec<f32>,
+        kind: PreEffectDiscontinuity,
+    ) -> usize {
+        if PreEffectDiscontinuity::Skip == kind || PreEffectDiscontinuity::Seek == kind {
+            return 0;
+        }
         if self.is_passthrough() {
             out.clear();
             out.reserve_exact(self.in_buf.len() + input.len());
@@ -219,7 +243,7 @@ impl PreEffect for ResamplerEffect {
             return out.len();
         }
 
-        let channels = self.input_format.channels as usize;
+        let channels = self.info.input_format.channels as usize;
         if channels == 0 {
             out.clear();
             return 0;
@@ -267,29 +291,19 @@ impl PreEffect for ResamplerEffect {
         out.len()
     }
 
-    fn reset(&mut self, input_format: AudioFormat) {
-        if let Err(e) = self.init(input_format) {
-            self.set_error(e);
-        }
+    fn info(&self) -> &PreEffectInfo {
+        &self.info
     }
 
-    /*    fn try_reset(&mut self, input_format: AudioFormat) -> Result<(), Box<dyn Error + 'static>> {
-        self.init(input_format)
-    }*/
-
     fn enabled(&self) -> bool {
-        self.enabled
+        self.info.enabled
     }
 
     fn set_enabled(&mut self, enabled: bool) {
         if enabled && self.error.is_some() {
             return;
         }
-        self.enabled = enabled;
-    }
-
-    fn name(&self) -> &'static str {
-        "ResamplerEffect"
+        self.info.enabled = enabled;
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
