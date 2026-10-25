@@ -190,7 +190,7 @@ fn pack_file_metadata_data_block_save_and_load() {
         ManifestDataBlock::from_block_data_new(b_block_data, 0)
             .expect("从块数据创建ManifestDataBlock失败"),
     )
-        .expect("加载Attribute失败");
+    .expect("加载Attribute失败");
     assert_eq!(b, b_load);
     //Save3
     let b_block_data = b.get_block_data().expect("获取块数据失败").0;
@@ -199,7 +199,7 @@ fn pack_file_metadata_data_block_save_and_load() {
         ManifestDataBlock::from_block_data_new(b_block_data, 0)
             .expect("从块数据创建ManifestDataBlock失败"),
     )
-        .expect("加载Attribute失败");
+    .expect("加载Attribute失败");
     assert_eq!(b, b_load);
 }
 

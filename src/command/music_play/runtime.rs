@@ -8,6 +8,7 @@ use crate::command::music_play::play_list::{PlayList, Track};
 use crate::command::music_play::player::{
     Player, PlayerEventChannelSink, PlayerEventSink, PlayerEventType,
 };
+use crate::command::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
 use colored::Colorize;
 use indicatif::{MultiProgress, ProgressStyle};
 use std::any::Any;
@@ -35,6 +36,7 @@ struct PlayObject {
     //解码中的歌曲
     decoder_track: Arc<Mutex<Option<Track>>>,
     next_content: NextContent,
+    time_metrics: Arc<TimeMetrics>,
 }
 
 #[derive(Clone)]
@@ -84,6 +86,7 @@ impl Runtime {
                 next_id: Arc::new(AtomicUsize::new(0)),
                 err_count: Arc::new(AtomicUsize::new(0)),
             },
+            time_metrics: player.time_metrics().clone(),
         });
         //控制变量
         let condvar = Arc::new(Condvar::new());
@@ -153,8 +156,32 @@ impl Runtime {
         run_stop: Arc<AtomicBool>,
         ui_content: Arc<Mutex<UIContent>>,
     ) -> io::Result<JoinHandle<()>> {
+        fn time_take(
+            duration_stats: &DurationStats,
+            duration_stats_window: &mut DurationStatsWindow,
+        ) {
+            if let Some(d) = duration_stats.take() {
+                *duration_stats_window = d;
+            }
+        }
+        fn fmt_ns(ns: u64) -> String {
+            format!("{ns:09}ns")
+        }
+        fn fmt_ns_color(ns: u64) -> String {
+            fmt_ns(ns).yellow().to_string()
+        }
         let pb = crate::command::create_pb(mp);
+
         thread::Builder::new().name("ui".to_string()).spawn(move || {
+            //时间统计
+            let mut time_decoder = DurationStatsWindow::default();
+            let mut time_decoder_write_wait = DurationStatsWindow::default();
+            let mut time_effect_read_wait = DurationStatsWindow::default();
+            let mut time_effect_process = DurationStatsWindow::default();
+            let mut time_effect_write_wait = DurationStatsWindow::default();
+            let mut time_callback_copy = DurationStatsWindow::default();
+            let mut time_callback = DurationStatsWindow::default();
+            let mut time_callback_post_effect = DurationStatsWindow::default();
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] {percent:>3.bold.magenta}%  {msg}")
@@ -223,12 +250,42 @@ impl Runtime {
                     let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
                     let path_str = track.path().display().to_string().dimmed(); // 路径: 暗淡弱化
 
+                    //时间统计
+                    let time_metrics_str = {
+                        let time_m = &play_object.time_metrics;
+                        time_take(&time_m.decode, &mut time_decoder);
+                        time_take(&time_m.decode_write_wait, &mut time_decoder_write_wait);
+                        time_take(&time_m.effect_read_wait, &mut time_effect_read_wait);
+                        time_take(&time_m.effect_process, &mut time_effect_process);
+                        time_take(&time_m.effect_write_wait, &mut time_effect_write_wait);
+                        time_take(&time_m.callback_total, &mut time_callback);
+                        time_take(&time_m.callback_copy, &mut time_callback_copy);
+                        time_take(&time_m.callback_post_effect, &mut time_callback_post_effect);
+                        format!("{title: <6}:\
+                        \ndecoder: {decoder}, write_wait: {decoder_write_wait}\
+                        \neffect: read_wait: {effect_read_wait}, process: {effect_process}, \
+                        write_wait: {effect_write_wait}\
+                        \ncallback: {callback}, copy: {callback_copy}, post_effect:\
+                        {callback_post_effect}",
+                                title = "Time".green(),
+                                decoder = fmt_ns(time_decoder.max_ns).green(),
+                                decoder_write_wait = fmt_ns(time_decoder_write_wait.max_ns).blue(),
+                                effect_read_wait = fmt_ns(time_effect_read_wait.max_ns).yellow(),
+                                effect_process = fmt_ns(time_effect_process.max_ns).red(),
+                                effect_write_wait = fmt_ns(time_effect_write_wait.max_ns).blue(),
+                                callback = fmt_ns(time_callback.max_ns).green(),
+                                callback_copy = fmt_ns(time_callback_copy.max_ns).yellow(),
+                                callback_post_effect = fmt_ns(time_callback_post_effect.max_ns).red()
+                        )
+                    };
+
                     // ---- 拼装为 msg ----
                     pb.set_message(format!(
                         "[{time_str}] [{volume_str}]\
-                        \n{label_title}  : {title_str}\
-                        \n{label_artist} : {artist_str}\
-                        \n{label_path}   : {path_str}",
+                        \n{label_title: <6}: {title_str}\
+                        \n{label_artist: <6}: {artist_str}\
+                        \n{label_path: <6}: {path_str}\
+                        \n{time_metrics_str}",
                         label_title = "Title".green(),
                         label_artist = "Artist".green(),
                         label_path = "Path".green(),
@@ -429,9 +486,10 @@ impl PlayObject {
 
             let mut decoder = loop {
                 let decoder = Decoder::new(
-                    player.pre_effect_ring_buffer().clone(),
                     t.track().path(),
+                    player.pre_effect_ring_buffer().clone(),
                     player.pre_effect_runtime().clone(),
+                    player.time_metrics().clone(),
                 );
                 match decoder {
                     Ok(decoder) => break decoder,

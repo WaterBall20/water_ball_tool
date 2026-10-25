@@ -2,8 +2,7 @@ use crate::tools;
 use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
-    DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN,
-    ManifestDataBlock,
+    DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
 };
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -279,10 +278,7 @@ impl PackIO /*核心*/ {
     /// Contiguous chain: only physically adjacent free fragments (prev end ==
     /// next start) merge into one segment; if the chain covers the request,
     /// consume all fragments in it and return a single segment.
-    fn get_pos_contiguous(
-        length: u64,
-        empty_data_pos: &mut Vec<(u64, u64)>,
-    ) -> Option<(u64, u64)> {
+    fn get_pos_contiguous(length: u64, empty_data_pos: &mut Vec<(u64, u64)>) -> Option<(u64, u64)> {
         use std::collections::HashMap;
         let mut start_map: HashMap<u64, usize> = HashMap::with_capacity(empty_data_pos.len());
         let mut end_map: HashMap<u64, usize> = HashMap::with_capacity(empty_data_pos.len());

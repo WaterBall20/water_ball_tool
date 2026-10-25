@@ -13,6 +13,7 @@ pub mod effect;
 mod play_list;
 mod player;
 mod runtime;
+pub mod tools;
 pub mod tui;
 
 #[derive(Args, Debug)]
@@ -45,7 +46,7 @@ pub(crate) enum LoopMode {
 }
 
 pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
-    let mp = multi_progress_init();
+    let mp = multi_progress_init("music_play");
     let files = args.files;
     let volume = {
         if args.volume < 0.0 {

@@ -1,5 +1,7 @@
 use crate::command::music_play::effect::runtime::PreEffectRuntime;
 use crate::command::music_play::effect::{AudioData, AudioFormat};
+use crate::command::music_play::tools;
+use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use rubato::audioadapter_buffers::SizeError;
 use rubato::{ResampleError, ResamplerConstructionError};
 use std::any::Any;
@@ -10,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::SeekErrorKind;
 use symphonia::core::formats::probe::Hint;
@@ -32,6 +34,7 @@ pub(super) struct Decoder {
     event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
     effect_runtime: PreEffectRuntime,
     data: DecoderData,
+    time_metrics: Arc<TimeMetrics>,
 }
 
 struct DecoderEngine {
@@ -61,6 +64,7 @@ impl Decoder {
         stop: &Arc<AtomicBool>,
         event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
         write_buf: &[f32],
+        write_wait_acc: &mut DurationAccumulator,
     ) -> Result<(), DecoderEventError> {
         // 检查停止信号
         if stop.load(Ordering::Acquire) {
@@ -76,17 +80,19 @@ impl Decoder {
             );
             return Err(e);
         }
-
+        let t1 = Instant::now();
         ring_buf.push_wait(AudioData::Block(write_buf.to_vec()));
+        write_wait_acc.record(t1.elapsed());
         Ok(())
     }
 }
 
 impl Decoder {
     pub fn new(
-        ring_buf: Arc<ConcurrentRing<AudioData>>,
         path: &Path,
+        ring_buf: Arc<ConcurrentRing<AudioData>>,
         effect_runtime: PreEffectRuntime,
+        time_metrics: Arc<TimeMetrics>,
     ) -> DecoderResult<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         // 1. 打开文件 & 创建 MSS
@@ -173,6 +179,7 @@ impl Decoder {
             event_list: Arc::new(Mutex::new(Vec::new())),
             effect_runtime,
             data,
+            time_metrics,
         })
     }
 
@@ -189,6 +196,7 @@ impl Decoder {
                 let ring_buf = self.ring_buf.clone();
                 let stop = self.stop.clone();
                 let data = self.data;
+                let time_metrics = self.time_metrics.clone();
                 // 4. 解码循环
                 std::thread::Builder::new()
                     .name(format!("decoder-{file_stem}"))
@@ -198,6 +206,10 @@ impl Decoder {
                         let ring_buf_write_len = data.ring_buf_write_len;
                         let mut buf = Vec::with_capacity(ring_buf_write_len);
                         let mut out_buf = Vec::with_capacity(ring_buf_write_len);
+                        //统计数据
+                        let mut decode_acc = DurationAccumulator::new();
+                        let mut write_wait_acc = DurationAccumulator::new();
+                        let mut blocks = 0;
                         loop {
                             // 检查停止信号
                             if stop.load(Ordering::Acquire) {
@@ -205,18 +217,23 @@ impl Decoder {
                             }
                             // 获取锁
                             let mut engine = engine.lock().expect("engine is poisoned");
-                            //事件列表
+                            //解码
+                            let t0 = Instant::now();
                             let packet = match engine.format.next_packet() {
-                                Ok(Some(p)) => p,
-                                Ok(None) => {
-                                    ring_buf.push_wait(AudioData::Eof);
-                                    Self::emit(
-                                        DecoderEvent {
-                                            result: Ok(DecoderEventType::Eof),
-                                        },
-                                        &event_list,
-                                    );
-                                    break;
+                                Ok(e) => {
+                                    decode_acc.record(t0.elapsed());
+                                    if let Some(p) = e {
+                                        p
+                                    } else {
+                                        ring_buf.push_wait(AudioData::Eof);
+                                        Self::emit(
+                                            DecoderEvent {
+                                                result: Ok(DecoderEventType::Eof),
+                                            },
+                                            &event_list,
+                                        );
+                                        break;
+                                    }
                                 }
                                 Err(e) => {
                                     error!("Error reading packet: {e}");
@@ -254,12 +271,19 @@ impl Decoder {
                                         &stop,
                                         &event_list,
                                         &out_buf,
+                                        &mut write_wait_acc,
                                     )
                                     .is_err()
                                     {
                                         break;
                                     }
                                     out_buf.clear();
+                                    //统计
+                                    blocks += 1;
+                                    if blocks % tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0 {
+                                        decode_acc.flush_into(&time_metrics.decode);
+                                        write_wait_acc.flush_into(&time_metrics.decode_write_wait);
+                                    }
                                 }
                                 Err(symphonia::core::errors::Error::DecodeError(e)) => {
                                     error!("Decode error (skipping frame): {e}");

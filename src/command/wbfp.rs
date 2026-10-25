@@ -152,7 +152,7 @@ impl WaterBallFilePackCommandsHashVerify {
 /// based on the subcommand. Each function handles its own progress bars
 /// and multi-threading logic independently.
 pub fn commands(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let mp = multi_progress_init();
+    let mp = multi_progress_init("wbfp");
     let args2 = &args.commands;
     match args2 {
         WaterBallFilePackCommands::Pack(p) => WaterBallFilePackArgsRuning::wbfp_p(p, mp),

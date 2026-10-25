@@ -2,12 +2,14 @@ use crate::command::music_play::effect::{
     AudioData, AudioFormat, PreEffect, PreEffectChain, PreEffectDiscontinuity, PreEffectError,
     PreEffectInfo,
 };
+use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 use tracing::{debug, error};
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 
@@ -19,6 +21,7 @@ pub struct PreEffectRuntime {
     stop: Arc<AtomicBool>,
     effect_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     event_list: Arc<Mutex<Vec<Box<dyn PreEffectRuntimeEventSink>>>>,
+    time_metrics: Arc<TimeMetrics>,
 }
 
 impl PreEffectRuntime {
@@ -45,6 +48,7 @@ impl PreEffectRuntime {
     pub fn create(
         input_buf: Arc<ConcurrentRing<AudioData>>,
         audio_buf: Arc<ConcurrentRing<f32>>,
+        time_metrics: Arc<TimeMetrics>,
     ) -> Self {
         Self {
             effects: Arc::new(Mutex::new(PreEffectChain::new())),
@@ -53,6 +57,7 @@ impl PreEffectRuntime {
             stop: Arc::new(AtomicBool::new(false)),
             effect_thread: Arc::new(Mutex::new(None)),
             event_list: Arc::new(Mutex::new(Vec::new())),
+            time_metrics,
         }
     }
 
@@ -67,11 +72,17 @@ impl PreEffectRuntime {
             let audio_buf = self.audio_buf.clone();
             let stop = self.stop.clone();
             let event_list = self.event_list.clone();
-            let mut out_temp_buf = Vec::new();
+            let time_metrics = self.time_metrics.clone();
             *effect_thread = Some({
                 std::thread::Builder::new()
                     .name("pre-effect-running".to_string())
                     .spawn(move || {
+                        //统计
+                        let mut out_temp_buf = Vec::new();
+                        let mut read_wait_acc = DurationAccumulator::new();
+                        let mut process_acc = DurationAccumulator::new();
+                        let mut write_wait_acc = DurationAccumulator::new();
+                        let mut blocks = 0;
                         debug!("Pre effect thread started");
                         loop {
                             if stop.load(Ordering::Acquire) {
@@ -82,19 +93,31 @@ impl PreEffectRuntime {
                                 e.into_inner()
                             });
                             //数据处理
+                            let t0 = Instant::now();
                             let data = input_buf.pop_wait();
+                            read_wait_acc.record(t0.elapsed());
                             if stop.load(Ordering::Acquire) {
                                 break;
                             }
                             match data {
                                 AudioData::Block(data) => {
+                                    let t1 = Instant::now();
                                     let len = effects.process(&data, &mut out_temp_buf);
+                                    process_acc.record(t1.elapsed());
                                     if len == 0 {
                                         continue;
                                     }
+                                    let t2 = Instant::now();
                                     if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
                                         error!("Failed to write all audio data: {}", e);
                                         break;
+                                    }
+                                    write_wait_acc.record(t2.elapsed());
+                                    blocks += 1;
+                                    if blocks % crate::command::music_play::tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0 {
+                                        read_wait_acc.flush_into(&time_metrics.effect_read_wait);
+                                        process_acc.flush_into(&time_metrics.effect_process);
+                                        write_wait_acc.flush_into(&time_metrics.effect_write_wait);
                                     }
                                 }
                                 AudioData::Eof

@@ -304,9 +304,9 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + a_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + a_data_len]
                 } else {
                     let b_data_len = usize::try_from(Self::get_data_len(b_data)?)
                         .map_err(|_| PackFileError::Format("数据长度转换失败".into()))?;
@@ -314,9 +314,9 @@ impl ManifestDataBlock {
                         + MANIFEST_DATA_BLOCK_DATA_VER_LEN
                         + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
                         ..MANIFEST_DATA_BLOCK_DATA_LEN_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_VER_LEN
-                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
-                        + b_data_len]
+                            + MANIFEST_DATA_BLOCK_DATA_VER_LEN
+                            + MANIFEST_DATA_BLOCK_DATA_HASH_LEN
+                            + b_data_len]
                 },
             ))
         } else {
@@ -409,8 +409,8 @@ impl ManifestDataBlock {
             Ok(
                 &block_data[b_data_index + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
                     ..b_data_index
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
-                    + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_INDEX
+                        + MANIFEST_DATA_BLOCK_DATA_HASH_LEN],
             )
         }
     }
@@ -1739,11 +1739,7 @@ impl WBFilesPackManifest {
         &mut self.file
     }
 
-    pub(crate) fn new(
-        attribute: Attribute,
-        root_struct: PackStruct,
-        file: Option<PackIO>,
-    ) -> Self {
+    pub(crate) fn new(attribute: Attribute, root_struct: PackStruct, file: Option<PackIO>) -> Self {
         Self {
             attribute,
             root_struct,

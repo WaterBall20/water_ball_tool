@@ -9,16 +9,26 @@
 //! through a `MultiProgressWriter` adapter to coexist with the indicatif progress bar.
 #![deny(clippy::unwrap_used)]
 
-use crate::command::Cli;
-use clap::Parser;
-use indicatif::MultiProgress;
-use std::io;
-use std::io::Write;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::exit;
 use std::sync::{Arc, Mutex, MutexGuard};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, fmt};
+
+use crate::command::Cli;
+use chrono::Utc;
+use clap::Parser;
+use directories::ProjectDirs;
+use indicatif::MultiProgress;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::{
+    EnvFilter, Layer,
+    fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    util::SubscriberInitExt,
+};
 
 mod command;
 
@@ -32,52 +42,79 @@ fn main() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 共享 Writer：内部持有 MultiProgress 与按行缓冲
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 自定义 FormatEvent：仅用于文件
+// ===========================================================================
+struct BracketFormat;
 
-/// 内部状态：仅在锁内访问。
-struct Inner {
+impl<S, N> FormatEvent<S, N> for BracketFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let meta = event.metadata();
+
+        // [时间]
+        write!(writer, "[{}] ", Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"))?;
+
+        // [级别]
+        write!(writer, "[{}] ", meta.level())?;
+
+        // [线程名 ThreadId(N)] —— 有名输出名，无名只出 ID
+        let t = std::thread::current();
+        match t.name() {
+            Some(name) => write!(writer, "[{} {:?}] ", name, t.id())?,
+            None => write!(writer, "[{:?}] ", t.id())?,
+        }
+
+        // [文件:行]
+        match (meta.file(), meta.line()) {
+            (Some(f), Some(l)) => write!(writer, "[{}:{}] ", f, l)?,
+            (Some(f), None) => write!(writer, "[{}] ", f)?,
+            _ => {}
+        }
+
+        // 消息 + 结构化字段
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+// ===========================================================================
+// 终端 writer
+// ===========================================================================
+struct TermInner {
     mp: MultiProgress,
     buf: Vec<u8>,
 }
 
-impl Inner {
-    /// 获取锁；若被毒化，执行真正的解毒。
-    ///
-    /// 毒化意味着上一次持锁的写线程 panic 了。`Inner` 中唯一可能处于
-    /// 半写状态的是 `buf: Vec<u8>`（`extend_from_slice` 或 `drain`
-    /// 到一半）。`MultiProgress` 内部有它自己的锁，我们无法置为一致
-    /// 状态，交给 indicatif 内部处理。
-    ///
-    /// 解毒操作：清空 `buf`，丢掉可能残留的半行；然后 `clear_poison()`
-    /// 让后续锁恢复快速路径。丢掉一行远好过把半行脏数据喂给终端。
+impl TermInner {
     fn lock(shared: &Mutex<Self>) -> MutexGuard<'_, Self> {
         match shared.lock() {
             Ok(g) => g,
             Err(poisoned) => {
                 let mut g = poisoned.into_inner();
-                g.buf.clear(); // 修复半写状态
-                shared.clear_poison(); // 毒已处理，恢复快速路径
+                g.buf.clear();
+                shared.clear_poison();
                 g
             }
         }
     }
 }
 
-impl Write for Inner {
+impl Write for TermInner {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(data);
-
-        // 只在真正的行边界（\n）输出，且原样保留 \n
         while let Some(i) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=i).collect();
             let s = String::from_utf8_lossy(&line);
-            // 关键：绕过 MultiProgress::println，用 suspend + print!
-            // s 已自带 \n，print! 原样写出，不额外补换行。
-            self.mp.suspend(|| {
-                print!("{s}");
-            });
+            self.mp.suspend(|| print!("{s}"));
         }
         Ok(data.len())
     }
@@ -85,69 +122,222 @@ impl Write for Inner {
     fn flush(&mut self) -> io::Result<()> {
         if !self.buf.is_empty() {
             let s = String::from_utf8_lossy(&self.buf).into_owned();
-            self.mp.suspend(|| {
-                println!("{s}"); // 残留半行，补 \n 后输出
-            });
+            self.mp.suspend(|| println!("{s}"));
             self.buf.clear();
         }
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// 对外暴露的 MakeWriter 适配器
-// ---------------------------------------------------------------------------
-
-/// 克隆后仍共享同一个 `Inner`，确保一次 tracing 事件中的多次 `write`
-/// 落到同一个按行缓冲区，而不是每次新建空 buffer。
 #[derive(Clone)]
-struct SharedWriter(Arc<Mutex<Inner>>);
+struct TerminalWriter(Arc<Mutex<TermInner>>);
 
-impl Write for SharedWriter {
+impl Write for TerminalWriter {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        Inner::lock(&self.0).write(data)
+        TermInner::lock(&self.0).write(data)
     }
     fn flush(&mut self) -> io::Result<()> {
-        Inner::lock(&self.0).flush()
+        TermInner::lock(&self.0).flush()
     }
 }
 
-// ---------------------------------------------------------------------------
-// 初始化全局日志（保持你原来的函数签名）
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// 文件 writer
+// ===========================================================================
+struct FileInner {
+    file: File,
+    buf: Vec<u8>,
+}
 
-/// 初始化全局日志系统，将 tracing 输出重定向到 indicatif 进度条。
-///
-/// 在 debug 模式下日志级别为 `debug`，release 模式下为 `info`。
-/// 日志通过 `MultiProgressWriter` 适配器输出，与进度条共存而不互相干扰。
-///
-/// Initialize global logging, redirecting tracing output to the indicatif progress bar.
-///
-/// Log level is `debug` in debug mode and `info` in release mode.
-/// Logs are routed through a `MultiProgressWriter` adapter to coexist with the progress bar.
-pub fn init_global_logging(mp: &MultiProgress) {
-    #[cfg(debug_assertions)]
-    let filter = EnvFilter::new("debug");
-    #[cfg(not(debug_assertions))]
-    let filter = EnvFilter::new("info");
+impl FileInner {
+    fn lock(shared: &Mutex<Self>) -> MutexGuard<'_, Self> {
+        match shared.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                let mut g = poisoned.into_inner();
+                g.buf.clear();
+                shared.clear_poison();
+                g
+            }
+        }
+    }
+}
 
-    let writer = SharedWriter(Arc::new(Mutex::new(Inner {
+impl Write for FileInner {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        let mut start = 0;
+        for (i, &b) in self.buf.iter().enumerate() {
+            if b == b'\n' {
+                self.file.write_all(&self.buf[start..=i])?;
+                start = i + 1;
+            }
+        }
+        if start > 0 {
+            self.buf.drain(..start);
+            self.file.flush()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if !self.buf.is_empty() {
+            self.file.write_all(&self.buf)?;
+            self.buf.clear();
+        }
+        self.file.flush()
+    }
+}
+
+#[derive(Clone)]
+struct FileWriter(Arc<Mutex<FileInner>>);
+
+impl Write for FileWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        FileInner::lock(&self.0).write(data)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        FileInner::lock(&self.0).flush()
+    }
+}
+
+// ===========================================================================
+// 日志文件名生成
+//   <用户数据目录>/<Cargo包名>/logs/<模块名>/<模块名>-<时间戳>.log
+// ===========================================================================
+fn log_file_path(module: &str) -> io::Result<PathBuf> {
+    let module = sanitize_module(module);
+    let app = sanitize_module(env!("CARGO_PKG_NAME"));
+
+    let base_dir = ProjectDirs::from("", "", &app)
+        .map(|p| p.data_local_dir().to_path_buf())
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|dir| dir.join(&app)))
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "无法确定用户数据目录，也无法回退到可执行文件目录",
+            )
+        })?;
+
+    let log_dir = base_dir.join("logs").join(&module);
+    std::fs::create_dir_all(&log_dir)?;
+
+    let now = chrono::Local::now();
+    let filename = format!("{}-{}.log", module, now.format("%Y-%m-%d_%H-%M-%S"));
+    Ok(log_dir.join(filename))
+}
+
+fn sanitize_module(module: &str) -> String {
+    let s: String = module
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = s.trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+// ===========================================================================
+// 内部初始化：终端恢复默认格式
+// ===========================================================================
+fn init_terminal_only(mp: &MultiProgress, level: &str) {
+    let terminal = TerminalWriter(Arc::new(Mutex::new(TermInner {
         mp: mp.clone(),
         buf: Vec::with_capacity(256),
     })));
 
-    _ = tracing_subscriber::registry()
-        .with(filter)
+    if let Err(e) = tracing_subscriber::registry()
         .with(
-            fmt::layer()
+            // 默认 fmt::layer，样式与原实现一致
+            tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .with_writer(move || writer.clone()),
+                .with_writer(move || terminal.clone())
+                .with_filter(EnvFilter::new(level)),
         )
-        .try_init();
+        .try_init()
+    {
+        eprintln!("[logging] 日志系统注册失败: {e}");
+    }
 }
 
-pub fn multi_progress_init() -> MultiProgress {
+#[cfg(not(debug_assertions))]
+fn init_split(mp: &MultiProgress, file: File) {
+    let terminal = TerminalWriter(Arc::new(Mutex::new(TermInner {
+        mp: mp.clone(),
+        buf: Vec::with_capacity(256),
+    })));
+    let file_writer = FileWriter(Arc::new(Mutex::new(FileInner {
+        file,
+        buf: Vec::with_capacity(256),
+    })));
+
+    if let Err(e) = tracing_subscriber::registry()
+        // ---------- 终端：info+，默认样式 ----------
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(move || terminal.clone())
+                .with_filter(EnvFilter::new("info")),
+        )
+        // ---------- 文件：debug+，自定义方括号样式 ----------
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(BracketFormat)
+                .with_ansi(false)
+                .with_writer(move || file_writer.clone())
+                .with_filter(EnvFilter::new("debug")),
+        )
+        .try_init()
+    {
+        eprintln!("[logging] 日志系统注册失败: {e}");
+    }
+}
+
+// ===========================================================================
+// 公开入口
+// ===========================================================================
+pub fn multi_progress_init(module: &str) -> MultiProgress {
     let mp = MultiProgress::new();
-    init_global_logging(&mp);
+    let _ = init_global_logging(&mp, module);
     mp
+}
+
+pub fn init_global_logging(mp: &MultiProgress, module: &str) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = module;
+        init_terminal_only(mp, "debug");
+        return None;
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let result = log_file_path(module).and_then(|path| {
+            let file = OpenOptions::new().create(true).append(true).open(&path)?;
+            Ok((path, file))
+        });
+
+        match result {
+            Ok((path, file)) => {
+                init_split(mp, file);
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("[logging] 无法创建日志文件: {e}，回退到终端 debug 级别输出");
+                init_terminal_only(mp, "debug");
+                None
+            }
+        }
+    }
 }

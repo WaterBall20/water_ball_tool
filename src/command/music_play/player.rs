@@ -8,6 +8,8 @@ use crate::command::music_play::effect::runtime::{
 use crate::command::music_play::effect::{
     AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
 };
+use crate::command::music_play::tools;
+use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
@@ -15,7 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::error;
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 
@@ -23,7 +25,7 @@ use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 pub(super) struct Player {
     played_samples: Arc<AtomicU64>,
     sound_engine: SoundEngine,
-    content: Content,
+    control: Control,
     event_content: EventContent,
     rx_cmd_thread: Arc<JoinHandle<()>>,
 }
@@ -37,10 +39,11 @@ struct SoundEngine {
     stream: Arc<Stream>,
     effect_chain: Arc<Mutex<PostEffectChain>>,
     pre_effect_runtime: PreEffectRuntime,
+    time_metrics: Arc<TimeMetrics>,
 }
 
 #[derive(Clone)]
-struct Content {
+struct Control {
     is_playing: Arc<AtomicBool>,
     volume: Arc<AtomicU32>,
     tx_cmd: Sender<PlayCmd>,
@@ -59,17 +62,23 @@ impl Player {
         device: &Device,
         config: StreamConfig,
         ring_buf: Arc<ConcurrentRing<f32>>,
-        content: Content,
+        control: Control,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
         rx_cmd: Receiver<PlayCmd>,
         tx_done: Sender<PlayCmd>,
         effect_chain: Arc<Mutex<PostEffectChain>>,
+        time_metrics: Arc<TimeMetrics>,
     ) -> Result<Stream, cpal::Error> {
         let mut scratch = Vec::new();
+        let mut total_acc = DurationAccumulator::new();
+        let mut copy_acc = DurationAccumulator::new();
+        let mut post_effect_acc = DurationAccumulator::new();
+        let mut blocks = 0;
         device.build_output_stream(
             config,
             move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                let t0 = Instant::now();
                 // 1. 先消费 transport 命令，不受播放状态/音量/数据/clear 锁门控
                 if let Ok(mut effect_chain) = effect_chain.try_lock() {
                     while let Ok(cmd) = rx_cmd.try_recv() {
@@ -80,10 +89,12 @@ impl Player {
                 }
 
                 // 2. 暂停/静音/读数据
-                let volume = f32::from_bits(content.volume.load(Ordering::Relaxed));
-                let is_playing = content.is_playing.load(Ordering::Acquire);
+                let volume = f32::from_bits(control.volume.load(Ordering::Relaxed));
+                let is_playing = control.is_playing.load(Ordering::Acquire);
+                let t1 = Instant::now();
                 let len = if is_playing && volume != 0.0 {
                     if let Ok(len) = ring_buf.try_read(data) {
+                        copy_acc.record(t1.elapsed());
                         len
                     } else {
                         data.fill(0.0);
@@ -96,6 +107,7 @@ impl Player {
 
                 // 3. 效果处理（仅当有数据）
                 if len > 0 {
+                    let t2 = Instant::now();
                     if let Ok(mut effect_chain) = effect_chain.try_lock() {
                         effect_chain.process(data[..len].as_mut());
                         scratch.clear();
@@ -103,6 +115,7 @@ impl Player {
                         for cmd in scratch.drain(..) {
                             let _ = tx_done.try_send(cmd);
                         }
+                        post_effect_acc.record(t2.elapsed());
                     }
 
                     if (volume - 1.0).abs() > 0.0 {
@@ -136,6 +149,15 @@ impl Player {
                             &event_content.list,
                         );
                     }
+                }
+
+                total_acc.record(t0.elapsed()); // 整个回调总耗时
+
+                blocks += 1;
+                if blocks % tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0 {
+                    total_acc.flush_into(&time_metrics.callback_total);
+                    copy_acc.flush_into(&time_metrics.callback_copy);
+                    post_effect_acc.flush_into(&time_metrics.callback_post_effect);
                 }
             },
             |err| error!("流错误: {err}"),
@@ -178,9 +200,14 @@ impl Player {
         let audio_ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
             sample_rate as usize * channels as usize,
         )?);
+        //时间统计
+        let time_metrics = Arc::new(TimeMetrics::new());
         //效果运行时
-        let mut pre_effect_runtime =
-            PreEffectRuntime::create(pre_effect_ring_buf.clone(), audio_ring_buffer.clone());
+        let mut pre_effect_runtime = PreEffectRuntime::create(
+            pre_effect_ring_buf.clone(),
+            audio_ring_buffer.clone(),
+            time_metrics.clone(),
+        );
         let output_format = AudioFormat::new(channels, sample_rate);
         pre_effect_runtime.add_effect(ResamplerEffect::new(output_format))?;
         pre_effect_runtime.add_effect(CrossBridgeEffect::new(output_format))?;
@@ -227,7 +254,7 @@ impl Player {
         // 音频线程 → 主线程：已放行的指令
         let (tx_done, rx_done) = crossbeam_channel::unbounded::<PlayCmd>();
 
-        let content = Content {
+        let control = Control {
             is_playing: is_playing.clone(),
             volume,
             tx_cmd,
@@ -237,12 +264,13 @@ impl Player {
             &device,
             *stream_config,
             audio_ring_buffer.clone(),
-            content.clone(),
+            control.clone(),
             played_samples.clone(),
             event_content.clone(),
             rx_cmd,
             tx_done,
             effect_chain.clone(),
+            time_metrics.clone(),
         )?);
 
         let rx_cmd_thread = {
@@ -285,8 +313,9 @@ impl Player {
                 stream,
                 effect_chain,
                 pre_effect_runtime,
+                time_metrics,
             },
-            content,
+            control,
             played_samples,
             event_content,
             rx_cmd_thread,
@@ -294,7 +323,7 @@ impl Player {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.content.is_playing.load(Ordering::Acquire)
+        self.control.is_playing.load(Ordering::Acquire)
     }
 
     pub fn is_paused(&self) -> bool {
@@ -310,7 +339,7 @@ impl Player {
     }
 
     pub fn volume(&self) -> f32 {
-        f32::from_bits(self.content.volume.load(Ordering::Acquire))
+        f32::from_bits(self.control.volume.load(Ordering::Acquire))
     }
 
     pub fn volume_percent(&self) -> f32 {
@@ -324,7 +353,7 @@ impl Player {
         } else {
             volume.clamp(0.0, 1.0)
         };
-        self.content
+        self.control
             .volume
             .store(volume.to_bits(), Ordering::Relaxed);
     }
@@ -340,18 +369,18 @@ impl Player {
     }
 
     pub fn play(&self) -> Result<(), Box<dyn std::error::Error>> {
-        self.content
+        self.control
             .tx_cmd
             .try_send(PlayCmd::Play)
             .map_err(|e| format!("send Play command failed: {e:?}"))?;
         self.sound_engine.stream.play()?;
-        self.content.is_playing.store(true, Ordering::Relaxed);
+        self.control.is_playing.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     pub fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.content.is_playing.load(Ordering::Acquire) {
-            self.content
+        if self.control.is_playing.load(Ordering::Acquire) {
+            self.control
                 .tx_cmd
                 .try_send(PlayCmd::Pause)
                 .map_err(|e| format!("send Pause command failed: {e:?}"))?;
@@ -370,6 +399,11 @@ impl Player {
     pub fn pre_effect_runtime(&self) -> &PreEffectRuntime {
         &self.sound_engine.pre_effect_runtime
     }
+
+    pub fn time_metrics(&self) -> &Arc<TimeMetrics> {
+        &self.sound_engine.time_metrics
+    }
+
     pub fn stop(self) -> DecoderResult<()> {
         self.try_stop()
     }

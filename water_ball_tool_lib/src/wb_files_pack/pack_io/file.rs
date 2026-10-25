@@ -99,7 +99,9 @@ impl PackVirtualFile {
     //设置文件大小
     pub fn set_len(&mut self, len: u64) -> Result<()> {
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.set_len(len)?;
         Ok(())
     }
@@ -107,7 +109,10 @@ impl PackVirtualFile {
     /// 设置虚拟文件的最后修改时间（毫秒时间戳）。
     /// Set the last modified time of this virtual file (millisecond timestamp).
     pub fn set_modified(&mut self, modified: u128) -> Result<()> {
-        let mut handle = self.handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.set_modified(modified);
         Ok(())
     }
@@ -136,7 +141,9 @@ impl PackVirtualFile {
     /// Reads all data from the beginning, computes the hash, and compares with the stored hash value.
     pub fn verify_hash(&mut self, progress: Option<&dyn Fn(u64, u64)>) -> Result<bool> {
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.verify_hash(progress)
     }
     fn add_pos_i64(&mut self, pos: i64) {
@@ -181,7 +188,9 @@ impl Read for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let len = handle.read(self.pos, buf).map_err(io::Error::other)?;
         self.add_pos(len as u64);
         Ok(len)
@@ -197,7 +206,9 @@ impl Write for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let len = handle.write(self.pos, buf).map_err(io::Error::other)?;
         self.add_pos(len as u64);
         Ok(len)
@@ -211,7 +222,9 @@ impl Write for PackVirtualFile {
             ));
         }
         let handle = self.handle.clone();
-        let mut handle = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handle.flush().map_err(io::Error::other)
     }
 
@@ -308,10 +321,7 @@ impl<'a> VirtualFileOpenOptions<'a> {
     /// Determines the access mode from `read`/`write` flags and checks synchronized manager
     /// access mode compatibility. If `create_new` is `true`, creates a new file;
     /// otherwise opens an existing one.
-    pub fn open<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-    ) -> Result<PackVirtualFile> {
+    pub fn open<P: AsRef<Path>>(&mut self, path: P) -> Result<PackVirtualFile> {
         let access_mode = match (self.read, self.write) {
             (true, false) => AccessMode::Read,
             (false, true) => AccessMode::Write,
@@ -352,7 +362,8 @@ mod test {
     /// PackVirtualFile recovers via into_inner and stays fully usable.
     #[test]
     fn handle_lock_poison_recovered() {
-        let dir = PathBuf::from("./temp/test/wb_files_pack/pack_io/ok/handle_lock_poison_recovered");
+        let dir =
+            PathBuf::from("./temp/test/wb_files_pack/pack_io/ok/handle_lock_poison_recovered");
         crate::tools::TestTool::prepare_test_dir(&dir);
         let pack = dir.join("pack");
         {
@@ -383,7 +394,9 @@ mod test {
             let h = vf.handle.clone();
             let h_thread = h.clone();
             let handle = thread::spawn(move || {
-                let _guard = h_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _guard = h_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 panic!("intentional panic while holding virtual file handle lock");
             });
             // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；

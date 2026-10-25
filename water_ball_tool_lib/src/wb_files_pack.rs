@@ -4,10 +4,10 @@
 /// Provides container file format creation, read/write, and management functionality.
 pub mod manager;
 
-/// 线程安全同步管理器模块 / Thread-safe synchronized manager module
-pub mod manager_sync;
 mod data;
 pub mod error;
+/// 线程安全同步管理器模块 / Thread-safe synchronized manager module
+pub mod manager_sync;
 ///网络服务
 #[cfg(debug_assertions)]
 mod net_server;

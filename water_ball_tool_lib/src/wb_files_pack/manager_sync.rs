@@ -73,13 +73,8 @@ impl ManagerSync {
     /// 以只读模式打开已存在的虚拟文件。
     ///
     /// Open an existing virtual file in read-only mode.
-    pub fn open_virtual_file<P: AsRef<Path>>(
-        &mut self,
-        path: &P,
-    ) -> Result<PackVirtualFile> {
-        self.virtual_file_options()
-            .read(true)
-            .open(path)
+    pub fn open_virtual_file<P: AsRef<Path>>(&mut self, path: &P) -> Result<PackVirtualFile> {
+        self.virtual_file_options().read(true).open(path)
     }
 
     /// 创建新的虚拟文件（写入模式），行为类似于 `File::create`。

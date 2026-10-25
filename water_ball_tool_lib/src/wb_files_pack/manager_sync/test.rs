@@ -36,7 +36,8 @@ fn setup_ok_test(name: &str) -> (PathBuf, PathBuf) {
 ///
 /// 使用 `virtual_file_options()` 而非 `create_virtual_file`，因为需要读写双重权限。
 fn write_then_read_back(pack: &mut ManagerSync, path: &str, data: &[u8]) {
-    let mut rw = pack.virtual_file_options()
+    let mut rw = pack
+        .virtual_file_options()
         .read(true)
         .write(true)
         .create_new(true)
@@ -52,7 +53,8 @@ fn write_then_read_back(pack: &mut ManagerSync, path: &str, data: &[u8]) {
 
 /// 创建虚拟文件（读写模式）→ 写入数据 → 回读 → 断言一致（不预指定长度）
 fn write_then_read_back_no_len(pack: &mut ManagerSync, path: &str, data: &[u8]) {
-    let mut rw = pack.virtual_file_options()
+    let mut rw = pack
+        .virtual_file_options()
         .read(true)
         .write(true)
         .create_new(true)
@@ -67,7 +69,8 @@ fn write_then_read_back_no_len(pack: &mut ManagerSync, path: &str, data: &[u8]) 
 
 /// 打开已存在的虚拟文件（读写模式）/ Open an existing virtual file in read-write mode
 fn open_rw(alloc: &mut ManagerSync, path: &str) -> PackVirtualFile {
-    alloc.virtual_file_options()
+    alloc
+        .virtual_file_options()
         .read(true)
         .write(true)
         .open(&path)
@@ -703,9 +706,7 @@ fn multi_instance_write_non_overlapping() {
         drop(inst2);
         drop(inst3);
 
-        let mut reader = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut reader = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
         reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 12];
         let n = reader.read(&mut buf).expect("读取数据失败");
@@ -772,9 +773,7 @@ fn multi_instance_concurrent_write() {
         }
 
         // 主线程读回验证 / Main thread reads back and verifies
-        let mut reader = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut reader = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
         reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 30];
         let n = reader.read(&mut buf).expect("读取数据失败");
@@ -804,12 +803,8 @@ fn multi_instance_mixed_read_write() {
 
         // 从主线程创建所有实例 / Create all instances from main thread
         let mut inst1 = open_rw(&mut alloc, path);
-        let mut inst2 = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
-        let mut inst3 = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut inst2 = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
+        let mut inst3 = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
 
         // 实例 1: 追加写入 "WORLD"（seek 到末尾，扩展文件）
         // Instance 1: append "WORLD" (seek to end, extend file)
@@ -836,9 +831,7 @@ fn multi_instance_mixed_read_write() {
         drop(inst3);
 
         // 最终读回全部 11 字节 / Final read-back of all 11 bytes
-        let mut reader = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut reader = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
         reader.seek(SeekFrom::Start(0)).expect("设置文件位置失败");
         let mut buf = vec![0u8; 11];
         let n = reader.read(&mut buf).expect("读取数据失败");
@@ -888,9 +881,7 @@ fn multi_instance_cross_file_rw() {
             ("file_b", b"BBBBBBBBBB"),
             ("file_c", b"CCCCCCCCCC"),
         ] {
-            let mut reader = alloc
-                .open_virtual_file(&name)
-                .expect("打开虚拟文件失败");
+            let mut reader = alloc.open_virtual_file(&name).expect("打开虚拟文件失败");
             let mut buf = vec![0u8; 10];
             reader.read_exact(&mut buf).expect("读取数据失败");
             assert_eq!(&buf[..], expected, "文件 {name} 数据不一致");
@@ -959,9 +950,7 @@ fn multi_instance_stress_three_instances() {
         }
 
         // 最终验证整个文件
-        let mut reader = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut reader = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
         let mut fb = vec![0u8; FS];
         reader.read_exact(&mut fb).expect("读取数据失败");
         for id in 0..N {
@@ -1029,9 +1018,7 @@ fn multi_instance_independent_positions() {
         drop(inst3);
 
         // 读回全量验证 / Read back all and verify
-        let mut reader = alloc
-            .open_virtual_file(&path)
-            .expect("打开虚拟文件失败");
+        let mut reader = alloc.open_virtual_file(&path).expect("打开虚拟文件失败");
         let mut buf = vec![0u8; 20];
         reader.read_exact(&mut buf).expect("读取数据失败");
 
@@ -1083,10 +1070,18 @@ fn delete_file_subdir() {
             .create_dir_all(&String::from("A/B"))
             .expect("创建目录失败");
         write_then_read_back(&mut alloc, "A/B/file.txt", &[10, 20, 30]);
-        assert!(alloc.path_exists(&"A/B/file.txt").expect("检查路径存在失败"));
+        assert!(
+            alloc
+                .path_exists(&"A/B/file.txt")
+                .expect("检查路径存在失败")
+        );
         assert!(alloc.path_exists(&"A/B").expect("检查路径存在失败"));
         alloc.delete_file(&"A/B/file.txt").expect("删除文件失败");
-        assert!(!alloc.path_exists(&"A/B/file.txt").expect("检查路径存在失败"));
+        assert!(
+            !alloc
+                .path_exists(&"A/B/file.txt")
+                .expect("检查路径存在失败")
+        );
         assert!(alloc.path_exists(&"A/B").expect("检查路径存在失败"));
         assert!(alloc.path_exists(&"A").expect("检查路径存在失败"));
     }
@@ -1296,7 +1291,9 @@ fn manager_lock_poison_recovered() {
         let mgr = alloc.manager.clone();
         let mgr_thread = mgr.clone();
         let handle = thread::spawn(move || {
-            let _guard = mgr_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _guard = mgr_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             panic!("intentional panic while holding manager lock");
         });
         // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；
@@ -1328,7 +1325,11 @@ fn manager_lock_poison_recovered() {
         alloc
             .create_dir_all(&String::from("poison/recover"))
             .expect("poison 后创建目录失败");
-        assert!(alloc.path_exists(&"poison/recover").expect("检查路径存在失败"));
+        assert!(
+            alloc
+                .path_exists(&"poison/recover")
+                .expect("检查路径存在失败")
+        );
         write_then_read_back(&mut alloc, "poison/new_file", &[9, 8, 7, 6]);
         let mut root_items = alloc
             .get_root_struct_item_name_list()
@@ -1358,7 +1359,9 @@ fn pack_io_lock_poison_recovered() {
         let io = alloc.pack_io.clone();
         let io_thread = io.clone();
         let handle = thread::spawn(move || {
-            let _guard = io_thread.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _guard = io_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             panic!("intentional panic while holding pack_io lock");
         });
         // 预期错误 1：线程必须 panic，且 panic 消息必须与预期完全一致；
@@ -1383,9 +1386,7 @@ fn pack_io_lock_poison_recovered() {
         // 恢复验证：写数据需要包IO锁，完整走一遍写入→回读→哈希
         write_then_read_back(&mut alloc, "io/recovered", &[4, 5, 6, 7]);
         assert!(alloc.path_exists(&"io_base").expect("检查路径存在失败"));
-        let vhr = alloc
-            .verify_all_file_hash()
-            .expect("poison 后哈希验证出错");
+        let vhr = alloc.verify_all_file_hash().expect("poison 后哈希验证出错");
         assert!(
             vhr.err_path.is_empty(),
             "poison 后哈希验证应全部通过: {:?}",

@@ -522,7 +522,11 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = first_item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = first_item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -601,7 +605,11 @@ impl WBFPManager {
         }
 
         let (r, gc_list) = {
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = first_item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = first_item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -725,7 +733,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -796,7 +808,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -828,7 +844,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -1008,7 +1028,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -1080,7 +1104,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
@@ -1116,7 +1144,11 @@ impl WBFPManager {
                 )));
             }
 
-            let PackStructItemType::Dir { struct_file_pos, pack_struct } = item.item_type_mut() else {
+            let PackStructItemType::Dir {
+                struct_file_pos,
+                pack_struct,
+            } = item.item_type_mut()
+            else {
                 unreachable!()
             };
 
