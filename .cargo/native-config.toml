@@ -1,0 +1,5 @@
+[build]
+target-dir = "target/native"
+
+# 也可以把本机优化的 RUSTFLAGS 放在这里
+rustflags = ["-C", "target-cpu=native"]
