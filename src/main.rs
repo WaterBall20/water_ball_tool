@@ -11,6 +11,8 @@
 
 use std::fmt;
 use std::fs::File;
+#[cfg(not(debug_assertions))]
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::exit;

@@ -19,6 +19,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 chrono = "0.4.45"
 directories = "6.0"
+thread-priority = "3.1.1"
 
 rand = "0.10.3"
 crossbeam-channel = "0.5.17"
@@ -62,6 +63,7 @@ documentation.workspace = true
 [dependencies]
 water_ball_tool_lib = { path = "./water_ball_tool_lib" }
 serde_json = { workspace = true }
+thread-priority = { workspace = true }
 #日志和进度条
 indicatif = { workspace = true }
 tracing = { workspace = true }
