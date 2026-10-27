@@ -79,8 +79,14 @@ fn zero_length_operations() {
     let empty_w: [u8; 0] = [];
     assert_eq!(r.read(&mut empty_r), 0);
     assert_eq!(w.write(&empty_w), 0);
-    assert_eq!(r.read_wait(&mut empty_r).unwrap(), 0);
-    assert_eq!(w.write_wait(&empty_w).unwrap(), 0);
+    assert_eq!(
+        r.read_wait(&mut empty_r).expect("read_wait on empty slice should succeed"),
+        0
+    );
+    assert_eq!(
+        w.write_wait(&empty_w).expect("write_wait on empty slice should succeed"),
+        0
+    );
     assert!(r.read_exact(&mut empty_r).is_ok());
     assert!(w.write_all(&empty_w).is_ok());
 }
@@ -88,10 +94,10 @@ fn zero_length_operations() {
 #[test]
 fn write_all_fits_in_capacity() {
     let (r, w) = locked_ring_buffer::<u8>(8);
-    w.write_all(&[1, 2, 3, 4, 5]).unwrap();
+    w.write_all(&[1, 2, 3, 4, 5]).expect("write_all should succeed");
     assert_eq!(r.len(), 5);
     let mut buf = [0u8; 5];
-    r.read_exact(&mut buf).unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
     assert_eq!(buf, [1, 2, 3, 4, 5]);
 }
 
@@ -100,7 +106,7 @@ fn read_wait_returns_partial() {
     let (r, w) = locked_ring_buffer::<u8>(8);
     w.write(&[1, 2, 3]);
     let mut buf = [0u8; 8];
-    let n = r.read_wait(&mut buf).unwrap();
+    let n = r.read_wait(&mut buf).expect("read_wait should succeed");
     assert_eq!(n, 3);
     assert_eq!(&buf[..3], &[1, 2, 3]);
 }
@@ -109,28 +115,28 @@ fn read_wait_returns_partial() {
 fn write_wait_returns_partial() {
     let (r, w) = locked_ring_buffer::<u8>(4);
     w.write(&[1, 2]);
-    let n = w.write_wait(&[3, 4, 5, 6]).unwrap();
+    let n = w
+        .write_wait(&[3, 4, 5, 6])
+        .expect("write_wait should succeed");
     assert_eq!(n, 2);
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
     assert_eq!(buf, [1, 2, 3, 4]);
 }
-
-// ---------- 四种模式组合 ----------
 
 #[test]
 fn mode_locked_locked() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
 }
 
 #[test]
 fn mode_unlocked_unlocked() {
     let (mut r, mut w) = unlocked_ring_buffer::<u8>(4);
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
-    w.push(2).unwrap();
+    w.push(2).expect("push should succeed");
     let mut buf = [0u8; 2];
     assert_eq!(r.read(&mut buf), 1);
     assert_eq!(buf[0], 2);
@@ -139,7 +145,7 @@ fn mode_unlocked_unlocked() {
 #[test]
 fn mode_locked_read_unlocked_write() {
     let (r, mut w) = locked_read_unlocked_write_ring_buffer::<u8>(4);
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
     let mut buf = [0u8; 2];
     w.write(&[2, 3]);
@@ -149,14 +155,12 @@ fn mode_locked_read_unlocked_write() {
 #[test]
 fn mode_unlocked_read_locked_write() {
     let (mut r, w) = unlocked_read_locked_write_ring_buffer::<u8>(4);
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
     let mut buf = [0u8; 2];
     w.write(&[2, 3]);
     assert_eq!(r.read(&mut buf), 2);
 }
-
-// ---------- 枚举模式构造 ----------
 
 #[test]
 fn enum_mode_locked_locked() {
@@ -171,7 +175,7 @@ fn enum_mode_locked_locked() {
         Ok(x) => x,
         Err(_) => panic!("expected locked writer"),
     };
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
 }
 
@@ -188,7 +192,7 @@ fn enum_mode_unlocked_unlocked() {
         Ok(x) => x,
         Err(_) => panic!("expected unlocked writer"),
     };
-    w.push(1).unwrap();
+    w.push(1).expect("push should succeed");
     assert_eq!(r.pop(), Some(1));
 }
 

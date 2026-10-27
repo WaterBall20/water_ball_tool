@@ -12,9 +12,9 @@ const WAIT: Duration = Duration::from_millis(100);
 #[test]
 fn try_pop_success() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.push(1).unwrap();
-    assert_eq!(r.try_pop().unwrap(), Some(1));
-    assert_eq!(r.try_pop().unwrap(), None);
+    w.push(1).expect("push should succeed");
+    assert_eq!(r.try_pop().expect("try_pop should succeed"), Some(1));
+    assert_eq!(r.try_pop().expect("try_pop should succeed"), None);
 }
 
 #[test]
@@ -22,15 +22,15 @@ fn try_read_success() {
     let (r, w) = locked_ring_buffer::<u8>(4);
     w.write(&[1, 2, 3]);
     let mut buf = [0u8; 4];
-    assert_eq!(r.try_read(&mut buf).unwrap(), 3);
+    assert_eq!(r.try_read(&mut buf).expect("try_read should succeed"), 3);
     assert_eq!(&buf[..3], &[1, 2, 3]);
 }
 
 #[test]
 fn try_push_success() {
     let (r, w) = locked_ring_buffer::<u8>(2);
-    w.try_push(1).unwrap();
-    w.try_push(2).unwrap();
+    w.try_push(1).expect("try_push should succeed");
+    w.try_push(2).expect("try_push should succeed");
     match w.try_push(3) {
         Err(e) => assert!(matches!(e.kind, Kind::Full(3))),
         Ok(_) => panic!("expected Full"),
@@ -41,10 +41,12 @@ fn try_push_success() {
 #[test]
 fn try_write_success() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    let mut n = w.try_write(&[1, 2, 3]).unwrap();
+    let mut n = w
+        .try_write(&[1, 2, 3])
+        .expect("try_write should succeed");
     assert_eq!(n, 3);
-    n = w.try_write(&[4, 5, 6]).unwrap();
-    assert_eq!(n, 1); // 只剩 1 个空位
+    n = w.try_write(&[4, 5, 6]).expect("try_write should succeed");
+    assert_eq!(n, 1);
     assert!(r.is_full());
 }
 
@@ -56,15 +58,15 @@ fn try_pop_locked_when_read_lock_held() {
     let r2 = r.clone();
     let h = thread::spawn(move || {
         let mut buf = [0u8; 1];
-        r2.read_exact(&mut buf).unwrap();
+        r2.read_exact(&mut buf).expect("read_exact should succeed");
     });
     thread::sleep(WAIT);
     match r.try_pop() {
         Err(e) => assert!(matches!(e.kind, Kind::Locked)),
         Ok(_) => panic!("expected Locked"),
     }
-    w.push(1).unwrap();
-    h.join().unwrap();
+    w.push(1).expect("push should succeed");
+    h.join().expect("reader thread should not panic");
 }
 
 #[test]
@@ -73,7 +75,7 @@ fn try_read_locked_when_read_lock_held() {
     let r2 = r.clone();
     let h = thread::spawn(move || {
         let mut buf = [0u8; 1];
-        r2.read_exact(&mut buf).unwrap();
+        r2.read_exact(&mut buf).expect("read_exact should succeed");
     });
     thread::sleep(WAIT);
     let mut buf = [0u8; 2];
@@ -81,14 +83,14 @@ fn try_read_locked_when_read_lock_held() {
         Err(e) => assert!(matches!(e.kind, Kind::Locked)),
         Ok(_) => panic!("expected Locked"),
     }
-    w.push(1).unwrap();
-    h.join().unwrap();
+    w.push(1).expect("push should succeed");
+    h.join().expect("reader thread should not panic");
 }
 
 #[test]
 fn try_push_locked_when_write_lock_held() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).unwrap();
+    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.write_all(&[5, 6, 7, 8]));
     thread::sleep(WAIT);
@@ -97,14 +99,16 @@ fn try_push_locked_when_write_lock_held() {
         Ok(_) => panic!("expected Locked"),
     }
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).unwrap();
-    h.join().unwrap().unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
+    h.join()
+        .expect("writer thread should not panic")
+        .expect("write_all should succeed");
 }
 
 #[test]
 fn try_write_locked_when_write_lock_held() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).unwrap();
+    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.write_all(&[5, 6, 7, 8]));
     thread::sleep(WAIT);
@@ -113,8 +117,10 @@ fn try_write_locked_when_write_lock_held() {
         Ok(_) => panic!("expected Locked"),
     }
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).unwrap();
-    h.join().unwrap().unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
+    h.join()
+        .expect("writer thread should not panic")
+        .expect("write_all should succeed");
 }
 
 // ---------- clear ----------
@@ -127,36 +133,37 @@ fn clear_empties_buffer() {
     w.clear();
     assert_eq!(r.len(), 0);
     assert!(r.is_empty());
-    // 可继续写
     w.write(&[10, 20]);
     assert_eq!(r.len(), 2);
     let mut buf = [0u8; 2];
-    r.read_exact(&mut buf).unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
     assert_eq!(buf, [10, 20]);
 }
 
 #[test]
 fn clear_after_full_allows_write() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).unwrap();
+    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
     assert!(r.is_full());
     w.clear();
     assert!(!r.is_full());
-    w.write_all(&[5, 6, 7, 8]).unwrap();
+    w.write_all(&[5, 6, 7, 8]).expect("write_all should succeed");
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).unwrap();
+    r.read_exact(&mut buf).expect("read_exact should succeed");
     assert_eq!(buf, [5, 6, 7, 8]);
 }
 
 #[test]
 fn clear_wakes_write_waiters() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).unwrap();
+    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.push_wait(99));
     thread::sleep(WAIT);
     w.clear();
-    h.join().unwrap().unwrap();
+    h.join()
+        .expect("writer thread should not panic")
+        .expect("push_wait should succeed");
     assert_eq!(r.len(), 1);
 }
 
@@ -172,12 +179,14 @@ fn concurrent_write_all_read_exact() {
     let wh = thread::spawn(move || w.write_all(&expected_w));
     let rh = thread::spawn(move || {
         let mut received = vec![0u64; total as usize];
-        r.read_exact(&mut received).unwrap();
+        r.read_exact(&mut received).expect("read_exact should succeed");
         received
     });
 
-    wh.join().unwrap().unwrap();
-    let received = rh.join().unwrap();
+    wh.join()
+        .expect("writer thread should not panic")
+        .expect("write_all should succeed");
+    let received = rh.join().expect("reader thread should not panic");
     assert_eq!(received, expected);
 }
 
@@ -189,7 +198,6 @@ fn concurrent_two_readers_split_data() {
     let r1 = r.clone();
     let r2 = r.clone();
 
-    // writer 边写边被读端消费，避免“先写满再等读端”的活锁。
     let wh = thread::spawn(move || {
         let mut written = 0u32;
         while written < total {
@@ -201,7 +209,6 @@ fn concurrent_two_readers_split_data() {
                 thread::yield_now();
             }
         }
-        // 显式 drop，触发 close_writer，唤醒等待的 reader。
         drop(w);
     });
 
@@ -226,14 +233,13 @@ fn concurrent_two_readers_split_data() {
         data
     });
 
-    wh.join().unwrap();
+    wh.join().expect("writer thread should not panic");
 
-    let mut all = h1.join().unwrap();
-    all.extend(h2.join().unwrap());
+    let mut all = h1.join().expect("reader1 thread should not panic");
+    all.extend(h2.join().expect("reader2 thread should not panic"));
 
     assert_eq!(all.len(), total as usize);
 
-    // 数据既不重复也不丢失。
     all.sort();
     assert_eq!(all, (0..total).collect::<Vec<_>>());
 }
@@ -275,11 +281,10 @@ fn concurrent_multiple_writers_single_reader() {
     });
 
     for h in wh {
-        h.join().unwrap();
+        h.join().expect("writer thread should not panic");
     }
-    let mut received = rh.join().unwrap();
+    let mut received = rh.join().expect("reader thread should not panic");
     assert_eq!(received.len(), total as usize);
-    // 所有写入值都出现
     received.sort();
     assert_eq!(received, (0..total).collect::<Vec<_>>());
 }
@@ -296,11 +301,13 @@ fn blocking_roundtrip_large() {
     let wh = thread::spawn(move || w.write_all(&data_w));
     let rh = thread::spawn(move || {
         let mut buf = vec![0u32; total as usize];
-        r.read_exact(&mut buf).unwrap();
+        r.read_exact(&mut buf).expect("read_exact should succeed");
         buf
     });
 
-    wh.join().unwrap().unwrap();
-    let received = rh.join().unwrap();
+    wh.join()
+        .expect("writer thread should not panic")
+        .expect("write_all should succeed");
+    let received = rh.join().expect("reader thread should not panic");
     assert_eq!(received, data);
 }
