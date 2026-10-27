@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::error;
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
+use water_ball_tool_lib::split_ring_buffer::{LockedWriter, UnlockedReader};
 
 #[derive(Clone)]
 pub(super) struct Player {
@@ -33,7 +34,7 @@ pub(super) struct Player {
 #[derive(Clone)]
 struct SoundEngine {
     pre_effect_ring_buf: Arc<ConcurrentRing<AudioData>>,
-    audio_ring_buffer: Arc<ConcurrentRing<f32>>,
+    audio_ring_buffer: LockedWriter<f32>,
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
@@ -61,7 +62,7 @@ impl Player {
     fn create_stream(
         device: &Device,
         config: StreamConfig,
-        ring_buf: Arc<ConcurrentRing<f32>>,
+        ring_buf: UnlockedReader<f32>,
         control: Control,
         played_samples: Arc<AtomicU64>,
         event_content: EventContent,
@@ -70,6 +71,7 @@ impl Player {
         effect_chain: Arc<Mutex<PostEffectChain>>,
         time_metrics: Arc<TimeMetrics>,
     ) -> Result<Stream, cpal::Error> {
+        let mut ring_buf = ring_buf;
         let mut scratch = Vec::new();
         let mut total_acc = DurationAccumulator::new();
         let mut copy_acc = DurationAccumulator::new();
@@ -93,13 +95,9 @@ impl Player {
                 let is_playing = control.is_playing.load(Ordering::Acquire);
                 let t1 = Instant::now();
                 let len = if is_playing && volume != 0.0 {
-                    if let Ok(len) = ring_buf.try_read(data) {
-                        copy_acc.record(t1.elapsed());
-                        len
-                    } else {
-                        data.fill(0.0);
-                        0
-                    }
+                    let len = ring_buf.read(data);
+                    copy_acc.record(t1.elapsed());
+                    len
                 } else {
                     data.fill(0.0);
                     0
@@ -135,9 +133,9 @@ impl Player {
                 if pre_effect_item_eof.load(Ordering::Acquire) {
                     let pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
                     if len >= pos {
-                        pre_effect_item_eof_pos.store(0, Ordering::Relaxed);
+                        pre_effect_item_eof_pos.store(0, Ordering::Release);
                     } else {
-                        pre_effect_item_eof_pos.fetch_sub(len, Ordering::Relaxed);
+                        pre_effect_item_eof_pos.fetch_sub(len, Ordering::Release);
                     }
                     if pre_effect_item_eof_pos.load(Ordering::Acquire) == 0 {
                         pre_effect_item_eof.store(false, Ordering::Release);
@@ -197,9 +195,10 @@ impl Player {
         //效果缓冲区
         let pre_effect_ring_buf = Arc::new(ConcurrentRing::new_max_capacity(10)?);
         //声音缓冲区
-        let audio_ring_buffer = Arc::new(ConcurrentRing::new_max_capacity(
-            sample_rate as usize * channels as usize,
-        )?);
+        let (audio_ring_buffer_reader, audio_ring_buffer) =
+            water_ball_tool_lib::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
+                sample_rate as usize * channels as usize / 4,
+            );
         //时间统计
         let time_metrics = Arc::new(TimeMetrics::new());
         //效果运行时
@@ -224,13 +223,14 @@ impl Player {
         {
             let pre_effect_item_eof = pre_effect_item_eof.clone();
             let pre_effect_item_eof_pos = pre_effect_item_eof_pos.clone();
-            let audio_ring_buffer = audio_ring_buffer.clone();
+            let audio_ring_buffer_writer = audio_ring_buffer.clone();
             pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(
                 move |e| {
                     if let Ok(e) = e.result()
                         && let PreEffectRuntimeEventType::Eof = e
                     {
-                        pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Release);
+                        pre_effect_item_eof_pos
+                            .store(audio_ring_buffer_writer.len(), Ordering::Release);
                         pre_effect_item_eof.store(true, Ordering::Release);
                     }
                 },
@@ -263,7 +263,7 @@ impl Player {
         let stream = Arc::new(Self::create_stream(
             &device,
             *stream_config,
-            audio_ring_buffer.clone(),
+            audio_ring_buffer_reader,
             control.clone(),
             played_samples.clone(),
             event_content.clone(),
@@ -388,7 +388,7 @@ impl Player {
         Ok(())
     }
 
-    pub fn audio_ring_buffer(&self) -> &Arc<ConcurrentRing<f32>> {
+    pub fn audio_ring_buffer(&self) -> &LockedWriter<f32> {
         &self.sound_engine.audio_ring_buffer
     }
 
@@ -492,31 +492,6 @@ impl Player {
         self.event_content
             .pre_effect_item_eof
             .load(Ordering::Acquire)
-    }
-
-    /// 清理解码结束剩余在缓冲区的数据并重置
-    pub fn clear_pre_effect_item_eof_buf(&self) {
-        if self.get_pre_effect_item_eof()
-            && self
-                .event_content
-                .pre_effect_item_eof_pos
-                .load(Ordering::Acquire)
-                != 0
-        {
-            self.pre_effect_ring_buffer().clear();
-            self.sound_engine.pre_effect_runtime.send_skip();
-            let mut ring_buf = self.sound_engine.audio_ring_buffer.lock();
-            let remove_len = ring_buf.len();
-            for _ in 0..remove_len {
-                _ = ring_buf.pop_front();
-            }
-            self.event_content
-                .pre_effect_item_eof
-                .store(false, Ordering::Release);
-            self.event_content
-                .pre_effect_item_eof_pos
-                .store(0, Ordering::Release);
-        }
     }
 
     pub fn add_event(&mut self, event: Box<dyn PlayerEventSink>) {

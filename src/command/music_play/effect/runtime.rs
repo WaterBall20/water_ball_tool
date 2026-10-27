@@ -13,12 +13,13 @@ use std::time::Instant;
 use thread_priority::ThreadPriority;
 use tracing::{debug, error};
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
+use water_ball_tool_lib::split_ring_buffer::LockedWriter;
 
 #[derive(Clone)]
 pub struct PreEffectRuntime {
     effects: Arc<Mutex<PreEffectChain>>,
     input_buf: Arc<ConcurrentRing<AudioData>>,
-    audio_buf: Arc<ConcurrentRing<f32>>,
+    audio_buf: LockedWriter<f32>,
     stop: Arc<AtomicBool>,
     effect_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     event_list: Arc<Mutex<Vec<Box<dyn PreEffectRuntimeEventSink>>>>,
@@ -48,7 +49,7 @@ impl PreEffectRuntime {
 impl PreEffectRuntime {
     pub fn create(
         input_buf: Arc<ConcurrentRing<AudioData>>,
-        audio_buf: Arc<ConcurrentRing<f32>>,
+        audio_buf: LockedWriter<f32>,
         time_metrics: Arc<TimeMetrics>,
     ) -> Self {
         Self {
@@ -78,12 +79,6 @@ impl PreEffectRuntime {
                 std::thread::Builder::new()
                     .name("pre-effect-running".to_string())
                     .spawn(move || {
-                        // 将当前线程设置为“高于正常”的跨平台优先级
-                        if let Err(e) = thread_priority::set_current_thread_priority
-                            (ThreadPriority::Crossplatform(10.try_into().unwrap_or_default())
-                            ) {
-                            error!("pre-effect-run thread priority setting error: {e}");
-                        }
                         //统计
                         let mut out_temp_buf = Vec::new();
                         let mut read_wait_acc = DurationAccumulator::new();

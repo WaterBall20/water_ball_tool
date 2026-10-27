@@ -19,19 +19,20 @@
 //! ```
 
 pub mod error;
-pub mod mode;
 mod inner;
+pub mod mode;
 mod reader;
-mod writer;
+#[cfg(test)]
 mod test;
+mod writer;
 
 pub use error::{Error, Kind};
 pub use mode::{ReadMode, WriteMode};
 pub use reader::{LockedReader, Reader, UnlockedReader};
 pub use writer::{LockedWriter, UnlockedWriter, Writer};
 
-use std::sync::Arc;
 use inner::Inner;
+use std::sync::Arc;
 
 fn make_inner<T: Copy>(capacity: usize) -> Arc<Inner<T>> {
     Arc::new(Inner::with_capacity(capacity))
@@ -91,7 +92,10 @@ pub fn ring_buffer<T: Copy>(
 /// ```
 pub fn locked_ring_buffer<T: Copy>(capacity: usize) -> (LockedReader<T>, LockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
-    (LockedReader::new(Arc::clone(&inner)), LockedWriter::new(inner))
+    (
+        LockedReader::new(Arc::clone(&inner)),
+        LockedWriter::new(inner),
+    )
 }
 
 /// 构造无锁读端 + 无锁写端的环形缓冲区。
@@ -111,7 +115,10 @@ pub fn locked_ring_buffer<T: Copy>(capacity: usize) -> (LockedReader<T>, LockedW
 /// ```
 pub fn unlocked_ring_buffer<T: Copy>(capacity: usize) -> (UnlockedReader<T>, UnlockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
-    (UnlockedReader::new(Arc::clone(&inner)), UnlockedWriter::new(inner))
+    (
+        UnlockedReader::new(Arc::clone(&inner)),
+        UnlockedWriter::new(inner),
+    )
 }
 
 /// 构造有锁读端 + 无锁写端的混合环形缓冲区。
@@ -129,9 +136,14 @@ pub fn unlocked_ring_buffer<T: Copy>(capacity: usize) -> (UnlockedReader<T>, Unl
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
-pub fn locked_read_unlocked_write_ring_buffer<T: Copy>(capacity: usize) -> (LockedReader<T>, UnlockedWriter<T>) {
+pub fn locked_read_unlocked_write_ring_buffer<T: Copy>(
+    capacity: usize,
+) -> (LockedReader<T>, UnlockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
-    (LockedReader::new(Arc::clone(&inner)), UnlockedWriter::new(inner))
+    (
+        LockedReader::new(Arc::clone(&inner)),
+        UnlockedWriter::new(inner),
+    )
 }
 
 /// 构造无锁读端 + 有锁写端的混合环形缓冲区。
@@ -149,7 +161,12 @@ pub fn locked_read_unlocked_write_ring_buffer<T: Copy>(capacity: usize) -> (Lock
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
-pub fn unlocked_read_locked_write_ring_buffer<T: Copy>(capacity: usize) -> (UnlockedReader<T>, LockedWriter<T>) {
+pub fn unlocked_read_locked_write_ring_buffer<T: Copy>(
+    capacity: usize,
+) -> (UnlockedReader<T>, LockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
-    (UnlockedReader::new(Arc::clone(&inner)), LockedWriter::new(inner))
+    (
+        UnlockedReader::new(Arc::clone(&inner)),
+        LockedWriter::new(inner),
+    )
 }

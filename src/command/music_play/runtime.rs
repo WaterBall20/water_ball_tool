@@ -164,11 +164,9 @@ impl Runtime {
                 *duration_stats_window = d;
             }
         }
-        fn fmt_ns(ns: u64) -> String {
-            format!("{ns:09}ns")
-        }
-        fn fmt_ns_color(ns: u64) -> String {
-            fmt_ns(ns).yellow().to_string()
+        fn fmt_ms(ns: u64) -> String {
+            let ms = ns as f64 / 1_000_000.0;
+            format!("{ms:09.4}ms")
         }
         let pb = crate::command::create_pb(mp);
 
@@ -268,14 +266,14 @@ impl Runtime {
                         \ncallback: {callback}, copy: {callback_copy}, post_effect:\
                         {callback_post_effect}",
                                 title = "Time".green(),
-                                decoder = fmt_ns(time_decoder.max_ns).green(),
-                                decoder_write_wait = fmt_ns(time_decoder_write_wait.max_ns).blue(),
-                                effect_read_wait = fmt_ns(time_effect_read_wait.max_ns).yellow(),
-                                effect_process = fmt_ns(time_effect_process.max_ns).red(),
-                                effect_write_wait = fmt_ns(time_effect_write_wait.max_ns).blue(),
-                                callback = fmt_ns(time_callback.max_ns).green(),
-                                callback_copy = fmt_ns(time_callback_copy.max_ns).yellow(),
-                                callback_post_effect = fmt_ns(time_callback_post_effect.max_ns).red()
+                                decoder = fmt_ms(time_decoder.max_ns).green(),
+                                decoder_write_wait = fmt_ms(time_decoder_write_wait.max_ns).blue(),
+                                effect_read_wait = fmt_ms(time_effect_read_wait.max_ns).yellow(),
+                                effect_process = fmt_ms(time_effect_process.max_ns).red(),
+                                effect_write_wait = fmt_ms(time_effect_write_wait.max_ns).blue(),
+                                callback = fmt_ms(time_callback.max_ns).green(),
+                                callback_copy = fmt_ms(time_callback_copy.max_ns).yellow(),
+                                callback_post_effect = fmt_ms(time_callback_post_effect.max_ns).red()
                         )
                     };
 
@@ -463,7 +461,7 @@ impl PlayObject {
                 //自旋等待
                 thread::sleep(Duration::from_millis(1));
             } else {
-                //缓冲区部分清理
+                /*//缓冲区
                 player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
                 if let Some(ui_track) = ui_track {
@@ -476,7 +474,7 @@ impl PlayObject {
                 return Ok(decoder_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone());
+                    .clone());*/
             }
         }
         let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));
