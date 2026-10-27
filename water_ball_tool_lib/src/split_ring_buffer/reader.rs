@@ -78,7 +78,7 @@ impl<T: Copy> LockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
@@ -145,7 +145,7 @@ impl<T: Copy> LockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
@@ -187,7 +187,7 @@ impl<T: Copy> LockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
@@ -368,7 +368,7 @@ impl<T: Copy> UnlockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
@@ -424,7 +424,7 @@ impl<T: Copy> UnlockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
@@ -464,7 +464,7 @@ impl<T: Copy> UnlockedReader<T> {
                 self.inner.read.leave_wait();
                 return Err(Error::cannot_wait());
             }
-            if self.inner.len() > 0 {
+            if !self.inner.is_empty() {
                 self.inner.read.leave_wait();
                 drop(g);
                 continue;
