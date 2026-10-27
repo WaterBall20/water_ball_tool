@@ -15,6 +15,7 @@ pub mod tools;
 
 //环形缓冲区
 pub mod concurrent_ring;
+pub mod split_ring_buffer;
 /// 游戏模拟器模块（开发中）/ Game simulator module (WIP)
 #[cfg(debug_assertions)]
 pub mod gakumasu;
