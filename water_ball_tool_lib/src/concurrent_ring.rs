@@ -1351,7 +1351,7 @@ impl<T> Display for ConcurrentRingError<T> {
 
 impl<T> std::error::Error for ConcurrentRingError<T> {}
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ConcurrentRingErrorKind<T> {
     Full(T),
     Locked(Option<T>),

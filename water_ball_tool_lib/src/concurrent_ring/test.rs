@@ -308,7 +308,7 @@ fn write_wait_partial_when_insufficient_space() {
 
 #[test]
 fn write_wait_blocks_then_writes() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     ring.write(&[1, 2]);
     assert!(ring.is_full());
     let r = ring.clone();
@@ -341,7 +341,7 @@ fn read_wait_returns_read_count_with_data() {
 
 #[test]
 fn read_wait_blocks_then_reads() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     let r = ring.clone();
     let reader = thread::spawn(move || {
         let mut buf = [0u32; 2];
@@ -383,7 +383,7 @@ fn write_all_too_large_returns_too_large() {
 
 #[test]
 fn write_all_blocks_until_all_written() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let r = ring.clone();
     let reader = thread::spawn(move || {
         let mut got = Vec::new();
@@ -428,7 +428,7 @@ fn read_exact_too_large_returns_too_large() {
 
 #[test]
 fn read_exact_blocks_until_filled() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2]);
     let r = ring.clone();
     let writer = thread::spawn(move || {
@@ -480,7 +480,7 @@ fn clear_drops_all_values() {
 
 #[test]
 fn clear_wakes_blocked_writers() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(2)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
     ring.write(&[1, 2]);
     assert!(ring.is_full());
     let r = ring.clone();
@@ -550,7 +550,7 @@ fn repeated_push_pop_no_leak() {
 
 #[test]
 fn concurrent_mpsc_push_pop() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<usize>::new_max_capacity(64)));
+    let ring = expect_ok(ConcurrentRing::<usize>::new_max_capacity(64));
     let n_producers = 4;
     let per_producer = 500;
     let total = n_producers * per_producer;
@@ -596,7 +596,7 @@ fn concurrent_mpsc_push_pop() {
 
 #[test]
 fn concurrent_write_read_roundtrip() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(32)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(32));
     let rounds = 200;
 
     let writer = {
@@ -637,7 +637,7 @@ fn concurrent_write_read_roundtrip() {
 
 #[test]
 fn concurrent_borrow_with_writer_and_reader() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(16)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(16));
     let total = 2000;
 
     let writer = {
@@ -690,7 +690,7 @@ fn concurrent_borrow_with_writer_and_reader() {
 
 #[test]
 fn locks_not_poisoned_after_concurrent_use() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(8));
     let handles: Vec<_> = (0..4)
         .map(|t| {
             let r = ring.clone();
@@ -713,7 +713,7 @@ fn locks_not_poisoned_after_concurrent_use() {
 
 #[test]
 fn concurrent_write_wait_read_wait() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(8));
     let total = 1000;
 
     let writers: Vec<_> = (0..2)
@@ -1082,7 +1082,7 @@ fn lock_guard_does_not_consume() {
 
 #[test]
 fn lock_blocks_other_threads() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     assert!(ring.push(1).is_ok());
 
     let (started_tx, started_rx) = mpsc::channel();
@@ -1124,7 +1124,7 @@ fn guard_drop_restores_access() {
 
 #[test]
 fn lock_guard_does_not_leak_when_panicking() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let r = ring.clone();
     let t = thread::spawn(move || {
         let mut g = r.lock();
@@ -1137,7 +1137,7 @@ fn lock_guard_does_not_leak_when_panicking() {
 
 #[test]
 fn lock_guard_concurrent_readers_and_writer_are_serialized() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(8)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(8));
     let total = 2000;
 
     let writer = {
@@ -1200,7 +1200,7 @@ fn lock_guard_drop_counter_through_clear() {
 
 #[test]
 fn poisoned_mutex_is_recovered() {
-    let ring = Arc::new(expect_ok(ConcurrentRing::<u32>::new_max_capacity(4)));
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let r = ring.clone();
     let t = thread::spawn(move || {
         let mut g = r.lock();
@@ -1519,7 +1519,7 @@ fn try_write_grows_in_indefinite_mode() {
 
 #[test]
 fn concurrent_push_to_indefinite_mode() {
-    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let ring = ConcurrentRing::<usize>::new();
     let n_threads = 4;
     let per_thread = 200;
     let total = n_threads * per_thread;
@@ -1558,7 +1558,7 @@ fn concurrent_push_to_indefinite_mode() {
 
 #[test]
 fn concurrent_write_to_indefinite_mode() {
-    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let ring = ConcurrentRing::<usize>::new();
     let n_threads = 4;
     let per_thread = 200;
     let total = n_threads * per_thread;
@@ -1595,7 +1595,7 @@ fn concurrent_write_to_indefinite_mode() {
 #[test]
 fn concurrent_producer_consumer_indefinite() {
     // 生产者持续 push（触发扩容），消费者持续 pop，验证数据完整。
-    let ring = Arc::new(ConcurrentRing::<usize>::new());
+    let ring = ConcurrentRing::<usize>::new();
     let n_producers = 2;
     let per_producer = 300;
     let total = n_producers * per_producer;
@@ -1643,7 +1643,7 @@ fn concurrent_producer_consumer_indefinite() {
 #[test]
 fn concurrent_push_wait_to_indefinite_mode() {
     // push_wait 在不定长模式下自动扩容，多线程并发写入全部数据。
-    let ring = Arc::new(ConcurrentRing::<u32>::new());
+    let ring = ConcurrentRing::<u32>::new();
     let n_threads = 3;
     let per_thread = 150;
     let total = n_threads * per_thread;
