@@ -11,8 +11,6 @@
 
 use std::fmt;
 use std::fs::File;
-#[cfg(not(debug_assertions))]
-use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::exit;
@@ -325,6 +323,7 @@ pub fn init_global_logging(mp: &MultiProgress, module: &str) -> Option<PathBuf> 
 
     #[cfg(not(debug_assertions))]
     {
+        use std::fs::OpenOptions;
         let result = log_file_path(module).and_then(|path| {
             let file = OpenOptions::new().create(true).append(true).open(&path)?;
             Ok((path, file))

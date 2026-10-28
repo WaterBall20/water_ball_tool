@@ -287,13 +287,13 @@ fn read_and_borrow_consistency() {
 #[test]
 fn write_wait_empty_returns_zero() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
-    assert_eq!(ring.write_wait(&[]), 0);
+    assert_eq!(ring.write_wait(&[]), Ok(0));
 }
 
 #[test]
 fn write_wait_returns_written_count_with_space() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
-    assert_eq!(ring.write_wait(&[1, 2, 3]), 3);
+    assert_eq!(ring.write_wait(&[1, 2, 3]), Ok(3));
     let mut buf = [0u32; 3];
     assert_eq!(ring.read(&mut buf), 3);
     assert_eq!(buf, [1, 2, 3]);
@@ -303,7 +303,7 @@ fn write_wait_returns_written_count_with_space() {
 fn write_wait_partial_when_insufficient_space() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
-    assert_eq!(ring.write_wait(&[10, 20, 30]), 1);
+    assert_eq!(ring.write_wait(&[10, 20, 30]), Ok(1));
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn write_wait_blocks_then_writes() {
     assert_eq!(ring.len(), 2);
     assert_eq!(ring.pop(), Some(1));
     let n = join_ok(writer);
-    assert_eq!(n, 1);
+    assert_eq!(n, Ok(1));
     assert_eq!(ring.len(), 2);
     assert_eq!(ring.pop(), Some(2));
     assert_eq!(ring.pop(), Some(3));
@@ -327,7 +327,7 @@ fn write_wait_blocks_then_writes() {
 fn read_wait_empty_slice_returns_zero() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let mut empty: [u32; 0] = [];
-    assert_eq!(ring.read_wait(&mut empty), 0);
+    assert_eq!(ring.read_wait(&mut empty), Ok(0));
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn read_wait_returns_read_count_with_data() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut buf = [0u32; 4];
-    assert_eq!(ring.read_wait(&mut buf), 3);
+    assert_eq!(ring.read_wait(&mut buf), Ok(3));
     assert_eq!(buf[..3], [1, 2, 3]);
 }
 
@@ -352,7 +352,7 @@ fn read_wait_blocks_then_reads() {
     assert!(ring.is_empty());
     assert!(ring.push(10).is_ok());
     let (n, buf) = join_ok(reader);
-    assert_eq!(n, 1);
+    assert_eq!(n, Ok(1));
     assert_eq!(buf[0], 10);
 }
 
@@ -490,7 +490,7 @@ fn clear_wakes_blocked_writers() {
     ring.clear();
     assert!(ring.is_empty());
     let n = join_ok(writer);
-    assert_eq!(n, 2);
+    assert_eq!(n, Ok(2));
     let mut buf = [0u32; 2];
     assert_eq!(ring.read(&mut buf), 2);
     assert_eq!(buf, [3, 4]);
@@ -726,7 +726,7 @@ fn concurrent_write_wait_read_wait() {
                     let remaining = total / 2 - sent;
                     let count = remaining.min(8);
                     let batch: Vec<u32> = (0..count).map(|i| (base + sent + i) as u32).collect();
-                    let n = r.write_wait(&batch);
+                    let n = r.write_wait(&batch).expect("写入失败");
                     sent += n;
                 }
             })
@@ -739,7 +739,7 @@ fn concurrent_write_wait_read_wait() {
             let mut got = 0usize;
             let mut buf = [0u32; 16];
             while got < total {
-                let n = r.read_wait(&mut buf);
+                let n = r.read_wait(&mut buf).expect("写入失败");
                 got += n;
             }
             got
@@ -1307,7 +1307,7 @@ fn write_grows_and_data_intact() {
 fn push_wait_grows_automatically() {
     let ring = ConcurrentRing::<u32>::new();
     for i in 0..100 {
-        ring.push_wait(i);
+        ring.push_wait(i).expect("添加失败");
     }
     assert!(ring.capacity() >= 100);
     assert_eq!(ring.len(), 100);
@@ -1322,7 +1322,7 @@ fn write_wait_grows_automatically() {
     let data: Vec<u32> = (0..100).collect();
     let mut written = 0;
     while written < data.len() {
-        let n = ring.write_wait(&data[written..]);
+        let n = ring.write_wait(&data[written..]).expect("写入失败");
         assert!(n > 0, "write_wait returned 0");
         written += n;
     }
@@ -1331,7 +1331,7 @@ fn write_wait_grows_automatically() {
     let mut out = vec![0u32; 100];
     let mut read = 0;
     while read < out.len() {
-        let n = ring.read_wait(&mut out[read..]);
+        let n = ring.read_wait(&mut out[read..]).expect("写入失败");
         assert!(n > 0);
         read += n;
     }
@@ -1653,7 +1653,7 @@ fn concurrent_push_wait_to_indefinite_mode() {
             let r = ring.clone();
             thread::spawn(move || {
                 for i in 0..per_thread {
-                    r.push_wait((t * per_thread + i) as u32);
+                    r.push_wait((t * per_thread + i) as u32).expect("添加失败");
                 }
             })
         })

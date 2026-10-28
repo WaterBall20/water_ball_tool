@@ -33,7 +33,7 @@ pub(super) struct Player {
 
 #[derive(Clone)]
 struct SoundEngine {
-    pre_effect_ring_buf: Arc<ConcurrentRing<AudioData>>,
+    pre_effect_ring_buf: ConcurrentRing<AudioData>,
     audio_ring_buffer: LockedWriter<f32>,
     decoder: Arc<Mutex<Option<Decoder>>>,
     stream_config: Arc<StreamConfig>,
@@ -202,7 +202,7 @@ impl Player {
 
         // 在你的播放器初始化阶段
         //效果缓冲区
-        let pre_effect_ring_buf = Arc::new(ConcurrentRing::new_max_capacity(10)?);
+        let pre_effect_ring_buf = ConcurrentRing::new_max_capacity(10)?;
         //声音缓冲区
         let (audio_ring_buffer_reader, audio_ring_buffer) =
             water_ball_tool_lib::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
@@ -402,7 +402,7 @@ impl Player {
         &self.sound_engine.audio_ring_buffer
     }
 
-    pub fn pre_effect_ring_buffer(&self) -> &Arc<ConcurrentRing<AudioData>> {
+    pub fn pre_effect_ring_buffer(&self) -> &ConcurrentRing<AudioData> {
         &self.sound_engine.pre_effect_ring_buf
     }
 

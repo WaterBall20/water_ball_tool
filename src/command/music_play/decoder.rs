@@ -28,7 +28,7 @@ use water_ball_tool_lib::concurrent_ring::{ConcurrentRing, ConcurrentRingError};
 pub(super) struct Decoder {
     path_buf: PathBuf,
     thread_handle: Option<std::thread::JoinHandle<()>>,
-    ring_buf: Arc<ConcurrentRing<AudioData>>,
+    ring_buf: ConcurrentRing<AudioData>,
     stop: Arc<AtomicBool>,
     engine: Arc<Mutex<DecoderEngine>>,
     event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
@@ -90,7 +90,7 @@ impl Decoder {
 impl Decoder {
     pub fn new(
         path: &Path,
-        ring_buf: Arc<ConcurrentRing<AudioData>>,
+        ring_buf: ConcurrentRing<AudioData>,
         effect_runtime: PreEffectRuntime,
         time_metrics: Arc<TimeMetrics>,
     ) -> DecoderResult<Self> {

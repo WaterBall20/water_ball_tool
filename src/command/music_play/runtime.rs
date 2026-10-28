@@ -21,13 +21,14 @@ use std::{io, thread};
 use tracing::{debug, error, info};
 
 pub(super) struct Runtime {
-    play_object: Arc<PlayObject>,
+    play_object: PlayObject,
     thread_control: ThreadControl,
     ui_content: Arc<Mutex<UIContent>>,
     // 停止标志
     run_stop: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
 struct PlayObject {
     // 播放列表
     play_list: Arc<Mutex<PlayList>>,
@@ -78,7 +79,7 @@ impl Runtime {
         let mut player = Player::new()?;
         let decoder_track = Arc::new(Mutex::new(None));
 
-        let play_object = Arc::new(PlayObject {
+        let play_object = PlayObject {
             play_list: Arc::new(Mutex::new(play_list)),
             player: player.clone(),
             decoder_track: decoder_track.clone(),
@@ -87,7 +88,7 @@ impl Runtime {
                 err_count: Arc::new(AtomicUsize::new(0)),
             },
             time_metrics: player.time_metrics().clone(),
-        });
+        };
         //控制变量
         let condvar = Arc::new(Condvar::new());
         let run_stop = Arc::new(AtomicBool::new(false));
@@ -104,7 +105,7 @@ impl Runtime {
             let play_object = play_object.clone();
             Self::create_ui_thread(
                 condvar,
-                play_object,
+                play_object.clone(),
                 mp,
                 run_stop.clone(),
                 ui_content.clone(),
@@ -151,7 +152,7 @@ impl Runtime {
 
     fn create_ui_thread(
         condvar: Arc<Condvar>,
-        play_object: Arc<PlayObject>,
+        play_object: PlayObject,
         mp: &MultiProgress,
         run_stop: Arc<AtomicBool>,
         ui_content: Arc<Mutex<UIContent>>,
@@ -288,7 +289,6 @@ impl Runtime {
                         label_artist = "Artist".green(),
                         label_path = "Path".green(),
                     ));
-
 
                     ui_content = condvar
                         .wait_timeout(ui_content, Duration::from_millis(50))

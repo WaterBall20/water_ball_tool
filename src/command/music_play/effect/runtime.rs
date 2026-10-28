@@ -18,7 +18,7 @@ use water_ball_tool_lib::split_ring_buffer::LockedWriter;
 #[derive(Clone)]
 pub struct PreEffectRuntime {
     effects: Arc<Mutex<PreEffectChain>>,
-    input_buf: Arc<ConcurrentRing<AudioData>>,
+    input_buf: ConcurrentRing<AudioData>,
     audio_buf: LockedWriter<f32>,
     stop: Arc<AtomicBool>,
     effect_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
@@ -48,7 +48,7 @@ impl PreEffectRuntime {
 
 impl PreEffectRuntime {
     pub fn create(
-        input_buf: Arc<ConcurrentRing<AudioData>>,
+        input_buf: ConcurrentRing<AudioData>,
         audio_buf: LockedWriter<f32>,
         time_metrics: Arc<TimeMetrics>,
     ) -> Self {
@@ -96,7 +96,13 @@ impl PreEffectRuntime {
                             });
                             //数据处理
                             let t0 = Instant::now();
-                            let data = input_buf.pop_wait();
+                            let data = match input_buf.pop_wait() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    error!("Pre effect thread popped an error: {e}");
+                                    break;
+                                }
+                            };
                             read_wait_acc.record(t0.elapsed());
                             if stop.load(Ordering::Acquire) {
                                 break;
