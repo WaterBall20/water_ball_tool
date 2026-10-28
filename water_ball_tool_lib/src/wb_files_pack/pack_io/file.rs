@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 /// 虚拟文件访问模式 / Virtual file access mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessMode {
+pub(crate) enum AccessMode {
     /// 只读 / Read-only
     Read,
     /// 只写 / Write-only

@@ -7,7 +7,7 @@ use md5::Md5;
 use md5::digest::FixedOutputReset;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::mem::replace;
@@ -15,7 +15,7 @@ use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::{error, io, thread};
 use tracing::{error, info, warn};
@@ -23,7 +23,6 @@ use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 use water_ball_tool_lib::file_finder::{
     FileFinder, FileInfo, FileKind, FilesList, SearchEvent, SearchWarningType,
 };
-use water_ball_tool_lib::split_ring_buffer::LockedReader;
 
 /// 文件查找命令
 #[derive(Args, Debug)]
@@ -326,7 +325,7 @@ pub fn args(args: FileFinderArgs) -> Result<(), Box<dyn error::Error>> {
 }
 
 /// 搜索文件并显示进度 / Search files with progress display
-pub(crate) fn search_files(
+fn search_files(
     path: &str,
     skip_symlink: bool,
     pb: ProgressBar,
@@ -378,7 +377,7 @@ pub(crate) fn search_files(
                                 data_len.fetch_add(i.length(), Ordering::SeqCst);
                                 if let Err(e) = ring_buf.push_wait((p, i)) {
                                     error!("添加到缓冲区发生错误:{e}");
-                                };
+                                }
                             } else {
                                 results
                                     .lock()
@@ -604,6 +603,10 @@ fn hash_work(
                             );
                         }
                         _ => error!(r#"[未处理错误]无法打开文件"{}"，err:{err}"#, path.display()),
+                    }
+                    if let Err(e) = tx.send(info.length()) {
+                        error!("发送更新总进度失败, err: {e}");
+                        continue;
                     }
                     continue;
                 }

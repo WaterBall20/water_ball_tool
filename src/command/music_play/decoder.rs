@@ -81,7 +81,9 @@ impl Decoder {
             return Err(e);
         }
         let t1 = Instant::now();
-        ring_buf.push_wait(AudioData::Block(write_buf.to_vec()));
+        ring_buf
+            .push_wait(AudioData::Block(write_buf.to_vec()))
+            .expect("push block failed");
         write_wait_acc.record(t1.elapsed());
         Ok(())
     }
@@ -225,7 +227,10 @@ impl Decoder {
                                     if let Some(p) = e {
                                         p
                                     } else {
-                                        ring_buf.push_wait(AudioData::Eof);
+                                        ring_buf.push_wait(AudioData::Eof).expect(
+                                            "push Eof \
+                                        failed",
+                                        );
                                         Self::emit(
                                             DecoderEvent {
                                                 result: Ok(DecoderEventType::Eof),
@@ -348,7 +353,7 @@ impl Decoder {
     pub fn stop(self) -> DecoderResult<()> {
         let mut s = self;
         s.stop.store(true, Ordering::Release);
-        s.effect_runtime.send_skip();
+        s.effect_runtime.send_skip().expect("send skip failed");
         s.join()
     }
 
@@ -367,7 +372,7 @@ impl Decoder {
     pub fn try_seek(
         &mut self,
         d: Duration,
-    ) -> Result<symphonia::core::formats::SeekedTo, Box<dyn Error>> {
+    ) -> Result<symphonia::core::formats::SeekedTo, Box<dyn Error + Send + Sync>> {
         self.ring_buf.clear();
         let mut engine = self.engine.lock().expect("engine is poisoned");
         let track_id = engine.track_id;
@@ -379,7 +384,7 @@ impl Decoder {
             },
         )?;
         engine.decoder.reset();
-        self.effect_runtime.reset(self.data.decoder_format);
+        self.effect_runtime.reset(self.data.decoder_format)?;
         Ok(r)
     }
 

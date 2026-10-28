@@ -585,7 +585,9 @@ impl PlayObject {
                 }
                 error!("切换下一曲发生错误，不存在，将暂停");
             }
-            pre_effect_runtime.send_no_next();
+            pre_effect_runtime
+                .send_no_next()
+                .expect("next_inner() send_no_next err");
             next_content.err_count.store(0, Ordering::Release);
 
             Ok(None)

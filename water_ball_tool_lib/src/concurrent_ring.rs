@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod test;
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::fmt::{Debug, Display, Formatter};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -77,9 +77,13 @@ struct LockContent {
     not_full: Condvar,    // 写者在此等待“有空间”
     not_empty: Condvar,   // 读者在此等待“有数据”
 
-    // —— 唤醒优化 ——
-    read_waiters: AtomicUsize,  // 正在 not_empty 上等待的读者数
-    write_waiters: AtomicUsize, // 正在 not_full 上等待的写者数
+    // —— 唤醒优化与死锁检测 ——
+    // 注意：`read_waiters` / `write_waiters` 的值包含“已通过 ensure_waitable
+    // 并 fetch_add(1)、正在或即将进入 Condvar::wait”的线程。
+    // `ensure_waitable` 与 `fetch_add` 均在 `wait_lock` 下执行，
+    // 因此二者对 `wait_lock` 的串行化保证了计数的原子一致性。
+    read_waiters: AtomicUsize,  // 正在或即将等待 not_empty 的读者数
+    write_waiters: AtomicUsize, // 正在或即将等待 not_full 的写者数
 }
 
 impl LockContent {
@@ -107,9 +111,12 @@ pub struct Inner<T> {
 
     /// 当前共享此 `Inner` 的 [`ConcurrentRing`] 实例数（含自身）。
     ///
-    /// `Clone` 时 `fetch_add(1)`；`Drop` 时 `fetch_sub(1)`，若减前为 2
-    /// （即减后仅剩 1 个实例）则唤醒所有 Condvar 等待者，让它们能重新
-    /// 检查 `ensure_waitable` 并返回 `SingleInstance`。
+    /// `Clone` 时 `fetch_add(1)`；`Drop` 时 `fetch_sub(1)`，并按需唤醒
+    /// Condvar 等待者：
+    /// - 减后剩 1 个实例 → 唤醒所有等待者，让它们重新检查 `ensure_waitable`
+    ///   并返回 `SingleInstance`。
+    /// - 减后剩 ≥ 2 个实例且所有剩余实例都在等待 → 唤醒它们，让它们返回
+    ///   `AllWaiting`。
     ref_count: AtomicUsize,
 }
 
@@ -151,35 +158,14 @@ impl<T> Drop for Inner<T> {
 pub struct ConcurrentRing<T> {
     inner: Arc<Inner<T>>,
 
-    // 用 `PhantomData<*const ()>` 将本类型的自动 derive 结果强制为
-    // `!Send + !Sync`（裸指针既不是 Send 也不是 Sync）。
+    // 强制 `!Sync`：`Cell<()>` 不是 `Sync`。
     //
-    // 这样做的目的：
-    // - **阻止自动 derive `Send`**：改为下方显式 `unsafe impl Send`，
-    //   让 "实现 Send 但不实现 Sync" 的意图在源码中一目了然；
-    // - **阻止自动 derive `Sync`**：使 `&ConcurrentRing` 无法跨线程共享。
-    //   阻塞类 API 依赖 `ref_count` 判断"是否还有别的持有者可以唤醒我"；
-    //   若允许 `&ConcurrentRing` 直接被多线程引用，会模糊"持有者"
-    //   与"借用者"的语义，并与 `ensure_waitable` 的检查条件不一致。
-    //
-    // 多线程协作的正确用法：为每个线程 `clone()` 一个 `ConcurrentRing`
-    // 并 move 过去。
-    _marker: PhantomData<*const ()>,
+    // 与 `Arc` 语义一致 —— 多线程协作时，应为每个线程 clone 一个
+    // `ConcurrentRing` 并 move 到线程，而不是通过 `&ConcurrentRing`
+    // 直接共享。`Sync` 被移除也提醒调用方：等待类 API 依赖另一持有者
+    // 存在，否则会返回 `SingleInstance` / `AllWaiting`。
+    _not_sync: PhantomData<Cell<()>>,
 }
-
-// SAFETY:
-// - `ConcurrentRing<T>` 仅含 `Arc<Inner<T>>` 与零大小的 `PhantomData`；
-// - `Arc<Inner<T>>: Send` 需要 `Inner<T>: Send + Sync`，两者均已通过
-//   上方 `unsafe impl<T: Send>` 提供；
-// - `PhantomData<*const ()>` 使自动 derive 为 `!Send + !Sync`；此处的
-//   显式 `unsafe impl Send` 覆盖 `!Send`（因内部实际满足 Send 语义），
-//   同时保持"不实现 Sync"——`ConcurrentRing<T>` 仍然 `!Sync`。
-//
-// 不实现 Sync 的理由：本类型是"持有者句柄"，`ref_count` 计数 = 持有者
-// 数量。允许 `&ConcurrentRing` 通过 `thread::scope` 直接跨线程，会使
-// "借用者" 不增加持有者计数却可在对端等待/唤醒路径上产生副作用，
-// 破坏 `ensure_waitable` 的语义（"至少 2 个持有者才能阻塞等待"）。
-unsafe impl<T: Send> Send for ConcurrentRing<T> {}
 
 impl<T> Deref for ConcurrentRing<T> {
     type Target = Inner<T>;
@@ -193,40 +179,53 @@ impl<T> Clone for ConcurrentRing<T> {
         // 实例计数 +1，与 `Arc::clone` 严格同步。
         // `ensure_waitable` 与 `Drop` 均依赖此计数；
         // Relaxed 足够：计数值本身无跨线程同步语义，配对的是 Drop 侧的
-        // `fetch_sub(AcqRel)`，后者对 `prev == 2` 的判定建立了必要的 happens-before。
+        // `fetch_sub(AcqRel)`，后者对 `prev - 1` 的判定建立了必要的 happens-before。
         self.inner.ref_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
-            _marker: PhantomData,
+            _not_sync: PhantomData,
         }
     }
 }
 
 impl<T> Drop for ConcurrentRing<T> {
     fn drop(&mut self) {
-        // 实例计数 -1。`prev` 是减之前的值：
-        //
-        // - `prev == 2` ⇒ 本次 drop 后仅剩 1 个实例。此时若有线程阻塞在
-        //   `not_empty` / `not_full` 上，将永远无人唤醒它们 —— 必须由本次
-        //   Drop 发起一次 notify，让它们醒来后重新检查 `ensure_waitable`
-        //   并返回 `SingleInstance`。
-        // - `prev == 1` ⇒ 本线程是最后一个持有者。此时不可能有等待者
-        //   （阻塞 API 需要 `&self`，而持有 `&self` 必然使 `ref_count ≥ 1`，
-        //   与“最后一个”矛盾）。
+        // 实例计数 -1。`prev` 是减之前的值，`remaining = prev - 1` 是减后实例数。
         let prev = self.inner.ref_count.fetch_sub(1, Ordering::AcqRel);
-        if prev == 2 {
-            // 无 unsafe 代码，仅说明为何不会死锁：
+        let remaining = prev.saturating_sub(1);
+        if remaining == 0 {
+            // 最后一个实例：`Arc` 的 drop 会同时销毁 `Inner`（在其它字段全部
+            // 释放后触发 `Inner::drop`）。此时不可能有等待者（阻塞 API 需要
+            // `&self`，持有 `&self` 必然使 `ref_count ≥ 1`）。
+            return;
+        }
+        // 决定是否需要唤醒等待者：
+        // 1. `remaining == 1`：本次 drop 后仅剩 1 个实例。若该实例正在等待
+        //    或即将进入等待，它将无人唤醒 → 主动唤醒以让它重新检查并返回
+        //    `SingleInstance`。
+        // 2. `remaining >= 2` 且 `waiting >= remaining`：所有剩余实例都已
+        //    在等待，无人能作为对端操作 → 唤醒它们以让它们返回 `AllWaiting`。
+        //
+        // 注意：此判定存在极罕见的时序竞态（某线程刚通过 `ensure_waitable`
+        // 检查、尚未 `fetch_add` 时被并发 drop 观察），但 Drop 的唤醒是无害的
+        // （`notify_all` 无等待者时是 no-op），且 `remaining == 1` 条件已覆盖
+        // 主要死锁场景。
+        let waiting = self.inner.lock_content.read_waiters.load(Ordering::Acquire)
+            + self
+                .inner
+                .lock_content
+                .write_waiters
+                .load(Ordering::Acquire);
+        let need_wake = remaining == 1 || waiting >= remaining;
+        if need_wake {
+            // 持 `wait_lock` 做 notify，与 `wait_not_empty` / `wait_not_full`
+            // 的"检查条件 + wait"临界区互斥，避免丢失唤醒。
             //
-            // - 此处持 `wait_lock` 不会死锁：`prev == 2` 意味着除本线程外
-            //   仅有一个实例存活。该实例若正在 `Condvar::wait` 中，
-            //   `wait_lock` 已被其释放，可直接获取；若正在做其他操作，
-            //   最多短暂阻塞。
-            // - `ConcurrentRingGuard` 持 `write_lock + read_gate.write`，
-            //   但这些锁与本处 `wait_lock` 独立；且 Guard 存在意味着其
-            //   底层 `&ConcurrentRing` 仍然存活，与 `prev == 2` 不矛盾。
-            // - 仅有 `wake_readers`/`wake_writers` 也获取 `wait_lock`，
-            //   但它们在调用前均已释放 `write_lock`（例如 `push` 中
-            //   `_g` 在 scope 结束时先 drop），因此不存在顺序反转。
+            // SAFETY 说明（无 unsafe 代码，仅说明为何不会死锁）：
+            // - 本线程已在 `Inner::drop` 前完成 `fetch_sub`，其他线程不可
+            //   再从本实例发起阻塞调用（本实例已消亡）。
+            // - `wait_lock` 与 `write_lock` / `read_gate` 独立，不存在锁顺序反转。
+            // - 若存在正在 `wait` 的线程，`wait_lock` 已被其释放，可直接获取。
             let _wl = self.inner.lock_wait_lock();
             if self.inner.lock_content.read_waiters.load(Ordering::Acquire) > 0 {
                 self.inner.lock_content.not_empty.notify_all();
@@ -258,7 +257,7 @@ impl<T> ConcurrentRing<T> {
                 is_max_cap: AtomicBool::new(false),
                 ref_count: AtomicUsize::new(1),
             }),
-            _marker: PhantomData,
+            _not_sync: PhantomData,
         }
     }
 
@@ -283,7 +282,7 @@ impl<T> ConcurrentRing<T> {
                 is_max_cap: AtomicBool::new(true),
                 ref_count: AtomicUsize::new(1),
             }),
-            _marker: PhantomData,
+            _not_sync: PhantomData,
         })
     }
 
@@ -508,19 +507,35 @@ impl<T> Inner<T> {
         Some(v)
     }
 
-    /// 检查是否允许进入阻塞等待：至少需要 2 个共享实例。
+    /// 检查是否允许进入阻塞等待。
     ///
-    /// 若 `ref_count() <= 1`，说明没有其他持有者可执行唤醒动作，当前线程
-    /// 一旦阻塞在 Condvar 上将永远无法返回 —— 返回 `SingleInstance` 错误，
-    /// 避免死锁。
+    /// 需同时满足：
+    /// 1. 至少 2 个共享实例（否则无对端可唤醒）。
+    /// 2. 加上「即将进入等待的当前线程」后，等待者数量仍未达到实例总数
+    ///    （否则所有实例都在等待，无对端能操作 → 死锁）。
+    ///
+    /// 调用方必须持有 `wait_lock`；`fetch_add(1)` 与 `wait` 在其保护下
+    /// 串行化，保证计数反映真实的等待状态。
     ///
     /// # Error
-    /// `ConcurrentRingErrorKind::SingleInstance`
+    /// - `SingleInstance`：`ref_count <= 1`。
+    /// - `AllWaiting`：`waiting_readers + waiting_writers + 1 >= ref_count`。
     fn ensure_waitable(&self) -> ConcurrentRingResult<(), T> {
-        if self.ref_count.load(Ordering::Acquire) <= 1 {
+        let ref_count = self.ref_count.load(Ordering::Acquire);
+        if ref_count <= 1 {
             return Err(ConcurrentRingError::new(
                 "wait operation requires at least two instances",
                 ConcurrentRingErrorKind::SingleInstance,
+            ));
+        }
+        let waiting_readers = self.lock_content.read_waiters.load(Ordering::Acquire);
+        let waiting_writers = self.lock_content.write_waiters.load(Ordering::Acquire);
+        // `+ 1` 表示即将进入等待的当前线程；若加上它后 ≥ ref_count，
+        // 说明所有实例都进入等待，无人能作为对端操作 → 必然死锁。
+        if waiting_readers + waiting_writers + 1 >= ref_count {
+            return Err(ConcurrentRingError::new(
+                "all instances are blocked; no peer can wake this thread",
+                ConcurrentRingErrorKind::AllWaiting,
             ));
         }
         Ok(())
@@ -880,8 +895,9 @@ impl<T> Inner<T> {
     /// 阻塞写入单元素。
     ///
     /// # Error
-    /// - 若即将进入 `Condvar::wait`，检查到当前仅剩 1 个共享实例，返回
-    ///   `SingleInstance`：没有其他持有者可唤醒本线程，阻塞将永不返回。
+    /// - `SingleInstance`：当前仅剩 1 个共享实例，无人可唤醒本线程。
+    /// - `AllWaiting`：所有实例（含即将进入等待的当前线程）都在等待，
+    ///   无人能作为对端操作 → 必然死锁。
     pub fn push_wait(&self, value: T) -> ConcurrentRingResult<(), T> {
         let mut value = value;
         let mut guard = self.lock_wait_lock();
@@ -900,7 +916,7 @@ impl<T> Inner<T> {
                 Err(v) => {
                     value = v;
                     if self.is_max_cap.load(Ordering::Acquire) {
-                        // 固定模式：即将进入等待，先检查单实例
+                        // 固定模式：即将进入等待，先做安全检查
                         self.ensure_waitable()?;
                         self.lock_content
                             .write_waiters
@@ -933,7 +949,7 @@ impl<T> Inner<T> {
     /// 阻塞读取单元素。
     ///
     /// # Error
-    /// 若即将进入 `Condvar::wait` 时当前仅剩 1 个共享实例，返回 `SingleInstance`。
+    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn pop_wait(&self) -> ConcurrentRingResult<T, T> {
         let mut guard = self.lock_wait_lock();
         loop {
@@ -963,7 +979,7 @@ impl<T: Copy> Inner<T> {
     /// 阻塞写入至少 1 个元素，最多 `values.len()`。
     ///
     /// # Error
-    /// 若即将进入 `Condvar::wait` 时当前仅剩 1 个共享实例，返回 `SingleInstance`。
+    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn write_wait(&self, values: &[T]) -> ConcurrentRingResult<usize, T> {
         if values.is_empty() {
             return Ok(0);
@@ -1010,14 +1026,12 @@ impl<T: Copy> Inner<T> {
     /// 阻塞写满 `values`。
     ///
     /// # Error
-    /// - 固定模式下 `values.len() > max_cap` → `TooLarge`。
-    /// - 若即将进入 `Condvar::wait` 时当前仅剩 1 个共享实例 → `SingleInstance`。
+    /// - `TooLarge`：固定模式下 `values.len() > max_cap`。
+    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn write_all(&self, values: &[T]) -> ConcurrentRingResult<(), T> {
         if values.is_empty() {
             return Ok(());
         }
-        // 固定模式下 `values.len() > max_cap` 会永久阻塞（无写者时无法填满），
-        // 在获取 wait_lock 之前直接拒绝，避免测试/调用方挂起。
         if self.is_max_cap.load(Ordering::Acquire) {
             let max_cap = self.max_cap.load(Ordering::Acquire);
             if max_cap > 0 && values.len() > max_cap {
@@ -1076,7 +1090,7 @@ impl<T: Copy> Inner<T> {
     /// 阻塞读取至少 1 个元素。
     ///
     /// # Error
-    /// 若即将进入 `Condvar::wait` 时当前仅剩 1 个共享实例，返回 `SingleInstance`。
+    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn read_wait(&self, out: &mut [T]) -> ConcurrentRingResult<usize, T> {
         if out.is_empty() {
             return Ok(0);
@@ -1107,19 +1121,13 @@ impl<T: Copy> Inner<T> {
     /// 阻塞读满 `out`。
     ///
     /// # Error
-    /// - 固定模式（`is_max_cap = true`）下，`out.len() > max_cap` 时返回 `TooLarge`：
-    ///   物理 `cap` 上限就是 `max_cap`，ring 满时也无法一次填满 `out`，
-    ///   剩余元素必须靠新数据持续流入才能补齐 —— 这属于参数误用。
-    /// - 不定长模式（`is_max_cap = false`）不设检查：`cap` 会按需扩容，
-    ///   写者持续写入即可填满。
-    /// - 若即将进入 `Condvar::wait` 时当前仅剩 1 个共享实例 → `SingleInstance`。
+    /// - `TooLarge`：固定模式下 `out.len() > max_cap`（参数误用）。
+    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn read_exact(&self, out: &mut [T]) -> ConcurrentRingResult<(), T> {
         if out.is_empty() {
             return Ok(());
         }
 
-        // 固定模式下 `out.len() > max_cap` 会永久阻塞（无写者时无法填满），
-        // 在获取 wait_lock 之前直接拒绝，避免测试/调用方挂起。
         if self.is_max_cap.load(Ordering::Acquire) {
             let max_cap = self.max_cap.load(Ordering::Acquire);
             if max_cap > 0 && out.len() > max_cap {
@@ -1196,7 +1204,6 @@ impl<T> Inner<T> {
         }
         let cap = self.cap.load(Ordering::Acquire);
         if new_max > cap {
-            // ① 扩容（全锁）
             let _wg = self.lock_write_lock();
             let _rg = self.lock_read_gate_write();
             let cap_now = self.cap.load(Ordering::Acquire);
@@ -1209,7 +1216,6 @@ impl<T> Inner<T> {
             drop(_wg);
             self.wake_writers();
         } else {
-            // ② / ③ 减小或相等：只写 max_cap（write_lock 保护）
             let _wg = self.lock_write_lock();
             let len = self.len_relaxed();
             if new_max < len {
@@ -1311,9 +1317,9 @@ impl<T> Inner<T> {
 
 type ConcurrentRingResult<R, T> = Result<R, ConcurrentRingError<T>>;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct ConcurrentRingError<T> {
-    pub message: String,
+    message: String,
     pub kind: ConcurrentRingErrorKind<T>,
 }
 
@@ -1334,6 +1340,7 @@ impl<T> Debug for ConcurrentRingError<T> {
             ConcurrentRingErrorKind::TooLarge => "TooLarge",
             ConcurrentRingErrorKind::MaxCapacityZero => "MaxCapacityZero",
             ConcurrentRingErrorKind::SingleInstance => "SingleInstance",
+            ConcurrentRingErrorKind::AllWaiting => "AllWaiting",
         };
         write!(
             f,
@@ -1351,7 +1358,7 @@ impl<T> Display for ConcurrentRingError<T> {
 
 impl<T> std::error::Error for ConcurrentRingError<T> {}
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum ConcurrentRingErrorKind<T> {
     Full(T),
     Locked(Option<T>),
@@ -1366,7 +1373,7 @@ pub enum ConcurrentRingErrorKind<T> {
     TooLarge,
     MaxCapacityZero,
 
-    /// 阻塞等待需要至少 2 个共享实例。
+    /// 阻塞等待需要至少 2 个共享实例，但当前只有 1 个。
     ///
     /// 当调用 [`push_wait`] / [`pop_wait`] / [`write_wait`] / [`write_all`] /
     /// [`read_wait`] / [`read_exact`] 且即将进入 `Condvar::wait` 时，若
@@ -1375,6 +1382,19 @@ pub enum ConcurrentRingErrorKind<T> {
     ///
     /// **不携带数据**：错误原因与输入值无关。
     SingleInstance,
+
+    /// 阻塞等待会导致所有共享实例全部进入等待状态。
+    ///
+    /// 当即将进入 `Condvar::wait` 时，若「即将进入等待的当前线程 + 现有
+    /// 等待者」数量达到或超过共享实例总数（`ref_count()`），说明没有任何
+    /// 实例还能作为对端执行 `push` / `pop` 来产生唤醒事件 —— 阻塞将永不
+    /// 返回，故立即返回此错误。
+    ///
+    /// 与 [`SingleInstance`] 的关系：`ref_count == 1` 优先返回 `SingleInstance`
+    /// （语义更精确）；`ref_count >= 2` 且所有实例都在等待时返回 `AllWaiting`。
+    ///
+    /// **不携带数据**：错误原因与输入值无关。
+    AllWaiting,
 }
 
 // ============================================================
@@ -1393,9 +1413,6 @@ pub struct ConcurrentRingGuard<'a, T> {
 }
 
 impl<'a, T> ConcurrentRingGuard<'a, T> {
-    // ---------- 内部辅助 ----------
-
-    /// 获取 slots 切片。Guard 持有全锁，独占访问。
     #[inline]
     fn slots(&self) -> &[Slot<T>] {
         // SAFETY: Guard 持有 write_lock + read_gate.write，
@@ -1403,8 +1420,6 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         unsafe { &*self.ring.slots.get() }
     }
 
-    /// 满时自动扩容（仅不定长模式生效），返回扩容后的「在满时 push 是否还需要扩容」。
-    /// 已持全锁，可直接调用 `grow_locked`。
     fn grow_if_needed(&mut self, min_extra: usize) {
         // 固定模式不扩容。
         if self.ring.is_max_cap.load(Ordering::Acquire) {
@@ -1414,13 +1429,10 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         let len = self.len();
         // 目标容量：至少能容纳当前元素 + 额外 min_extra。
         let target = cap.saturating_mul(2).max(len + min_extra).max(1);
-        // 若目标大于物理容量，执行重分配。
         if target > cap {
             self.ring.grow_locked(target);
         }
     }
-
-    // ---------- 基本尺寸 ----------
 
     pub fn len(&self) -> usize {
         let r = self.ring.read_pos.load(Ordering::Relaxed);
@@ -1432,23 +1444,17 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         self.len() == 0
     }
 
-    /// 是否「无法再写入」：固定模式 / 已启用 max_cap 时，`len >= effective_cap`；
-    /// 不定长模式下 `effective_cap == cap`，语义为「物理已满、需要扩容」。
     pub fn is_full(&self) -> bool {
         self.len() >= self.ring.effective_cap()
     }
 
-    /// 物理数组容量。
     pub fn capacity(&self) -> usize {
         self.ring.cap.load(Ordering::Relaxed)
     }
 
-    /// 逻辑容量上限（0 = 未设置）。
     pub fn max_capacity(&self) -> usize {
         self.ring.max_cap.load(Ordering::Relaxed)
     }
-
-    // ---------- 索引访问 ----------
 
     pub fn get(&self, index: usize) -> Option<&T> {
         if index >= self.len() {
@@ -1498,25 +1504,19 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         }
     }
 
-    // ---------- Vec / VecDeque 风格修改 ----------
-
-    /// 尾部插入。满时若处于不定长模式则自动扩容。
     pub fn push_back(&mut self, value: T) -> Result<(), T> {
         match self.ring.push_inner(value) {
             Ok(()) => Ok(()),
             Err(v) => {
-                // 固定模式：真正满，返回 Err。
                 if self.ring.is_max_cap.load(Ordering::Acquire) {
                     return Err(v);
                 }
-                // 不定长模式：扩容（Guard 已持全锁，可直接 grow_locked）。
                 self.grow_if_needed(1);
                 self.ring.push_inner(v)
             }
         }
     }
 
-    /// 头部插入。满时若处于不定长模式则自动扩容。
     pub fn push_front(&mut self, value: T) -> Result<(), T> {
         let effective = self.ring.effective_cap();
         let w = self.ring.write_pos.load(Ordering::Relaxed);
@@ -1524,14 +1524,11 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         let len = w.wrapping_sub(r);
 
         if len >= effective {
-            // 固定模式：真正满，返回 Err。
             if self.ring.is_max_cap.load(Ordering::Acquire) {
                 return Err(value);
             }
-            // 不定长模式：先扩容。grow_locked 后 r=0, w=len, cap=target。
             self.grow_if_needed(1);
             let cap = self.capacity();
-            // 扩容后新元素的逻辑读位置为 0-1（回绕）。
             let new_r = 0usize.wrapping_sub(1);
             let phys = new_r % cap;
             // SAFETY: 新位置 `target-1` 未初始化（因为 len < target），Guard 持全锁独占。
@@ -1542,7 +1539,6 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
             return Ok(());
         }
 
-        // 非满：正常 push_front。
         let cap = self.capacity();
         let new_r = r.wrapping_sub(1);
         let phys = new_r % cap;
@@ -1579,8 +1575,6 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
         // 逐个 pop_front，每个 take 出的 T 立即 drop。
         while self.pop_front().is_some() {}
     }
-
-    // ---------- 切片访问 ----------
 
     pub fn as_slices(&self) -> (&[T], &[T]) {
         let r = self.ring.read_pos.load(Ordering::Acquire);
@@ -1628,8 +1622,6 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
             (first, second)
         }
     }
-
-    // ---------- 迭代器 ----------
 
     pub fn iter(&self) -> Iter<'_, T> {
         let r = self.ring.read_pos.load(Ordering::Acquire);
@@ -1687,8 +1679,6 @@ impl<'a, T> Iterator for Iter<'a, T> {
         // SAFETY: 迭代区间 [r, r+len) 全部已初始化；`Iter<'a, T>` 由
         // `ConcurrentRingGuard<'_, T>` 的 `iter(&self)` 创建，其生命周期 'a 绑定到
         // Guard 借用，Guard 在 'a 内持有全锁，保证 `slots` 不被 `grow_locked` 替换。
-        // `&*self.ring.slots.get()` 得到 `&'a Box<[Slot<T>]>`（由 `UnsafeCell` 与
-        // 上述锁保证），auto-deref 到 `&'a [Slot<T>]`。
         let slots: &'a [Slot<T>] = unsafe { &*self.ring.slots.get() };
         // SAFETY: phys 位置属于迭代区间，已初始化。
         unsafe { Some(slots[phys].get_ref()) }
@@ -1726,8 +1716,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
         let slots: &'a [Slot<T>] = unsafe { &*self.ring.slots.get() };
         // SAFETY: `IterMut<'a, T>` 只能由 `&'a mut ConcurrentRingGuard` 的
         // `iter_mut()` 构造，因此 Guard 的生命周期覆盖 `'a`，Guard 在 `'a` 内
-        // 持有全锁，期间无人能替换 `slots`；`&*self.ring.slots.get()` 得到
-        // `&'a Box<[Slot<T>]>`，自动 deref 为 `&'a [Slot<T>]` 合法。
+        // 持有全锁，期间无人能替换 `slots`。
         unsafe { Some(&mut *slots[phys].get_mut_ptr()) }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {

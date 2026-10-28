@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
-use thread_priority::ThreadPriority;
 use tracing::{debug, error};
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 use water_ball_tool_lib::split_ring_buffer::LockedWriter;
@@ -40,9 +39,10 @@ impl PreEffectRuntime {
 }
 
 impl PreEffectRuntime {
-    fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) {
+    fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) -> Result<(), PreEffectError> {
         self.input_buf.clear();
-        self.input_buf.push_wait(audio_data);
+        self.input_buf.push_wait(audio_data)?;
+        Ok(())
     }
 }
 
@@ -193,16 +193,17 @@ impl PreEffectRuntime {
         Ok(())
     }
 
-    pub fn send_skip(&self) {
+    pub fn send_skip(&self) -> Result<(), PreEffectError> {
         self.send_input_and_clear_buf_inner(AudioData::Skip)
     }
 
-    pub fn send_no_next(&self) {
+    pub fn send_no_next(&self) -> Result<(), PreEffectError> {
         self.send_input_and_clear_buf_inner(AudioData::NoNext)
     }
 
-    pub fn reset(&self, format: AudioFormat) {
-        self.input_buf.push_wait(AudioData::Reset(format));
+    pub fn reset(&self, format: AudioFormat) -> Result<(), PreEffectError> {
+        self.input_buf.push_wait(AudioData::Reset(format))?;
+        Ok(())
     }
 
     pub fn add_effect<E>(&mut self, effect: E) -> Result<(), Box<dyn Error + Send + Sync>>

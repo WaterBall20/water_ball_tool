@@ -13,17 +13,17 @@ use crate::multi_progress_init;
 use clap::error::Result;
 use clap::{Args, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::{fs, io, thread};
 use tracing::{error, info, warn};
+use water_ball_tool_lib::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 use water_ball_tool_lib::file_finder::{FileFinder, FileInfo, FileKind, SearchEvent};
 use water_ball_tool_lib::tools::PathTool;
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
@@ -368,20 +368,17 @@ impl WaterBallFilePackArgsRuning {
             info!("开始搜索文件");
             warn!("目前搜索将跳过符号链接");
             //搜索结果队列
-            let results = Arc::new(Mutex::new(VecDeque::new()));
+            let results = ConcurrentRing::new();
             //搜索结束标志
             let ff_end = Arc::new(AtomicBool::new(false));
-            //控制线程继续和等待的控制变量
-            let condver = Arc::new(Condvar::new());
             //文件计数
             let file_count = Arc::new(AtomicU64::new(0));
 
             //创建专门的线程搜索
             let ff_thread = Self::wbfp_p_search(
                 in_path,
-                &results,
+                results.clone(),
                 &ff_end,
-                &condver,
                 &file_count,
                 &data_len,
                 ff_pb,
@@ -390,9 +387,8 @@ impl WaterBallFilePackArgsRuning {
             //复制线程
             let wp_thread = Self::wbfp_p_copy(
                 &pack,
-                &results,
+                results,
                 in_path,
-                &condver,
                 &ff_end,
                 thread_count,
                 mp,
@@ -406,8 +402,6 @@ impl WaterBallFilePackArgsRuning {
                 error!("文件搜索线程错误：{e}");
             }
             ff_end.store(true, Ordering::Release);
-            //唤醒所有线程，避免死锁
-            condver.notify_all();
             wp_thread.join().expect("wp_thread join failed");
         }
         info!("操作已完成,文件保存到{}", pack_path.display());
@@ -417,9 +411,8 @@ impl WaterBallFilePackArgsRuning {
     ///打包搜索线程
     fn wbfp_p_search(
         in_path: &Path,
-        results: &ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
+        results: ConcurrentRing<(PathBuf, FileInfo)>,
         ff_end: &Arc<AtomicBool>,
-        condver: &Arc<Condvar>,
         file_count: &Arc<AtomicU64>,
         data_len: &Arc<AtomicU64>,
         ff_pb: ProgressBar,
@@ -431,7 +424,6 @@ impl WaterBallFilePackArgsRuning {
             let in_dir_path = in_path.to_path_buf();
             let results = results.clone();
             let ff_end = ff_end.clone();
-            let condver = condver.clone();
             let file_count = file_count.clone();
             let data_len = data_len.clone();
 
@@ -472,11 +464,7 @@ impl WaterBallFilePackArgsRuning {
                             //只有文件才会加入队列
                             if let FileKind::File { .. } = info.file_kind() {
                                 data_len.fetch_add(info.length(), Ordering::Release);
-                                results
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .push_back((path, info));
-                                condver.notify_one();
+                                let _ = results.push((path, info));
                             }
                         }
                         SearchEvent::Warning(warning) => {
@@ -498,8 +486,6 @@ impl WaterBallFilePackArgsRuning {
                     data_len.load(Ordering::Acquire)
                 );
                 ff_end.store(true, Ordering::Release);
-                //唤醒所有线程，避免死锁
-                condver.notify_all();
                 Ok(())
             })
         }
@@ -507,9 +493,8 @@ impl WaterBallFilePackArgsRuning {
 
     fn wbfp_p_copy(
         pack: &ManagerSync,
-        results: &ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
+        results: ConcurrentRing<(PathBuf, FileInfo)>,
         in_path: &Path,
-        condver: &Arc<Condvar>,
         ff_end: &Arc<AtomicBool>,
         thread_count: usize,
         mp: &MultiProgress,
@@ -522,7 +507,6 @@ impl WaterBallFilePackArgsRuning {
         let pack = pack.clone();
         let results = results.clone();
         let in_dir_path = in_path.to_path_buf();
-        let condver = condver.clone();
         let ff_end = ff_end.clone();
 
         //创建线程进度条
@@ -549,7 +533,6 @@ impl WaterBallFilePackArgsRuning {
                 let pack_man = pack.clone();
                 let files_list = results.clone();
                 let in_dir_path = in_dir_path.clone();
-                let condver = condver.clone();
                 let pb = wb_pbs
                     .pop()
                     .expect("逻辑错误：线程获取线程进度条，进度条不存在");
@@ -559,13 +542,12 @@ impl WaterBallFilePackArgsRuning {
                     Self::wbfp_p_work(
                         pack_man,
                         pb,
-                        files_list,
+                        files_list.clone(),
                         &in_dir_path,
-                        ff_end,
-                        condver,
-                        main_pb_tx,
+                        &ff_end,
+                        &main_pb_tx,
                         write_optimization,
-                    )
+                    );
                 }));
             }
 
@@ -621,11 +603,10 @@ impl WaterBallFilePackArgsRuning {
     fn wbfp_p_work(
         mut pack_man: ManagerSync,
         pb: ProgressBar,
-        files_list: ArcMutex<VecDeque<(PathBuf, FileInfo)>>,
+        files_list: ConcurrentRing<(PathBuf, FileInfo)>,
         in_dir_path: &Path,
-        ff_end: Arc<AtomicBool>,
-        condver: Arc<Condvar>,
-        main_pb_tx: Sender<(u64, u64)>,
+        ff_end: &Arc<AtomicBool>,
+        main_pb_tx: &Sender<(u64, u64)>,
         write_optimization: bool,
     ) {
         let mut run_buf = vec![0u8; 1024 * 1024];
@@ -650,48 +631,39 @@ impl WaterBallFilePackArgsRuning {
         };
 
         'write_pack: loop {
-            let (file_path, file_info) = match files_list
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front()
-            {
-                Some(v) => v,
-                None => {
-                    //进入挂起
-                    loop {
-                        //判断搜索是否结束, 确定是否退出线程
-                        if ff_end.load(Ordering::Acquire) {
-                            //唤醒所有线程，避免死锁
-                            condver.notify_all();
-                            break 'write_pack;
-                        }
-                        //设置进度条样式
-                        pb.set_style(
-                            ProgressStyle::default_bar()
-                                .template(SPINNER_TEMPLATE)
-                                .expect("设置进度条模板失败"),
-                        );
-                        pb.set_message("已挂起");
-
-                        let mut files_list = files_list
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        files_list = condver
-                            .wait(files_list)
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-                        if let Some(v) = files_list.pop_front() {
-                            //恢复进度条样式
-                            pb.set_style(
-                                ProgressStyle::default_bar()
-                                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                                    .expect("设置进度条模板失败")
-                                    .progress_chars("=>-"),
-                            );
-                            break v;
-                        }
-                    }
+            let (file_path, file_info) = if let Some(v) = files_list.pop() {
+                v
+            } else {
+                //判断搜索是否结束, 确定是否退出线程
+                if ff_end.load(Ordering::Acquire) {
+                    break 'write_pack;
                 }
+                //设置进度条样式
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template(SPINNER_TEMPLATE)
+                        .expect("设置进度条模板失败"),
+                );
+                pb.set_message("已挂起");
+                let r = match files_list.pop_wait() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let ConcurrentRingErrorKind::SingleInstance = e.kind {
+                        } else if let ConcurrentRingErrorKind::AllWaiting = e.kind {
+                        } else {
+                            error!("队列等待文件信息时发生错误, err: {e}");
+                        }
+                        break;
+                    }
+                };
+                //恢复进度条样式
+                pb.set_style(
+                    ProgressStyle::default_bar()
+                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
+                        .expect("设置进度条模板失败")
+                        .progress_chars("=>-"),
+                );
+                r
             };
             //写入文件前处理
             //路径处理
@@ -739,19 +711,22 @@ impl WaterBallFilePackArgsRuning {
         let mut in_file = match File::open(this_in_path) {
             Ok(file) => file,
             Err(err) => {
-                match err.kind() {
-                    ErrorKind::PermissionDenied => {
-                        //权限不足
+                let kind_str = match err.kind() {
+                    ErrorKind::PermissionDenied => "权限不足",
+                    ErrorKind::NotFound => "文件不存在",
+                    //TODO:完善所有错误类型处理
+                    _ => {
                         error!(
-                            r#"无法打开文件"{}"，权限不足，将跳过，err:{err}"#,
+                            r#"[未处理错误]无法打开文件"{}"，err:{err}"#,
                             this_in_path.display()
                         );
+                        return;
                     }
-                    _ => error!(
-                        r#"[未处理错误]无法打开文件"{}"，err:{err}"#,
-                        this_in_path.display()
-                    ),
-                }
+                };
+                error!(
+                    r#"无法打开文件"{}"，{kind_str}，将跳过，err:{err}"#,
+                    this_in_path.display()
+                );
                 return;
             }
         };
@@ -762,7 +737,7 @@ impl WaterBallFilePackArgsRuning {
             .write(true)
             .create_new(true)
             .alloc_size(Some(info.length()))
-            .open(&this_pack_path)
+            .open(this_pack_path)
         {
             Ok(mut v) => {
                 if let Err(err) = v.set_len(info.length()) {
@@ -948,6 +923,7 @@ impl WaterBallFilePackArgsRuning {
         info!("开始复制数据");
         fs::create_dir_all(&out_dir_path).expect("无法创建数据路径");
 
+        let out_dir_path: Arc<PathBuf> = Arc::new(out_dir_path);
         let root_name_list = pack.get_root_struct_item_name_list()?;
         let attribute = pack.get_manifest_attribute()?;
         let all_file_count = attribute.file_count();
@@ -963,20 +939,8 @@ impl WaterBallFilePackArgsRuning {
         );
         main_pb.set_prefix("总进度");
 
-        // 统一工作队列 + 终止控制
-        // Unified work queue + termination control
-        let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
         let all_done = Arc::new(AtomicBool::new(false));
-        {
-            let mut q = queue
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for name in &root_name_list {
-                q.push_back(PathBuf::from(name));
-            }
-        }
 
         // 创建子线程进度条 / Create per-worker progress bars
         let mut worker_pbs = Vec::with_capacity(thread_count);
@@ -991,24 +955,30 @@ impl WaterBallFilePackArgsRuning {
             worker_pbs.push(pb);
         }
 
-        let (tx, rx) = mpsc::channel();
-        let mut handles = Vec::with_capacity(thread_count);
-        let out_dir_path: Arc<PathBuf> = Arc::new(out_dir_path);
+        let (handles, rx) = {
+            // 统一工作队列
+            let queue = ConcurrentRing::new();
+            let (tx, rx) = mpsc::channel();
+            let mut handles = Vec::with_capacity(thread_count);
+            for name in &root_name_list {
+                let _ = queue.push(PathBuf::from(name));
+            }
 
-        for _ in 0..thread_count {
-            Self::wpfp_u_work(
-                &pack,
-                &queue,
-                &pending,
-                &all_done,
-                &tx,
-                &mut worker_pbs,
-                &out_dir_path,
-                &mut handles,
-                args.hash_verify,
-            );
-        }
-        drop(tx);
+            for _ in 0..thread_count {
+                Self::wpfp_u_work(
+                    &pack,
+                    queue.clone(),
+                    &pending,
+                    &all_done,
+                    &tx,
+                    &mut worker_pbs,
+                    &out_dir_path,
+                    &mut handles,
+                    args.hash_verify,
+                );
+            }
+            (handles, rx)
+        };
 
         // 主线程：汇总进度条 / Main thread: aggregate progress
         let mut written_len = 0u64;
@@ -1036,7 +1006,7 @@ impl WaterBallFilePackArgsRuning {
 
     fn wpfp_u_work(
         pack: &ManagerSync,
-        queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
+        queue: ConcurrentRing<PathBuf>,
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
         tx: &Sender<u64>,
@@ -1068,7 +1038,6 @@ impl WaterBallFilePackArgsRuning {
                         error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                         continue;
                     }
@@ -1091,7 +1060,6 @@ impl WaterBallFilePackArgsRuning {
                                 );
                                 if pending.fetch_sub(1, Ordering::Release) == 1 {
                                     all_done.store(true, Ordering::Release);
-                                    queue.1.notify_all();
                                 }
                                 continue;
                             }
@@ -1100,18 +1068,12 @@ impl WaterBallFilePackArgsRuning {
                         let n = children.len();
                         if n > 0 {
                             pending.fetch_add(n, Ordering::Release);
-                            let mut q = queue
-                                .0
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             for child in children {
-                                q.push_back(path.join(child));
+                                let _ = queue.push(path.join(child));
                             }
-                            queue.1.notify_all();
                         }
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                     }
                     PackStructItemType::File { .. } => {
@@ -1137,7 +1099,6 @@ impl WaterBallFilePackArgsRuning {
                                     let _ = tx.send(0u64);
                                     if pending.fetch_sub(1, Ordering::Release) == 1 {
                                         all_done.store(true, Ordering::Release);
-                                        queue.1.notify_all();
                                     }
                                     continue;
                                 }
@@ -1186,7 +1147,6 @@ impl WaterBallFilePackArgsRuning {
 
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                     }
                 }
@@ -1195,20 +1155,14 @@ impl WaterBallFilePackArgsRuning {
     }
 
     fn get_queue_path(
-        queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
+        queue: &ConcurrentRing<PathBuf>,
         all_done: &Arc<AtomicBool>,
         pb: &ProgressBar,
     ) -> Option<PathBuf> {
-        let (lock, cvar) = &**queue;
-        let mut q = lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(loop {
-            if let Some(p) = q.pop_front() {
-                break p;
-            }
+        Some(if let Some(p) = queue.pop() {
+            p
+        } else {
             if all_done.load(Ordering::Acquire) {
-                cvar.notify_all();
                 return None;
             }
             pb.set_style(
@@ -1217,16 +1171,24 @@ impl WaterBallFilePackArgsRuning {
                     .expect("设置进度条模板失败"),
             );
             pb.set_message("已挂起");
-            q = cvar
-                .wait(q)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-
+            let r = match queue.pop_wait() {
+                Ok(p) => p,
+                Err(e) => {
+                    if let ConcurrentRingErrorKind::SingleInstance = e.kind {
+                    } else if let ConcurrentRingErrorKind::AllWaiting = e.kind {
+                    } else {
+                        error!("等待路径队列时发生错误, err: {e}");
+                    }
+                    return None;
+                }
+            };
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template(PACK_PROGRESS_STYLE_TEMPLATE)
                     .expect("设置进度条模板失败")
                     .progress_chars("=>-"),
             );
+            r
         })
     }
 
@@ -1419,22 +1381,8 @@ impl WaterBallFilePackArgsRuning {
         );
         main_pb.set_prefix("总进度");
 
-        // 统一工作队列 + 终止控制
-        // Unified work queue + termination control
-        let queue: Arc<(Mutex<VecDeque<PathBuf>>, Condvar)> =
-            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
         let all_done = Arc::new(AtomicBool::new(root_name_list.is_empty()));
-
-        {
-            let mut q = queue
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for name in &root_name_list {
-                q.push_back(PathBuf::from(name));
-            }
-        }
 
         // 创建子线程进度条 / Create per-worker progress bars
         let mut worker_pbs = Vec::with_capacity(thread_count);
@@ -1450,21 +1398,27 @@ impl WaterBallFilePackArgsRuning {
             worker_pbs.push(pb);
         }
 
-        let (tx, rx) = mpsc::channel();
-        let mut handles = Vec::with_capacity(thread_count);
-
-        for _ in 0..thread_count {
-            Self::wpfp_h_work(
-                pack,
-                &queue,
-                &pending,
-                &all_done,
-                &tx,
-                &mut worker_pbs,
-                &mut handles,
-            );
-        }
-        drop(tx);
+        let (handles, rx) = {
+            // 统一工作队列
+            let queue = ConcurrentRing::new();
+            let (tx, rx) = mpsc::channel();
+            let mut handles = Vec::with_capacity(thread_count);
+            for name in &root_name_list {
+                let _ = queue.push(PathBuf::from(name));
+            }
+            for _ in 0..thread_count {
+                Self::wpfp_h_work(
+                    pack,
+                    queue.clone(),
+                    &pending,
+                    &all_done,
+                    &tx,
+                    &mut worker_pbs,
+                    &mut handles,
+                );
+            }
+            (handles, rx)
+        };
 
         // 主线程：汇总进度条和结果 / Main thread: aggregate progress + results
         let mut verified_len = 0u64;
@@ -1501,7 +1455,7 @@ impl WaterBallFilePackArgsRuning {
 
     fn wpfp_h_work(
         pack: &ManagerSync,
-        queue: &Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>,
+        queue: ConcurrentRing<PathBuf>,
         pending: &Arc<AtomicUsize>,
         all_done: &Arc<AtomicBool>,
         tx: &Sender<(String, u64, Option<bool>)>,
@@ -1510,7 +1464,6 @@ impl WaterBallFilePackArgsRuning {
     ) {
         use std::thread;
         let mut pack = pack.clone();
-        let queue = queue.clone();
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
@@ -1520,9 +1473,8 @@ impl WaterBallFilePackArgsRuning {
             loop {
                 // 1. 从队列取路径（空队列时 Condvar 挂起）
                 //    Pop path from queue (Condvar suspend when empty)
-                let path = match Self::get_queue_path(&queue, &all_done, &pb) {
-                    Some(path) => path,
-                    None => return Ok(()),
+                let Some(path) = Self::get_queue_path(&queue, &all_done, &pb) else {
+                    return Ok(());
                 };
 
                 // 2. 判定路径类型（按需加载目录结构或文件元数据）
@@ -1533,7 +1485,6 @@ impl WaterBallFilePackArgsRuning {
                         error!(r#"无法获取虚拟路径"{}"结构项, err:{err}"#, path.display());
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                         continue;
                     }
@@ -1552,7 +1503,6 @@ impl WaterBallFilePackArgsRuning {
                                 );
                                 if pending.fetch_sub(1, Ordering::Release) == 1 {
                                     all_done.store(true, Ordering::Release);
-                                    queue.1.notify_all();
                                 }
                                 continue;
                             }
@@ -1561,20 +1511,13 @@ impl WaterBallFilePackArgsRuning {
                         let n = children.len();
                         if n > 0 {
                             pending.fetch_add(n, Ordering::Release);
-                            let mut q = queue
-                                .0
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             for child in children {
-                                q.push_back(path.join(child));
+                                let _ = queue.push(path.join(child));
                             }
-                            // 唤醒所有等待线程 / Wake all waiting threads
-                            queue.1.notify_all();
                         }
                         // 目录自身处理完毕 / Directory itself resolved
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                     }
                     PackStructItemType::File { .. } => {
@@ -1585,7 +1528,6 @@ impl WaterBallFilePackArgsRuning {
                                 let _ = tx.send((path.display().to_string(), 0u64, None));
                                 if pending.fetch_sub(1, Ordering::Release) == 1 {
                                     all_done.store(true, Ordering::Release);
-                                    queue.1.notify_all();
                                 }
                                 continue;
                             }
@@ -1616,7 +1558,6 @@ impl WaterBallFilePackArgsRuning {
                         // 文件处理完毕 / File resolved
                         if pending.fetch_sub(1, Ordering::Release) == 1 {
                             all_done.store(true, Ordering::Release);
-                            queue.1.notify_all();
                         }
                     }
                 }

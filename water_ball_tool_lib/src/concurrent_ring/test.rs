@@ -287,13 +287,13 @@ fn read_and_borrow_consistency() {
 #[test]
 fn write_wait_empty_returns_zero() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
-    assert_eq!(ring.write_wait(&[]), Ok(0));
+    assert_eq!(expect_ok(ring.write_wait(&[])), 0);
 }
 
 #[test]
 fn write_wait_returns_written_count_with_space() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
-    assert_eq!(ring.write_wait(&[1, 2, 3]), Ok(3));
+    assert_eq!(expect_ok(ring.write_wait(&[1, 2, 3])), 3);
     let mut buf = [0u32; 3];
     assert_eq!(ring.read(&mut buf), 3);
     assert_eq!(buf, [1, 2, 3]);
@@ -303,7 +303,7 @@ fn write_wait_returns_written_count_with_space() {
 fn write_wait_partial_when_insufficient_space() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
-    assert_eq!(ring.write_wait(&[10, 20, 30]), Ok(1));
+    assert_eq!(expect_ok(ring.write_wait(&[10, 20, 30])), 1);
 }
 
 #[test]
@@ -316,8 +316,8 @@ fn write_wait_blocks_then_writes() {
     thread::sleep(Duration::from_millis(50));
     assert_eq!(ring.len(), 2);
     assert_eq!(ring.pop(), Some(1));
-    let n = join_ok(writer);
-    assert_eq!(n, Ok(1));
+    let n = expect_ok(join_ok(writer));
+    assert_eq!(n, 1);
     assert_eq!(ring.len(), 2);
     assert_eq!(ring.pop(), Some(2));
     assert_eq!(ring.pop(), Some(3));
@@ -327,7 +327,7 @@ fn write_wait_blocks_then_writes() {
 fn read_wait_empty_slice_returns_zero() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     let mut empty: [u32; 0] = [];
-    assert_eq!(ring.read_wait(&mut empty), Ok(0));
+    assert_eq!(expect_ok(ring.read_wait(&mut empty)), 0);
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn read_wait_returns_read_count_with_data() {
     let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
     ring.write(&[1, 2, 3]);
     let mut buf = [0u32; 4];
-    assert_eq!(ring.read_wait(&mut buf), Ok(3));
+    assert_eq!(expect_ok(ring.read_wait(&mut buf)), 3);
     assert_eq!(buf[..3], [1, 2, 3]);
 }
 
@@ -345,14 +345,14 @@ fn read_wait_blocks_then_reads() {
     let r = ring.clone();
     let reader = thread::spawn(move || {
         let mut buf = [0u32; 2];
-        let n = r.read_wait(&mut buf);
+        let n = expect_ok(r.read_wait(&mut buf));
         (n, buf)
     });
     thread::sleep(Duration::from_millis(50));
     assert!(ring.is_empty());
     assert!(ring.push(10).is_ok());
     let (n, buf) = join_ok(reader);
-    assert_eq!(n, Ok(1));
+    assert_eq!(n, 1);
     assert_eq!(buf[0], 10);
 }
 
@@ -489,8 +489,8 @@ fn clear_wakes_blocked_writers() {
     assert_eq!(ring.len(), 2);
     ring.clear();
     assert!(ring.is_empty());
-    let n = join_ok(writer);
-    assert_eq!(n, Ok(2));
+    let n = expect_ok(join_ok(writer));
+    assert_eq!(n, 2);
     let mut buf = [0u32; 2];
     assert_eq!(ring.read(&mut buf), 2);
     assert_eq!(buf, [3, 4]);

@@ -446,8 +446,8 @@ impl Player {
         }
         {
             let per = &mut self.sound_engine.pre_effect_runtime;
-            per.send_skip();
-            per.reset(*decoder.decoder_format());
+            per.send_skip().expect("skip failed");
+            per.reset(*decoder.decoder_format()).expect("reset failed");
         }
         self.sound_engine.audio_ring_buffer.clear();
         // A5: 作废旧自动 Eof 状态
@@ -484,7 +484,8 @@ impl Player {
         decoder_lock.take();
         self.sound_engine
             .pre_effect_runtime
-            .reset(*decoder.decoder_format());
+            .reset(*decoder.decoder_format())
+            .expect("reset failed");
         decoder.run()?;
         decoder_lock.replace(decoder);
         Ok(())
@@ -514,7 +515,10 @@ impl Player {
                 != 0
         {
             self.pre_effect_ring_buffer().clear();
-            self.sound_engine.pre_effect_runtime.send_skip();
+            self.sound_engine
+                .pre_effect_runtime
+                .send_skip()
+                .expect("send skip failed");
             if let Err(e) = self.control.tx_cmd.send(PlayCmd::ClearEofBuf) {
                 error!("clear_pre_effect_item_eof send PlayCmd::ClearEofBuf failed: {e:?}");
             }

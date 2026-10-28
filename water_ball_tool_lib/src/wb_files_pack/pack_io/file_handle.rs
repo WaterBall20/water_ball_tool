@@ -9,11 +9,11 @@ use crate::wb_files_pack::pack_io::file_hash::PackFileHash;
 use crate::wb_files_pack::{
     DATA_BLOCK_LEN, DATA_DATA_BLOCK_LEN, MAX_DATA_SEGMENTS, PackFileMetadata, PackFileMetadataType,
 };
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
-pub(crate) struct PackFileHandle {
+pub struct PackFileHandle {
     /// 管理器实例 / Manager instance
     manager: Arc<Mutex<WBFPManager>>,
     /// 包文件 IO 实例 / Pack file IO instance
@@ -421,7 +421,7 @@ impl Drop for PackFileHandle {
     }
 }
 
-impl Seek for PackFileHandle {
+impl PackFileHandle {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match pos {
             SeekFrom::Start(pos) => {
