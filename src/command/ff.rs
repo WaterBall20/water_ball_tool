@@ -19,9 +19,11 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::{error, io, thread};
 use tracing::{error, info, warn};
+use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 use water_ball_tool_lib::file_finder::{
     FileFinder, FileInfo, FileKind, FilesList, SearchEvent, SearchWarningType,
 };
+use water_ball_tool_lib::split_ring_buffer::LockedReader;
 
 /// 文件查找命令
 #[derive(Args, Debug)]
@@ -331,7 +333,7 @@ pub(crate) fn search_files(
     thread_count: usize,
     hash_type: Option<HashTypeS>,
     mp: &MultiProgress,
-) -> io::Result<FilesList> {
+) -> Result<FilesList, Box<dyn std::error::Error>> {
     //初始化进度条
     pb.set_style(
         ProgressStyle::default_spinner()
@@ -340,7 +342,7 @@ pub(crate) fn search_files(
     );
     pb.set_message("搜索文件中");
     let ff_thread_count = if hash_type.is_some() { 1 } else { thread_count };
-    let queue = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+    let (ring_buf, ring_buf_w) = water_ball_tool_lib::split_ring_buffer::locked_ring_buffer(1_000_000);
     let file_count = Arc::new(AtomicU64::new(0));
     let data_len = Arc::new(AtomicU64::new(0));
     let search_end = Arc::new(AtomicBool::new(false));
@@ -355,7 +357,7 @@ pub(crate) fn search_files(
     let ff_r_thread = {
         let hash_type = hash_type.clone();
         let file_count = file_count.clone();
-        let queue = queue.clone();
+        let ring_buf = ring_buf.clone();
         let results = results.clone();
         let data_len = data_len.clone();
 
@@ -374,12 +376,9 @@ pub(crate) fn search_files(
                             if hash_type.is_some() {
                                 file_count.fetch_add(1, Ordering::SeqCst);
                                 data_len.fetch_add(i.length(), Ordering::SeqCst);
-                                queue
-                                    .0
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .push_back((p, i));
-                                queue.1.notify_one();
+                                if let Err(e) = ring_buf_w.push_wait((p, i)){
+                                    error!("添加到缓冲区发生错误:{e}");
+                                };
                             } else {
                                 results
                                     .lock()
@@ -433,7 +432,7 @@ pub(crate) fn search_files(
     //哈希计算
     if let Some(hash_type) = hash_type {
         hash(
-            &queue,
+            ring_buf.clone(),
             &search_end,
             mp,
             thread_count,
@@ -459,7 +458,7 @@ pub(crate) fn search_files(
 }
 
 fn hash(
-    queue: &Arc<(Mutex<VecDeque<(PathBuf, FileInfo)>>, Condvar)>,
+    ring_buf: LockedReader<(PathBuf, FileInfo)>,
     search_end: &Arc<AtomicBool>,
     mp: &MultiProgress,
     thread_count: usize,
@@ -499,7 +498,7 @@ fn hash(
     for _i in 0..thread_count {
         let hash_type = hash_type.clone();
         hash_work(
-            queue,
+            ring_buf.clone(),
             search_end,
             &tx,
             &mut worker_pbs,
@@ -538,7 +537,7 @@ fn hash(
 }
 
 fn hash_work(
-    queue: &Arc<(Mutex<VecDeque<(PathBuf, FileInfo)>>, Condvar)>,
+    ring_buf: LockedReader<(PathBuf, FileInfo)>,
     search_end: &Arc<AtomicBool>,
     tx: &Sender<u64>,
     worker_pbs: &mut Vec<ProgressBar>,
@@ -547,7 +546,6 @@ fn hash_work(
     results: Arc<Mutex<HashMap<PathBuf, FileInfo>>>,
 ) {
     use std::thread;
-    let queue = queue.clone();
     let all_done = search_end.clone();
     let tx = tx.clone();
     let pb = worker_pbs.pop().expect("无法获取进度条");
@@ -558,17 +556,11 @@ fn hash_work(
             // 1. 从队列取路径（空队列时 Condvar 挂起）
             //    Pop path from queue (Condvar suspend when empty)
             let (path, info) = {
-                let (lock, cvar) = &*queue;
-                let mut q = lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                loop {
-                    if let Some(p) = q.pop_front() {
-                        break p;
-                    }
+                if let Some(p) = ring_buf.pop() {
+                    p
+                } else {
                     //搜索完成
                     if all_done.load(Ordering::SeqCst) {
-                        cvar.notify_all();
                         return;
                     }
                     pb.set_style(
@@ -577,15 +569,25 @@ fn hash_work(
                             .expect("设置进度条模板失败"),
                     );
                     pb.set_message("已挂起");
-                    q = cvar
-                        .wait(q)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let r = match ring_buf.pop_wait() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            if let water_ball_tool_lib::split_ring_buffer::error::Kind::CannotWait =
+                                e.kind
+                            {
+                                return;
+                            }
+                            error!("挂起时发生未知错误：{e}");
+                            return;
+                        }
+                    };
                     pb.set_style(
                         ProgressStyle::default_bar()
                             .template(PACK_PROGRESS_STYLE_TEMPLATE)
                             .expect("设置进度条模板失败")
                             .progress_chars("=>-"),
                     );
+                    r
                 }
             };
 
