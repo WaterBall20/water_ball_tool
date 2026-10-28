@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::split_ring_buffer::error::Error;
@@ -29,9 +30,7 @@ impl<T> LockedReader<T> {
         Self { inner }
     }
 
-    /// 非阻塞弹出单个元素。
-    ///
-    /// 空或 `clear` 进行中返回 `None`。可阻塞获取读端锁，但不等待数据。
+    /// 非阻塞弹出单个元素。空或 `clear` / `truncate` 进行中返回 `None`。
     ///
     /// # 示例
     ///
@@ -50,7 +49,8 @@ impl<T> LockedReader<T> {
 
     /// 等待至少一个元素后弹出。
     ///
-    /// 对端关闭且无数据返回 `CannotWait`；`clear` 进行中会等待其完成。
+    /// 对端关闭且无数据返回 `CannotWait`；`clear` / `truncate` 进行中会等待
+    /// 其完成。
     ///
     /// # 示例
     ///
@@ -92,9 +92,8 @@ impl<T> LockedReader<T> {
         }
     }
 
-    /// 尝试获取读端锁并弹出。仅存在于有锁端。
-    ///
-    /// 获取锁失败返回 `Err(Locked)`；空或 `clear` 进行中返回 `Ok(None)`。
+    /// 尝试获取读端锁并弹出。获取锁失败返回 `Err(Locked)`；空或 `clear` /
+    /// `truncate` 中返回 `Ok(None)`。
     ///
     /// # 示例
     ///
@@ -164,13 +163,67 @@ impl<T> LockedReader<T> {
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
+
+    /// 取走 `range` 内元素，返回 `Vec<T>`。
+    ///
+    /// 只接受前缀 `0..k` 与全量 `0..len`；`start != 0` 返回 `InvalidRange`。
+    /// 后缀截断请用 [`crate::split_ring_buffer::LockedWriter::truncate_back`]。
+    /// `clear` / `truncate` 进行中返回空 `Vec`。持读端锁直到完成。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    ///
+    /// let (reader, writer) = locked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// writer.push(String::from("b")).expect("push");
+    /// let v = reader.drain(0..1).expect("drain");
+    /// assert_eq!(v, vec![String::from("a")]);
+    /// assert_eq!(reader.len(), 1);
+    /// ```
+    pub fn drain(&self, range: Range<usize>) -> Result<Vec<T>, Error<T>> {
+        if range.start != 0 {
+            return Err(Error::invalid_range());
+        }
+        let _r = lock_ignore_poison(&self.inner.read.lock);
+        let Some(_flight) = self.inner.enter() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        self.inner.drain_prefix(&mut out, range.end);
+        Ok(out)
+    }
+
+    /// 释放 `range` 内元素，不返回。区间约束与 [`drain`](Self::drain) 相同。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    ///
+    /// let (reader, writer) = locked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// reader.release(0..1).expect("release");
+    /// assert_eq!(reader.len(), 0);
+    /// ```
+    pub fn release(&self, range: Range<usize>) -> Result<(), Error<T>> {
+        if range.start != 0 {
+            return Err(Error::invalid_range());
+        }
+        let _r = lock_ignore_poison(&self.inner.read.lock);
+        let Some(_flight) = self.inner.enter() else {
+            return Ok(());
+        };
+        self.inner.release_prefix(range.end);
+        Ok(())
+    }
 }
 
 impl<T: Copy> LockedReader<T> {
-    /// 从缓冲区复制数据到 `dst`，返回实际复制的元素数。
+    /// 从缓冲区复制数据到 `dst`，返回实际复制的元素数。仅 `T: Copy` 可用。
     ///
-    /// 仅 `T: Copy` 可用。无可读数据或 `clear` 进行中返回 `0`；`dst` 为空
-    /// 直接返回 `0`。
+    /// 无可读数据或 `clear` / `truncate` 中返回 `0`；`dst` 为空返回 `0`。
     ///
     /// # 示例
     ///
@@ -192,10 +245,7 @@ impl<T: Copy> LockedReader<T> {
         self.inner.read_slice(dst)
     }
 
-    /// 等待可读数据后复制到 `dst`，返回实际复制的元素数。
-    ///
-    /// 仅 `T: Copy` 可用。`dst` 为空直接返回 `Ok(0)`；对端关闭且无可读数据
-    /// 返回 `CannotWait`。
+    /// 等待可读数据后复制到 `dst`。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -244,9 +294,6 @@ impl<T: Copy> LockedReader<T> {
 
     /// 阻塞直到 `dst` 填满。仅 `T: Copy` 可用。
     ///
-    /// 允许 `dst.len()` 大于容量，内部循环完成。`dst` 为空直接 `Ok(())`；
-    /// 部分完成后对端关闭返回 `CannotWait`。持读端锁直到完成。
-    ///
     /// # 示例
     ///
     /// ```
@@ -291,9 +338,7 @@ impl<T: Copy> LockedReader<T> {
         Ok(())
     }
 
-    /// 尝试获取读端锁并读取。仅存在于有锁端且仅 `T: Copy` 可用。
-    ///
-    /// 获取锁失败返回 `Err(Locked)`；无可读或 `clear` 进行中返回 `Ok(0)`。
+    /// 尝试获取读端锁并读取。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -364,7 +409,7 @@ impl<T> UnlockedReader<T> {
         }
     }
 
-    /// 非阻塞弹出单个元素。空或 `clear` 进行中返回 `None`。
+    /// 非阻塞弹出单个元素。空或 `clear` / `truncate` 中返回 `None`。
     ///
     /// # 示例
     ///
@@ -464,10 +509,57 @@ impl<T> UnlockedReader<T> {
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
+
+    /// 取走 `range` 内元素。区间约束同 [`LockedReader::drain`]。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// let v = reader.drain(0..1).expect("drain");
+    /// assert_eq!(v, vec![String::from("a")]);
+    /// ```
+    pub fn drain(&mut self, range: Range<usize>) -> Result<Vec<T>, Error<T>> {
+        if range.start != 0 {
+            return Err(Error::invalid_range());
+        }
+        let Some(_flight) = self.inner.enter() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        self.inner.drain_prefix(&mut out, range.end);
+        Ok(out)
+    }
+
+    /// 释放 `range` 内元素。区间约束同 [`LockedReader::release`]。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// reader.release(0..1).expect("release");
+    /// assert_eq!(reader.len(), 0);
+    /// ```
+    pub fn release(&mut self, range: Range<usize>) -> Result<(), Error<T>> {
+        if range.start != 0 {
+            return Err(Error::invalid_range());
+        }
+        let Some(_flight) = self.inner.enter() else {
+            return Ok(());
+        };
+        self.inner.release_prefix(range.end);
+        Ok(())
+    }
 }
 
 impl<T: Copy> UnlockedReader<T> {
-    /// 从缓冲区复制数据到 `dst`，返回实际复制的元素数。仅 `T: Copy` 可用。
+    /// 从缓冲区复制数据到 `dst`。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -487,7 +579,7 @@ impl<T: Copy> UnlockedReader<T> {
         self.inner.read_slice(dst)
     }
 
-    /// 等待可读数据后复制到 `dst`，返回实际复制的元素数。仅 `T: Copy` 可用。
+    /// 等待可读数据后复制到 `dst`。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -590,12 +682,11 @@ impl<T> Drop for UnlockedReader<T> {
 /// ```
 /// use water_ball_tool_lib::split_ring_buffer::{ring_buffer, ReadMode, WriteMode};
 ///
-/// let (reader, writer) = ring_buffer::<u8>(4, ReadMode::Locked, WriteMode::Locked);
+/// let (reader, _writer) = ring_buffer::<u8>(4, ReadMode::Locked, WriteMode::Locked);
 /// let reader = match reader.into_locked() {
 ///     Ok(r) => r,
 ///     Err(_) => panic!("expected Locked variant"),
 /// };
-/// assert!(writer.into_locked().is_ok());
 /// assert!(reader.is_empty());
 /// ```
 pub enum Reader<T> {

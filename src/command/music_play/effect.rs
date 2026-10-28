@@ -60,11 +60,12 @@ pub trait PostEffect: Send + 'static {
     fn name(&self) -> &str;
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum PlayCmd {
     Play,
     Pause,
     Seek(Duration),
+    ClearEofBuf,
 }
 
 /// 效果器对 transport 指令的答复

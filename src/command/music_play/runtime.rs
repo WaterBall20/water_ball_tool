@@ -461,7 +461,7 @@ impl PlayObject {
                 //自旋等待
                 thread::sleep(Duration::from_millis(1));
             } else {
-                /*//缓冲区
+                //缓冲区
                 player.clear_pre_effect_item_eof_buf();
                 //立刻指定UI
                 if let Some(ui_track) = ui_track {
@@ -474,7 +474,7 @@ impl PlayObject {
                 return Ok(decoder_track
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone());*/
+                    .clone());
             }
         }
         let track = play_list_lock.next(play_end, next_id.load(Ordering::Acquire));

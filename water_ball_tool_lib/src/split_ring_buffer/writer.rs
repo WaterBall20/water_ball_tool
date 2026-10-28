@@ -9,7 +9,8 @@ fn kind_to_error<T>(k: Kind<T>) -> Error<T> {
     match k {
         Kind::Full(v) => Error::full(v),
         Kind::Clearing(v) => Error::clearing(v),
-        _ => unreachable!("push_one only returns Full or Clearing"),
+        Kind::Truncating(v) => Error::truncating(v),
+        _ => unreachable!("push_one only returns Full / Clearing / Truncating"),
     }
 }
 
@@ -39,8 +40,8 @@ impl<T> LockedWriter<T> {
 
     /// 非阻塞写入单个元素。
     ///
-    /// 满返回 `Err(Kind::Full(value))`；`clear` 进行中返回
-    /// `Err(Kind::Clearing(value))`。可阻塞获取写端锁，但不等待空间。
+    /// 满返回 `Err(Full(value))`；`clear` 中返回 `Err(Clearing(value))`；
+    /// `truncate_back` 中返回 `Err(Truncating(value))`。
     ///
     /// # 示例
     ///
@@ -60,8 +61,6 @@ impl<T> LockedWriter<T> {
 
     /// 等待至少一个空位后写入。
     ///
-    /// 对端关闭且满返回 `Err(CannotWait)`；`clear` 进行中会等待其完成。
-    ///
     /// # 示例
     ///
     /// ```
@@ -78,7 +77,9 @@ impl<T> LockedWriter<T> {
                 let _g = lock_ignore_poison(&self.inner.write.lock);
                 match self.inner.push_one(value) {
                     Ok(()) => return Ok(()),
-                    Err(Kind::Full(v)) | Err(Kind::Clearing(v)) => value = v,
+                    Err(Kind::Full(v)) | Err(Kind::Clearing(v)) | Err(Kind::Truncating(v)) => {
+                        value = v
+                    }
                     Err(_) => unreachable!(),
                 }
             }
@@ -104,16 +105,15 @@ impl<T> LockedWriter<T> {
 
     /// 清空缓冲区：交换 A/B，重置指针，drop 旧 B 中未读元素。
     ///
-    /// 不阻塞当前 `pop` / `push` 太久；交换后读写窗口立即重新打开，旧 B 的
-    /// drop 在后台继续。并发 `clear` 直接返回 `Ok(())`。
+    /// 与 `truncate_back` 互斥；进行期间阻塞所有读写。并发 `clear` 直接返回。
     ///
     /// # 示例
     ///
     /// ```
     /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
     ///
-    /// let (reader, writer) = locked_ring_buffer::<u8>(4);
-    /// assert!(writer.push(1).is_ok());
+    /// let (reader, writer) = locked_ring_buffer::<String>(4);
+    /// assert!(writer.push(String::from("a")).is_ok());
     /// assert_eq!(reader.len(), 1);
     /// writer.clear();
     /// assert_eq!(reader.len(), 0);
@@ -122,10 +122,29 @@ impl<T> LockedWriter<T> {
         self.inner.clear();
     }
 
-    /// 尝试获取写端锁并写入单个元素。仅存在于有锁端。
+    /// 保留前 `keep` 个元素，丢弃尾部。与 `clear` 互斥，进行期间阻塞所有读写。
     ///
-    /// 获取锁失败返回 `Err(Locked)`；满 / `clear` 中返回 `Full(value)` /
-    /// `Clearing(value)`。
+    /// `keep >= len` 时不丢弃任何元素。`clear` 或另一个 `truncate_back` 正在
+    /// 进行时直接返回（无操作）。拿写端锁直至完成。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    ///
+    /// let (reader, writer) = locked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// writer.push(String::from("b")).expect("push");
+    /// writer.truncate_back(1);
+    /// assert_eq!(reader.len(), 1);
+    /// assert_eq!(reader.pop().as_deref(), Some("a"));
+    /// ```
+    pub fn truncate_back(&self, keep: usize) {
+        let _w = lock_ignore_poison(&self.inner.write.lock);
+        self.inner.truncate_back(keep);
+    }
+
+    /// 尝试获取写端锁并写入。获取锁失败返回 `Err(Locked)`。
     ///
     /// # 示例
     ///
@@ -195,9 +214,7 @@ impl<T> LockedWriter<T> {
 }
 
 impl<T: Copy> LockedWriter<T> {
-    /// 从 `src` 复制数据到缓冲区，返回实际写入的元素数。仅 `T: Copy` 可用。
-    ///
-    /// 无空间或 `clear` 进行中返回 `0`；`src` 为空返回 `0`。
+    /// 从 `src` 复制数据到缓冲区，返回实际写入数量。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -217,10 +234,7 @@ impl<T: Copy> LockedWriter<T> {
         self.inner.write_slice(src)
     }
 
-    /// 等待可写空间后从 `src` 复制数据，返回实际写入的元素数。
-    ///
-    /// 仅 `T: Copy` 可用。`src` 为空返回 `Ok(0)`；对端关闭且满返回
-    /// `CannotWait`。
+    /// 等待可写空间后从 `src` 复制数据。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -268,8 +282,6 @@ impl<T: Copy> LockedWriter<T> {
 
     /// 阻塞直到 `src` 全部写入。仅 `T: Copy` 可用。
     ///
-    /// 允许 `src.len()` 大于容量，内部循环完成。持写端锁直到完成。
-    ///
     /// # 示例
     ///
     /// ```
@@ -312,9 +324,7 @@ impl<T: Copy> LockedWriter<T> {
         Ok(())
     }
 
-    /// 尝试获取写端锁并写入切片。仅存在于有锁端且仅 `T: Copy` 可用。
-    ///
-    /// 获取锁失败返回 `Err(Locked)`；无空间或 `clear` 中返回 `Ok(0)`。
+    /// 尝试获取写端锁并写入切片。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -383,8 +393,7 @@ impl<T> UnlockedWriter<T> {
         }
     }
 
-    /// 非阻塞写入单个元素。满 / `clear` 中分别返回 `Full(value)` /
-    /// `Clearing(value)`。
+    /// 非阻塞写入单个元素。
     ///
     /// # 示例
     ///
@@ -416,7 +425,7 @@ impl<T> UnlockedWriter<T> {
         loop {
             match self.inner.push_one(value) {
                 Ok(()) => return Ok(()),
-                Err(Kind::Full(v)) | Err(Kind::Clearing(v)) => value = v,
+                Err(Kind::Full(v)) | Err(Kind::Clearing(v)) | Err(Kind::Truncating(v)) => value = v,
                 Err(_) => unreachable!(),
             }
             if self.inner.read.is_closed() {
@@ -439,20 +448,37 @@ impl<T> UnlockedWriter<T> {
         }
     }
 
-    /// 清空缓冲区：交换 A/B，重置指针，drop 旧 B 中未读元素。
+    /// 清空缓冲区。
     ///
     /// # 示例
     ///
     /// ```
     /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
     ///
-    /// let (mut reader, mut writer) = unlocked_ring_buffer::<u8>(4);
-    /// assert!(writer.push(1).is_ok());
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<String>(4);
+    /// assert!(writer.push(String::from("a")).is_ok());
     /// writer.clear();
     /// assert_eq!(reader.len(), 0);
     /// ```
     pub fn clear(&mut self) {
         self.inner.clear();
+    }
+
+    /// 保留前 `keep` 个元素，丢弃尾部。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<String>(4);
+    /// writer.push(String::from("a")).expect("push");
+    /// writer.push(String::from("b")).expect("push");
+    /// writer.truncate_back(1);
+    /// assert_eq!(reader.len(), 1);
+    /// ```
+    pub fn truncate_back(&mut self, keep: usize) {
+        self.inner.truncate_back(keep);
     }
 
     /// 当前已写元素数。
@@ -503,7 +529,7 @@ impl<T> UnlockedWriter<T> {
 }
 
 impl<T: Copy> UnlockedWriter<T> {
-    /// 从 `src` 复制数据到缓冲区，返回实际写入的元素数。仅 `T: Copy` 可用。
+    /// 从 `src` 复制数据到缓冲区。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///
@@ -521,7 +547,7 @@ impl<T: Copy> UnlockedWriter<T> {
         self.inner.write_slice(src)
     }
 
-    /// 等待可写空间后从 `src` 复制数据，返回实际写入的元素数。仅 `T: Copy` 可用。
+    /// 等待可写空间后从 `src` 复制数据。仅 `T: Copy` 可用。
     ///
     /// # 示例
     ///

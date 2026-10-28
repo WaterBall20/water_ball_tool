@@ -207,6 +207,7 @@ impl TransportAware for FadeEffect {
                 self.pause_done = false;
                 Decision::Pass
             }
+            PlayCmd::ClearEofBuf => Decision::Pass,
         }
     }
 

@@ -77,13 +77,25 @@ impl Player {
         let mut copy_acc = DurationAccumulator::new();
         let mut post_effect_acc = DurationAccumulator::new();
         let mut blocks = 0;
+
         device.build_output_stream(
             config,
             move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                let pre_effect_item_eof = &event_content.pre_effect_item_eof;
+                let pre_effect_item_eof_pos = &event_content.pre_effect_item_eof_pos;
                 let t0 = Instant::now();
                 // 1. 先消费 transport 命令，不受播放状态/音量/数据/clear 锁门控
                 if let Ok(mut effect_chain) = effect_chain.try_lock() {
                     while let Ok(cmd) = rx_cmd.try_recv() {
+                        if cmd == PlayCmd::ClearEofBuf
+                            && pre_effect_item_eof.load(Ordering::Acquire)
+                        {
+                            let re_len = pre_effect_item_eof_pos.load(Ordering::Acquire);
+                            let _ = ring_buf.release(0..re_len);
+                            pre_effect_item_eof_pos.store(0, Ordering::Release);
+                            pre_effect_item_eof.store(false, Ordering::Release);
+                            played_samples.store(0, Ordering::Release);
+                        }
                         if matches!(effect_chain.dispatch_transport(cmd), Decision::Pass) {
                             let _ = tx_done.try_send(cmd);
                         }
@@ -127,9 +139,6 @@ impl Player {
                 }
 
                 // 4. EOF 检查（无论 try_read 成功/失败都走）
-                let pre_effect_item_eof = &event_content.pre_effect_item_eof;
-                let pre_effect_item_eof_pos = &event_content.pre_effect_item_eof_pos;
-
                 if pre_effect_item_eof.load(Ordering::Acquire) {
                     let pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
                     if len >= pos {
@@ -297,6 +306,7 @@ impl Player {
                                     // C3: 不 panic
                                     error!("Seek is not implemented");
                                 }
+                                PlayCmd::ClearEofBuf => {}
                             }
                         }
                     })
@@ -492,6 +502,23 @@ impl Player {
         self.event_content
             .pre_effect_item_eof
             .load(Ordering::Acquire)
+    }
+
+    /// 清理解码结束剩余在缓冲区的数据并重置
+    pub fn clear_pre_effect_item_eof_buf(&self) {
+        if self.get_pre_effect_item_eof()
+            && self
+                .event_content
+                .pre_effect_item_eof_pos
+                .load(Ordering::Acquire)
+                != 0
+        {
+            self.pre_effect_ring_buffer().clear();
+            self.sound_engine.pre_effect_runtime.send_skip();
+            if let Err(e) = self.control.tx_cmd.send(PlayCmd::ClearEofBuf) {
+                error!("clear_pre_effect_item_eof send PlayCmd::ClearEofBuf failed: {e:?}");
+            }
+        }
     }
 
     pub fn add_event(&mut self, event: Box<dyn PlayerEventSink>) {

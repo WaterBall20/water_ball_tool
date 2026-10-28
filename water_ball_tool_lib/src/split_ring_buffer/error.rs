@@ -10,6 +10,9 @@ use std::fmt;
 /// - [`Kind::WriteRejected`]：保留未实现。
 /// - [`Kind::Full`]：缓冲区满，归还未写入的元素。
 /// - [`Kind::Clearing`]：`clear` 进行中，读写不可用，归还元素。
+/// - [`Kind::Truncating`]：`truncate_back` 进行中，写入被拒绝，归还元素。
+/// - [`Kind::InvalidRange`]：`drain` / `release` 区间非法（只接受 `0..k` 或
+///   `0..len`）。
 ///
 /// # 示例
 ///
@@ -33,6 +36,10 @@ pub enum Kind<T> {
     Full(T),
     /// `clear` 进行中，读写不可用，归还元素。
     Clearing(T),
+    /// `truncate_back` 进行中，写入被拒绝，归还元素。
+    Truncating(T),
+    /// 区间非法：`drain` / `release` 只接受 `0..k` 或 `0..len`。
+    InvalidRange,
 }
 
 /// 环形缓冲区统一错误结构。
@@ -132,6 +139,40 @@ impl<T> Error<T> {
     pub fn clearing(value: T) -> Self {
         Self::new("clear in progress", Kind::Clearing(value))
     }
+
+    /// 构造“截断中”错误，`truncate_back` 进行时写入被拒绝，归还元素。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::truncating(3u8);
+    /// match err.kind {
+    ///     Kind::Truncating(v) => assert_eq!(v, 3),
+    ///     _ => panic!("expected Truncating"),
+    /// }
+    /// ```
+    pub fn truncating(value: T) -> Self {
+        Self::new("truncate in progress", Kind::Truncating(value))
+    }
+
+    /// 构造“区间非法”错误。`drain` / `release` 只接受 `0..k` 或 `0..len`。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::<u8>::invalid_range();
+    /// assert!(matches!(err.kind, Kind::InvalidRange));
+    /// ```
+    pub fn invalid_range() -> Self {
+        Self::new(
+            "invalid range: only prefix 0..k or full 0..len allowed",
+            Kind::InvalidRange,
+        )
+    }
 }
 
 impl<T: fmt::Debug> fmt::Debug for Kind<T> {
@@ -142,6 +183,8 @@ impl<T: fmt::Debug> fmt::Debug for Kind<T> {
             Kind::WriteRejected => f.write_str("WriteRejected"),
             Kind::Full(v) => f.debug_tuple("Full").field(v).finish(),
             Kind::Clearing(v) => f.debug_tuple("Clearing").field(v).finish(),
+            Kind::Truncating(v) => f.debug_tuple("Truncating").field(v).finish(),
+            Kind::InvalidRange => f.write_str("InvalidRange"),
         }
     }
 }
