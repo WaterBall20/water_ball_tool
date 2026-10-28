@@ -1,4 +1,4 @@
-/// 读取端模式，用于 [`crate::ring_buffer`] 运行时选择读取端类型。
+/// 读取端模式，用于 [`crate::split_ring_buffer::ring_buffer`] 运行时选择读取端类型。
 ///
 /// # 示例
 ///
@@ -17,7 +17,7 @@ pub enum ReadMode {
     Unlocked,
 }
 
-/// 写入端模式，用于 [`crate::ring_buffer`] 运行时选择写入端类型。
+/// 写入端模式，用于 [`crate::split_ring_buffer::ring_buffer`] 运行时选择写入端类型。
 ///
 /// # 示例
 ///

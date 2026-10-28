@@ -1,3 +1,4 @@
+mod advanced;
 mod basic;
 mod blocking;
-mod advanced;
+mod non_copy;

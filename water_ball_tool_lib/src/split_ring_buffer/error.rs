@@ -8,7 +8,8 @@ use std::fmt;
 /// - [`Kind::Locked`]：`try_*` 方法尝试获取端锁失败。
 /// - [`Kind::CannotWait`]：等待期间对端 drop / 关闭，无法继续等待。
 /// - [`Kind::WriteRejected`]：保留未实现。
-/// - [`Kind::Full`]：写入满时归还被拒绝的元素。
+/// - [`Kind::Full`]：缓冲区满，归还未写入的元素。
+/// - [`Kind::Clearing`]：`clear` 进行中，读写不可用，归还元素。
 ///
 /// # 示例
 ///
@@ -30,14 +31,11 @@ pub enum Kind<T> {
     WriteRejected,
     /// 缓冲区满，归还未写入的元素。
     Full(T),
+    /// `clear` 进行中，读写不可用，归还元素。
+    Clearing(T),
 }
 
 /// 环形缓冲区统一错误结构。
-///
-/// # 字段
-///
-/// - [`Error::message`]：人类可读的错误描述，静态或借用生命周期。
-/// - [`Error::kind`]：错误种类，携带与缓冲区同类型的泛型参数。
 ///
 /// # 示例
 ///
@@ -58,11 +56,6 @@ pub struct Error<T> {
 impl<T> Error<T> {
     /// 构造一个新的错误。
     ///
-    /// # 参数
-    ///
-    /// - `message`：错误描述，`&'static str` 或 `Cow<'static, str>`。
-    /// - `kind`：错误种类。
-    ///
     /// # 示例
     ///
     /// ```
@@ -72,7 +65,10 @@ impl<T> Error<T> {
     /// assert_eq!(&*err.message, "custom");
     /// ```
     pub fn new(message: impl Into<Cow<'static, str>>, kind: Kind<T>) -> Self {
-        Self { message: message.into(), kind }
+        Self {
+            message: message.into(),
+            kind,
+        }
     }
 
     /// 构造“锁未获取”错误，`try_*` 方法返回。
@@ -119,6 +115,23 @@ impl<T> Error<T> {
     pub fn full(value: T) -> Self {
         Self::new("buffer is full", Kind::Full(value))
     }
+
+    /// 构造“清除中”错误，`clear` 进行时写入被拒绝，归还元素。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::clearing(5u8);
+    /// match err.kind {
+    ///     Kind::Clearing(v) => assert_eq!(v, 5),
+    ///     _ => panic!("expected Clearing"),
+    /// }
+    /// ```
+    pub fn clearing(value: T) -> Self {
+        Self::new("clear in progress", Kind::Clearing(value))
+    }
 }
 
 impl<T: fmt::Debug> fmt::Debug for Kind<T> {
@@ -128,6 +141,7 @@ impl<T: fmt::Debug> fmt::Debug for Kind<T> {
             Kind::CannotWait => f.write_str("CannotWait"),
             Kind::WriteRejected => f.write_str("WriteRejected"),
             Kind::Full(v) => f.debug_tuple("Full").field(v).finish(),
+            Kind::Clearing(v) => f.debug_tuple("Clearing").field(v).finish(),
         }
     }
 }
