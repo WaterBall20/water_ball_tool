@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tracing::error;
+use tracing::{debug, error};
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 use water_ball_tool_lib::split_ring_buffer::{LockedWriter, UnlockedReader};
 
@@ -72,7 +72,7 @@ impl Player {
         time_metrics: Arc<TimeMetrics>,
     ) -> Result<Stream, cpal::Error> {
         let mut ring_buf = ring_buf;
-        let mut scratch = Vec::new();
+        let mut scratch = Vec::<PlayCmd>::new();
         let mut total_acc = DurationAccumulator::new();
         let mut copy_acc = DurationAccumulator::new();
         let mut post_effect_acc = DurationAccumulator::new();
@@ -107,15 +107,27 @@ impl Player {
                 let is_playing = control.is_playing.load(Ordering::Acquire);
                 let t1 = Instant::now();
                 let len = if is_playing && volume != 0.0 {
-                    let len = ring_buf.read(data);
-                    copy_acc.record(t1.elapsed());
-                    len
+                    //测试用，直接清空缓冲区
+                    #[cfg(feature = "debug-no-audio")]
+                    {
+                        let len = ring_buf.len();
+                        let _ = ring_buf.release(0..len);
+                        copy_acc.record(t1.elapsed());
+                        len
+                    }
+                    #[cfg(not(feature = "debug-no-audio"))]
+                    {
+                        let len = ring_buf.read(data);
+                        copy_acc.record(t1.elapsed());
+                        len
+                    }
                 } else {
                     data.fill(0.0);
                     0
                 };
 
                 // 3. 效果处理（仅当有数据）
+                #[cfg(not(feature = "debug-no-audio"))]
                 if len > 0 {
                     let t2 = Instant::now();
                     if let Ok(mut effect_chain) = effect_chain.try_lock() {
@@ -133,20 +145,19 @@ impl Player {
                             *datum *= volume;
                         }
                     }
-
-                    played_samples.fetch_add(len as u64, Ordering::Relaxed);
                     data[len..].fill(0.0);
                 }
-
+                played_samples.fetch_add(len as u64, Ordering::Relaxed);
                 // 4. EOF 检查（无论 try_read 成功/失败都走）
                 if pre_effect_item_eof.load(Ordering::Acquire) {
-                    let pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
+                    let mut pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
                     if len >= pos {
                         pre_effect_item_eof_pos.store(0, Ordering::Release);
                     } else {
                         pre_effect_item_eof_pos.fetch_sub(len, Ordering::Release);
                     }
-                    if pre_effect_item_eof_pos.load(Ordering::Acquire) == 0 {
+                    pos = pos.saturating_sub(len);
+                    if pos == 0 {
                         pre_effect_item_eof.store(false, Ordering::Release);
                         played_samples.store(0, Ordering::Relaxed);
                         Self::emit(
@@ -235,6 +246,7 @@ impl Player {
             let audio_ring_buffer_writer = audio_ring_buffer.clone();
             pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(
                 move |e| {
+                    debug!("前效果器事件触发：{e:?}");
                     if let Ok(e) = e.result()
                         && let PreEffectRuntimeEventType::Eof = e
                     {

@@ -56,7 +56,7 @@ impl PreEffect for CrossBridgeEffect {
     fn on_discontinuity(
         &mut self,
         input: &[f32],
-        out: &mut Vec<f32>,
+        output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
         if PreEffectDiscontinuity::Skip == kind {
@@ -66,27 +66,32 @@ impl PreEffect for CrossBridgeEffect {
             0
         } else if PreEffectDiscontinuity::NoNext == kind {
             let out_len = self.buf.len() + input.len();
-            out.reserve_exact(out_len);
+            output.reserve_exact(out_len);
             for v in self.buf.drain(..) {
-                out.push(v);
+                output.push(v);
             }
-            out.extend_from_slice(input);
-            out.len()
+            output.extend_from_slice(input);
+            debug_assert!(
+                !output.is_empty(),
+                "cross_bridge on_discontinuity no skip, output is \
+            empty"
+            );
+            output.len()
         } else {
             if self.is_effect {
                 self.is_effect = false;
                 self.b_buf.clear();
             }
 
-            let n = self.process_normal(input, out);
+            let len = self.process_normal(input, output);
 
             if self.buf.is_empty() {
-                return n;
+                return len;
             }
 
             self.is_effect = true;
             self.b_buf.clear();
-            n
+            len
         }
     }
 
@@ -177,20 +182,20 @@ impl CrossBridgeEffect {
     }
 
     /// 延迟线核心：把 input 追加到 buf，超出 buf_max_len 的部分按时间顺序写入 out。
-    /// 不清空 out，返回 out.len()。
-    fn process_normal_append(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+    /// 不清空 out，返回 output.len()。
+    fn process_normal(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
         let this_len = self.buf.len();
 
         if this_len + input.len() <= self.buf_max_len {
             self.buf.extend(input.iter().copied());
-            return out.len();
+            return output.len();
         }
 
         let out_len = this_len + input.len() - self.buf_max_len;
         let pop_len = out_len.min(this_len);
         let in_to_out_len = out_len - pop_len;
 
-        out.reserve(out_len);
+        output.reserve(out_len);
 
         // 批量从 buf 头部取出 pop_len 个，走 memcpy
         if pop_len > 0 {
@@ -198,44 +203,43 @@ impl CrossBridgeEffect {
                 let (front, back) = self.buf.as_slices();
                 let n1 = front.len().min(pop_len);
                 let n2 = (pop_len - n1).min(back.len());
-                out.extend_from_slice(&front[..n1]);
+                output.extend_from_slice(&front[..n1]);
                 if n2 > 0 {
-                    out.extend_from_slice(&back[..n2]);
+                    output.extend_from_slice(&back[..n2]);
                 }
             }
             self.buf.drain(..pop_len);
         }
 
         if in_to_out_len > 0 {
-            out.extend_from_slice(&input[..in_to_out_len]);
+            output.extend_from_slice(&input[..in_to_out_len]);
         }
 
         if in_to_out_len < input.len() {
             self.buf.extend(input[in_to_out_len..].iter().copied());
         }
 
-        out.len()
-    }
-
-    fn process_normal(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
-        out.clear();
-        self.process_normal_append(input, out)
+        debug_assert!(
+            !output.is_empty(),
+            "cross_bridge process_normal output is empty"
+        );
+        output.len()
     }
 
     /// 交叉：
     /// 1) 等待期间 buf 不可变，target = buf.len() 稳定；
     /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变），查预计算增益表；
     /// 3) input_rest 走与非交叉完全一致的延迟线逻辑。
-    fn process_crossfade(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+    fn process_crossfade(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
         let channels = self.info.output_format.channels as usize;
         let target = self.buf.len();
 
         if channels == 0 || target == 0 {
             self.is_effect = false;
             self.b_buf.clear();
-            out.clear();
-            out.extend_from_slice(input);
-            return out.len();
+            output.clear();
+            output.extend_from_slice(input);
+            return output.len();
         }
 
         let needed = target.saturating_sub(self.b_buf.len());
@@ -264,7 +268,7 @@ impl CrossBridgeEffect {
         self.b_buf.clear();
         self.is_effect = false;
 
-        out.clear();
-        self.process_normal_append(input_rest, out)
+        output.clear();
+        self.process_normal(input_rest, output)
     }
 }

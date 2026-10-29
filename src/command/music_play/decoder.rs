@@ -227,6 +227,7 @@ impl Decoder {
                                     if let Some(p) = e {
                                         p
                                     } else {
+                                        debug!("decoder next_packet none");
                                         ring_buf.push_wait(AudioData::Eof).expect(
                                             "push Eof \
                                         failed",

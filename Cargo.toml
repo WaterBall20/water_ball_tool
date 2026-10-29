@@ -93,3 +93,7 @@ crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+
+
+[features]
+debug-no-audio = []

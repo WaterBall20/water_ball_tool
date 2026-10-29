@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct Track {
     path: PathBuf,
     title: String,
@@ -60,10 +60,14 @@ impl NextTrack<'_> {
 
 pub(super) struct PlayList {
     tracks: Vec<Track>,
-    current_index: usize, //tracks的当前索引，对于定期洗牌模式（周期不重复）则为shuffle_bag
+    /// tracks的当前索引，对于定期洗牌模式（周期不重复）不使用。
+    /// # 注意
+    /// 索引的有效值从1开始
+    /// 0表示初始状态
+    current_index: usize,
     loop_mode: LoopMode,
-    // 用于"周期不重复"模式的随机队列
-    shuffle_bag: VecDeque<usize>,
+    // 用于随机模式的随机队列
+    rand_list: VecDeque<usize>,
     // 换曲ID
     next_id: usize,
 }
@@ -73,9 +77,9 @@ impl PlayList {
         let tracks_len = tracks.len();
         Self {
             tracks,
-            current_index: tracks_len - 1,
+            current_index: 0,
             loop_mode,
-            shuffle_bag: VecDeque::with_capacity(tracks_len),
+            rand_list: VecDeque::with_capacity(tracks_len),
             next_id: 0,
         }
     }
@@ -93,17 +97,17 @@ impl PlayList {
                     // 顺序循环
                     let tracks_len = self.tracks.len();
                     let index = self.current_index + 1;
-                    self.current_index = if index >= tracks_len { 0 } else { index };
+                    self.current_index = if index > tracks_len { 1 } else { index };
                 }
                 LoopMode::Sequential => {
                     // 顺序播放，仅手动时从头播放
                     let tracks_len = self.tracks.len();
                     let index = self.current_index + 1;
-                    if index >= tracks_len {
+                    if index > tracks_len {
                         if play_end {
                             return None;
                         }
-                        self.current_index = 0;
+                        self.current_index = 1;
                     } else {
                         self.current_index = index;
                     }
@@ -113,7 +117,7 @@ impl PlayList {
                     if !play_end {
                         let tracks_len = self.tracks.len();
                         let index = self.current_index + 1;
-                        self.current_index = if index >= tracks_len { 0 } else { index };
+                        self.current_index = if index > tracks_len { 1 } else { index };
                     }
                 }
                 LoopMode::Shuffle => {
@@ -125,27 +129,27 @@ impl PlayList {
                     // 周期不循环
                     let tracks_len = self.tracks.len();
                     // 重置
-                    if self.shuffle_bag.is_empty() {
+                    if self.rand_list.is_empty() {
                         //用于洗牌的临时列表
                         let mut temp_list = {
                             let mut temp = VecDeque::with_capacity(tracks_len);
-                            for i in 0..tracks_len {
+                            for i in 1..=tracks_len {
                                 temp.push_back(i);
                             }
                             temp
                         };
                         while !temp_list.is_empty() {
                             let r = rand::random_range(0..temp_list.len());
-                            self.shuffle_bag.push_back(
+                            self.rand_list.push_back(
                                 temp_list
                                     .remove(r)
                                     .expect("逻辑错误：用于洗牌的临时列表无法正常获取项"),
                             );
                         }
                     }
-                    self.current_index = self.shuffle_bag.pop_front().unwrap_or(0);
+                    self.current_index = self.rand_list.pop_front().unwrap_or(0);
                 }
-            };
+            }
             Some(NextTrack {
                 track: self.get_current_track().expect("没有音轨"),
                 next_id,
@@ -158,7 +162,7 @@ impl PlayList {
     pub(super) fn set_loop_mod(&mut self, loop_mode: LoopMode) {
         self.loop_mode = loop_mode;
         if let LoopMode::PeriodicShuffle = self.loop_mode {
-            self.shuffle_bag.clear();
+            self.rand_list.clear();
         }
     }
 
@@ -172,7 +176,7 @@ impl PlayList {
     }
 
     pub(super) fn get_current_track(&self) -> Option<&Track> {
-        self.tracks.get(self.current_index)
+        self.tracks.get(self.current_index - 1)
     }
 
     pub(super) fn loop_mod(&self) -> LoopMode {
@@ -181,6 +185,102 @@ impl PlayList {
 
     pub(super) fn reset(&mut self) {
         self.current_index = 0;
-        self.shuffle_bag.clear();
+        self.rand_list.clear();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const TEST_COUNT: usize = 100_000;
+    const TEST_FOR_COUNT: usize = 100;
+    fn creat_tack_list(len: usize) -> Vec<Track> {
+        let mut list = Vec::with_capacity(len);
+        for i in 0..len {
+            let i_str = i.to_string();
+            list.push(Track::new(
+                PathBuf::from(&i_str),
+                i_str.clone(),
+                i_str.clone(),
+                Duration::default(),
+                FileType::Aac,
+            ));
+        }
+        list
+    }
+
+    #[test]
+    fn sequential_loop_list_no_play_end() {
+        sequential_loop_list(false);
+    }
+
+    #[test]
+    fn sequential_loop_list_play_end() {
+        sequential_loop_list(true);
+    }
+    fn sequential_loop_list(play_end: bool) {
+        let list = creat_tack_list(TEST_COUNT);
+        let mut next_id = 0;
+        let mut play_list = PlayList::new(list.clone(), LoopMode::SequentialLoop);
+        for _ in 0..TEST_FOR_COUNT {
+            for item in &list {
+                assert_eq!(item, {
+                    let r = play_list.next(play_end, next_id).expect("next failed");
+                    next_id = r.next_id;
+                    r.track
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn sequential_list_play_end() {
+        let list = creat_tack_list(TEST_COUNT);
+        let mut next_id = 0;
+        let mut play_list = PlayList::new(list.clone(), LoopMode::Sequential);
+        for item in &list {
+            assert_eq!(item, {
+                let r = play_list.next(true, next_id).expect("next failed");
+                next_id = r.next_id;
+                r.track
+            });
+        }
+        assert!(play_list.next(true, next_id).is_none());
+    }
+    #[test]
+    fn sequential_list_no_play_end() {
+        let list = creat_tack_list(TEST_COUNT);
+        let mut next_id = 0;
+        let mut play_list = PlayList::new(list.clone(), LoopMode::Sequential);
+        for _ in 0..TEST_FOR_COUNT {
+            for item in &list {
+                assert_eq!(item, {
+                    let r = play_list.next(false, next_id).expect("next failed");
+                    next_id = r.next_id;
+                    r.track
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn periodic_shuffle() {
+        let len = 10;
+        let list = creat_tack_list(len);
+        let mut next_id = 0;
+        let mut play_list = PlayList::new(list, LoopMode::PeriodicShuffle);
+        let mut next_list = Vec::with_capacity(len);
+        for _ in 0..len {
+            for _ in 0..len {
+                let r = play_list.next(false, next_id).expect("next failed");
+                next_id = r.next_id;
+                for v in &next_list {
+                    assert_ne!(v, r.track);
+                }
+                next_list.push(r.track.clone());
+            }
+            next_list.clear();
+        }
     }
 }

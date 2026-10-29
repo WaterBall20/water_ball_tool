@@ -164,22 +164,22 @@ impl PreEffect for ResamplerEffect {
         self.init(input_format)
     }
 
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize {
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
         if self.error.is_some() {
-            out.clear();
+            output.clear();
             return 0;
         }
 
         if self.info.output_format == self.info.input_format || self.resampler.is_none() {
-            out.clear();
-            out.reserve_exact(input.len());
-            out.extend_from_slice(input);
-            return out.len();
+            output.clear();
+            output.reserve_exact(input.len());
+            output.extend_from_slice(input);
+            return output.len();
         }
 
         let channels = self.info.input_format.channels as usize;
         if channels == 0 {
-            out.clear();
+            output.clear();
             return 0;
         }
         let chunk_len = self.chunk_len;
@@ -189,27 +189,27 @@ impl PreEffect for ResamplerEffect {
         self.in_buf.reserve(input.len());
         self.in_buf.extend(input.iter().copied());
         if self.in_buf.len() < channels_chunk_len {
-            out.clear();
+            output.clear();
             return 0;
         }
 
         let drain_len = (self.in_buf.len() / channels_chunk_len) * channels_chunk_len;
-        out.clear();
-        out.reserve_exact((drain_len / channels_chunk_len) * max_out_frames * channels);
+        output.clear();
+        output.reserve_exact((drain_len / channels_chunk_len) * max_out_frames * channels);
 
         let Some(resampler) = self.resampler.as_mut() else {
             // 防御：resampler 不可用时兜底透传，不 panic
-            out.clear();
-            out.reserve_exact(input.len());
-            out.extend_from_slice(input);
-            return out.len();
+            output.clear();
+            output.reserve_exact(input.len());
+            output.extend_from_slice(input);
+            return output.len();
         };
         let (consumed, err) = {
             let contiguous = self.in_buf.make_contiguous();
             Self::process_inner(
                 &contiguous[..drain_len],
                 &mut self.out_temp_buf,
-                out,
+                output,
                 chunk_len,
                 channels,
                 max_out_frames,
@@ -221,31 +221,31 @@ impl PreEffect for ResamplerEffect {
 
         if let Some(e) = err {
             self.set_error(e);
-            return out.len();
+            return output.len();
         }
-        out.len()
+        output.len()
     }
 
     fn on_discontinuity(
         &mut self,
         input: &[f32],
-        out: &mut Vec<f32>,
+        output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
         if PreEffectDiscontinuity::Skip == kind || PreEffectDiscontinuity::Seek == kind {
             return 0;
         }
         if self.is_passthrough() {
-            out.clear();
-            out.reserve_exact(self.in_buf.len() + input.len());
-            out.extend(self.in_buf.drain(..));
-            out.extend_from_slice(input);
-            return out.len();
+            output.clear();
+            output.reserve_exact(self.in_buf.len() + input.len());
+            output.extend(self.in_buf.drain(..));
+            output.extend_from_slice(input);
+            return output.len();
         }
 
         let channels = self.info.input_format.channels as usize;
         if channels == 0 {
-            out.clear();
+            output.clear();
             return 0;
         }
         let chunk_len = self.chunk_len;
@@ -258,23 +258,23 @@ impl PreEffect for ResamplerEffect {
         let this_input_len = (data_len / channels_chunk_len + 1) * channels_chunk_len;
         self.in_buf.resize(this_input_len, 0.0);
 
-        out.clear();
-        out.reserve_exact((this_input_len / channels_chunk_len) * max_out_frames * channels);
+        output.clear();
+        output.reserve_exact((this_input_len / channels_chunk_len) * max_out_frames * channels);
 
         let Some(resampler) = self.resampler.as_mut() else {
             // 防御：不可达，但用透传兜底，绝不 panic、绝不吞数据
-            out.clear();
-            out.reserve_exact(self.in_buf.len() + input.len());
-            out.extend(self.in_buf.drain(..));
-            out.extend_from_slice(input);
-            return out.len();
+            output.clear();
+            output.reserve_exact(self.in_buf.len() + input.len());
+            output.extend(self.in_buf.drain(..));
+            output.extend_from_slice(input);
+            return output.len();
         };
         let (consumed, err) = {
             let contiguous = self.in_buf.make_contiguous();
             Self::process_inner(
                 &contiguous[..this_input_len],
                 &mut self.out_temp_buf,
-                out,
+                output,
                 chunk_len,
                 channels,
                 max_out_frames,
@@ -284,11 +284,15 @@ impl PreEffect for ResamplerEffect {
 
         if let Some(e) = err {
             self.set_error(e);
-            out.extend(self.in_buf.drain(consumed..));
-            return out.len();
+            output.extend(self.in_buf.drain(consumed..));
+            return output.len();
         }
         self.in_buf.clear();
-        out.len()
+        debug_assert!(
+            !output.is_empty(),
+            "resampler on_discontinuity output is empty"
+        );
+        output.len()
     }
 
     fn info(&self) -> &PreEffectInfo {

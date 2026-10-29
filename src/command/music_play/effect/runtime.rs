@@ -136,14 +136,11 @@ impl PreEffectRuntime {
                                         &mut out_temp_buf,
                                         PreEffectDiscontinuity::try_from(&data).expect("逻辑错误"),
                                     );
-                                    if len == 0 {
-                                        continue;
-                                    }
                                     if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
                                         error!("Failed to write all audio data: {}", e);
                                         break;
                                     }
-                                    if let AudioData::Eof = &data {
+                                    if let AudioData::Eof = data {
                                         Self::emit(
                                             PreEffectRuntimeEvent {
                                                 result: Ok(PreEffectRuntimeEventType::Eof),
@@ -224,6 +221,7 @@ impl PreEffectRuntime {
     }
 }
 
+#[derive(Debug)]
 pub struct PreEffectRuntimeEvent {
     result: Result<PreEffectRuntimeEventType, PreEffectRuntimeEventError>,
 }
@@ -234,6 +232,7 @@ impl PreEffectRuntimeEvent {
     }
 }
 
+#[derive(Debug)]
 pub enum PreEffectRuntimeEventType {
     Eof,
 }

@@ -347,7 +347,7 @@ pub trait PreEffect: Send + 'static {
     /// # 返回 0 的语义
     ///
     /// - **不跳过下级**：管理器仍会调用下一级，其 `input` 为空切片。
-    /// - 收到空 `input` 时，`out` **必须为空**，返回 0。
+    /// - 收到空 `input` 时，`output` **必须为空**，返回 0。
     ///   不得借空输入吐出 tail —— tail 只能在 `on_discontinuity` 吐。
     /// - 有状态/时间敏感的下级在收到空输入时不会推进时间线；
     ///   若本级需要「暂时静音但保持时间线」，应输出静音样本而非返回 0。
@@ -356,7 +356,7 @@ pub trait PreEffect: Send + 'static {
     ///
     /// - 不得部分消费 `input`（残留不会传播到下级）。
     /// - 不得在 `process` 中失败或 panic。
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) -> usize;
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize;
 
     // ========================================================================
     // 不连续点处理
@@ -416,15 +416,15 @@ pub trait PreEffect: Send + 'static {
     fn on_discontinuity(
         &mut self,
         input: &[f32],
-        out: &mut Vec<f32>,
+        output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
-        out.clear();
+        output.clear();
         match kind {
             PreEffectDiscontinuity::Skip | PreEffectDiscontinuity::Seek => 0,
             PreEffectDiscontinuity::Eof | PreEffectDiscontinuity::NoNext => {
-                out.extend_from_slice(input);
-                out.len()
+                output.extend_from_slice(input);
+                output.len()
             }
         }
     }
@@ -552,9 +552,13 @@ impl PreEffectChain {
 
     pub fn on_discontinuity(
         &mut self,
-        out: &mut Vec<f32>,
+        output: &mut Vec<f32>,
         discontinuity: PreEffectDiscontinuity,
     ) -> usize {
+        //效果器不存在就直接返回
+        if self.effects.is_empty() {
+            return 0;
+        }
         let input_buf = &mut self.input_buffer;
         let output_buf = &mut self.output_buffer;
         let no_buf = &mut self.no_buffer;
@@ -572,9 +576,9 @@ impl PreEffectChain {
                 effect.on_discontinuity(&no_buf[..0], output_buf, discontinuity);
             }
         }
-        out.clear();
-        out.reserve_exact(this_len);
-        out.extend_from_slice(&input_buf[..this_len]);
+        output.clear();
+        output.reserve_exact(this_len);
+        output.extend_from_slice(&input_buf[..this_len]);
         this_len
     }
 }
