@@ -7,12 +7,12 @@ use std::fmt;
 ///
 /// - [`Kind::Locked`]：`try_*` 方法尝试获取端锁失败。
 /// - [`Kind::CannotWait`]：等待期间对端 drop / 关闭，无法继续等待。
-/// - [`Kind::WriteRejected`]：保留未实现。
+/// - [`Kind::WriteRejected`]：`reject_pending_writers` 拒绝写入（无元素）。
+/// - [`Kind::WriteRejectedValue`]：`reject_pending_writers` 拒绝写入，归还元素。
 /// - [`Kind::Full`]：缓冲区满，归还未写入的元素。
 /// - [`Kind::Clearing`]：`clear` 进行中，读写不可用，归还元素。
 /// - [`Kind::Truncating`]：`truncate_back` 进行中，写入被拒绝，归还元素。
-/// - [`Kind::InvalidRange`]：`drain` / `release` 区间非法（只接受 `0..k` 或
-///   `0..len`）。
+/// - [`Kind::InvalidRange`]：`drain` / `release` 区间非法。
 ///
 /// # 示例
 ///
@@ -30,8 +30,10 @@ pub enum Kind<T> {
     Locked,
     /// 等待期间对端 drop / 关闭，无法继续等待。
     CannotWait,
-    /// 写入被拒绝，保留未实现。
+    /// `reject_pending_writers` 拒绝写入，不携带元素。
     WriteRejected,
+    /// `reject_pending_writers` 拒绝写入，归还元素。
+    WriteRejectedValue(T),
     /// 缓冲区满，归还未写入的元素。
     Full(T),
     /// `clear` 进行中，读写不可用，归还元素。
@@ -104,6 +106,45 @@ impl<T> Error<T> {
     /// ```
     pub fn cannot_wait() -> Self {
         Self::new("peer closed while waiting", Kind::CannotWait)
+    }
+
+    /// 构造“写入被拒绝”错误，不携带元素。`write_wait` / `write_all` 被
+    /// `reject_pending_writers` 拒绝时返回。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::<u8>::write_rejected();
+    /// assert!(matches!(err.kind, Kind::WriteRejected));
+    /// ```
+    pub fn write_rejected() -> Self {
+        Self::new(
+            "write rejected by reject_pending_writers",
+            Kind::WriteRejected,
+        )
+    }
+
+    /// 构造“写入被拒绝”错误，归还元素。`push_wait` 被 `reject_pending_writers`
+    /// 拒绝时返回。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::write_rejected_value(5u8);
+    /// match err.kind {
+    ///     Kind::WriteRejectedValue(v) => assert_eq!(v, 5),
+    ///     _ => panic!("expected WriteRejectedValue"),
+    /// }
+    /// ```
+    pub fn write_rejected_value(value: T) -> Self {
+        Self::new(
+            "write rejected by reject_pending_writers",
+            Kind::WriteRejectedValue(value),
+        )
     }
 
     /// 构造“满”错误，归还被拒绝的元素。
@@ -181,6 +222,7 @@ impl<T: fmt::Debug> fmt::Debug for Kind<T> {
             Kind::Locked => f.write_str("Locked"),
             Kind::CannotWait => f.write_str("CannotWait"),
             Kind::WriteRejected => f.write_str("WriteRejected"),
+            Kind::WriteRejectedValue(v) => f.debug_tuple("WriteRejectedValue").field(v).finish(),
             Kind::Full(v) => f.debug_tuple("Full").field(v).finish(),
             Kind::Clearing(v) => f.debug_tuple("Clearing").field(v).finish(),
             Kind::Truncating(v) => f.debug_tuple("Truncating").field(v).finish(),

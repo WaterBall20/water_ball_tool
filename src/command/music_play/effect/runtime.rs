@@ -40,9 +40,23 @@ impl PreEffectRuntime {
 
 impl PreEffectRuntime {
     fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) -> Result<(), PreEffectError> {
-        self.input_buf.clear();
+        self.input_buf.reject_waiting_writers();
         self.input_buf.push_wait(audio_data)?;
         Ok(())
+    }
+
+    fn audio_buf_write_all(
+        buf: &LockedWriter<f32>,
+        data: &[f32],
+    ) -> Result<bool, water_ball_tool_lib::split_ring_buffer::error::Error<f32>> {
+        if let Err(e) = buf.write_all(data) {
+            if let water_ball_tool_lib::split_ring_buffer::error::Kind::WriteRejected = e.kind {
+                return Ok(true);
+            }
+            error!("Failed to write all audio data: {}", e);
+            return Err(e);
+        }
+        Ok(false)
     }
 }
 
@@ -116,9 +130,10 @@ impl PreEffectRuntime {
                                         continue;
                                     }
                                     let t2 = Instant::now();
-                                    if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
-                                        error!("Failed to write all audio data: {}", e);
-                                        break;
+                                    match Self::audio_buf_write_all(&audio_buf, &out_temp_buf[..len]) {
+                                        Ok(true) => continue,
+                                        Ok(false) => {}
+                                        Err(_) => break,
                                     }
                                     write_wait_acc.record(t2.elapsed());
                                     blocks += 1;
@@ -136,9 +151,10 @@ impl PreEffectRuntime {
                                         &mut out_temp_buf,
                                         PreEffectDiscontinuity::try_from(&data).expect("逻辑错误"),
                                     );
-                                    if let Err(e) = audio_buf.write_all(&out_temp_buf[..len]) {
-                                        error!("Failed to write all audio data: {}", e);
-                                        break;
+                                    match Self::audio_buf_write_all(&audio_buf, &out_temp_buf[..len]) {
+                                        Ok(true) => continue,
+                                        Ok(false) => {}
+                                        Err(_) => break,
                                     }
                                     if let AudioData::Eof = data {
                                         Self::emit(
@@ -173,8 +189,8 @@ impl PreEffectRuntime {
 
     pub fn stop(&self) -> Result<(), Box<dyn Any + Send + 'static>> {
         self.stop.store(true, Ordering::Release);
-        self.input_buf.clear();
-        self.audio_buf.clear();
+        self.input_buf.reject_waiting_writers();
+        self.audio_buf.reject_pending_writers();
         _ = self.input_buf.push(AudioData::NoNext);
         if let Some(join_handle) = self
             .effect_thread

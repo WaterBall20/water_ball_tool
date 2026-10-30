@@ -49,7 +49,7 @@ ratatui = "0.30.2"
 debug = true
 strip = false
 lto = "fat"
-codegen-units = 1  # 与 fat LTO 搭配，规避潜在的性能回退
+codegen-units = 4  # 与 fat LTO 搭配，规避潜在的性能回退
 
 # package
 [package]

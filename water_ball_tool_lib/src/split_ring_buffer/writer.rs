@@ -10,6 +10,8 @@ fn kind_to_error<T>(k: Kind<T>) -> Error<T> {
         Kind::Full(v) => Error::full(v),
         Kind::Clearing(v) => Error::clearing(v),
         Kind::Truncating(v) => Error::truncating(v),
+        Kind::WriteRejectedValue(v) => Error::write_rejected_value(v),
+        Kind::WriteRejected => Error::write_rejected(),
         _ => unreachable!("push_one only returns Full / Clearing / Truncating"),
     }
 }
@@ -41,7 +43,8 @@ impl<T> LockedWriter<T> {
     /// 非阻塞写入单个元素。
     ///
     /// 满返回 `Err(Full(value))`；`clear` 中返回 `Err(Clearing(value))`；
-    /// `truncate_back` 中返回 `Err(Truncating(value))`。
+    /// `truncate_back` 中返回 `Err(Truncating(value))`。不受
+    /// `reject_pending_writers` 影响。
     ///
     /// # 示例
     ///
@@ -61,6 +64,10 @@ impl<T> LockedWriter<T> {
 
     /// 等待至少一个空位后写入。
     ///
+    /// 若在等待期间发生 `reject_pending_writers`，返回
+    /// `Err(WriteRejectedValue(value))`，归还元素。`reject` 之后进入的写端
+    /// 不受影响。
+    ///
     /// # 示例
     ///
     /// ```
@@ -71,8 +78,12 @@ impl<T> LockedWriter<T> {
     /// assert_eq!(reader.pop(), Some(1));
     /// ```
     pub fn push_wait(&self, value: T) -> Result<(), Error<T>> {
+        let my_epoch = self.inner.current_rejection_epoch();
         let mut value = value;
         loop {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected_value(value));
+            }
             {
                 let _g = lock_ignore_poison(&self.inner.write.lock);
                 match self.inner.push_one(value) {
@@ -87,6 +98,10 @@ impl<T> LockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected_value(value));
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();
@@ -105,7 +120,8 @@ impl<T> LockedWriter<T> {
 
     /// 清空缓冲区：交换 A/B，重置指针，drop 旧 B 中未读元素。
     ///
-    /// 与 `truncate_back` 互斥；进行期间阻塞所有读写。并发 `clear` 直接返回。
+    /// 与 `truncate_back` / `reject_pending_writers` 互斥；进行期间阻塞所有
+    /// 读写。并发 `clear` 直接返回。
     ///
     /// # 示例
     ///
@@ -122,10 +138,11 @@ impl<T> LockedWriter<T> {
         self.inner.clear();
     }
 
-    /// 保留前 `keep` 个元素，丢弃尾部。与 `clear` 互斥，进行期间阻塞所有读写。
+    /// 保留前 `keep` 个元素，丢弃尾部。与 `clear` / `reject_pending_writers`
+    /// 互斥，进行期间阻塞所有读写。
     ///
     /// `keep >= len` 时不丢弃任何元素。`clear` 或另一个 `truncate_back` 正在
-    /// 进行时直接返回（无操作）。拿写端锁直至完成。
+    /// 进行时直接返回（无操作）。
     ///
     /// # 示例
     ///
@@ -142,6 +159,34 @@ impl<T> LockedWriter<T> {
     pub fn truncate_back(&self, keep: usize) {
         let _w = lock_ignore_poison(&self.inner.write.lock);
         self.inner.truncate_back(keep);
+    }
+
+    /// 清空缓冲区并拒绝当前所有 pending 的阻塞写端，让它们返回
+    /// `Err(WriteRejected)` / `Err(WriteRejectedValue(value))`。
+    ///
+    /// 之后进入的阻塞写端不受影响，正常等待 / 写入。非阻塞 `push` /
+    /// `try_push` / `write` / `try_write` 不受影响。与 `clear` /
+    /// `truncate_back` 互斥。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    /// use water_ball_tool_lib::split_ring_buffer::Kind;
+    ///
+    /// let (reader, writer) = locked_ring_buffer::<u8>(4);
+    /// assert!(writer.push(1).is_ok());
+    /// writer.reject_pending_writers();
+    /// assert_eq!(reader.len(), 0);
+    ///
+    /// // reject 之后的新写入不受影响
+    /// assert!(writer.push_wait(2).is_ok());
+    /// assert_eq!(reader.pop(), Some(2));
+    ///
+    /// let _ = Kind::<u8>::WriteRejected;
+    /// ```
+    pub fn reject_pending_writers(&self) {
+        self.inner.reject_pending_writers();
     }
 
     /// 尝试获取写端锁并写入。获取锁失败返回 `Err(Locked)`。
@@ -236,6 +281,9 @@ impl<T: Copy> LockedWriter<T> {
 
     /// 等待可写空间后从 `src` 复制数据。仅 `T: Copy` 可用。
     ///
+    /// 若在等待期间发生 `reject_pending_writers`，返回
+    /// `Err(WriteRejected)`；调用方可通过 `src` 获取剩余数据。
+    ///
     /// # 示例
     ///
     /// ```
@@ -252,7 +300,11 @@ impl<T: Copy> LockedWriter<T> {
         if src.is_empty() {
             return Ok(0);
         }
+        let my_epoch = self.inner.current_rejection_epoch();
         loop {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected());
+            }
             {
                 let _g = lock_ignore_poison(&self.inner.write.lock);
                 let n = self.inner.write_slice(src);
@@ -264,6 +316,10 @@ impl<T: Copy> LockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected());
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();
@@ -282,6 +338,9 @@ impl<T: Copy> LockedWriter<T> {
 
     /// 阻塞直到 `src` 全部写入。仅 `T: Copy` 可用。
     ///
+    /// 若在等待期间发生 `reject_pending_writers`，返回
+    /// `Err(WriteRejected)`；`src` 中已写入的部分保持，剩余部分由调用方处理。
+    ///
     /// # 示例
     ///
     /// ```
@@ -295,9 +354,13 @@ impl<T: Copy> LockedWriter<T> {
         if src.is_empty() {
             return Ok(());
         }
+        let my_epoch = self.inner.current_rejection_epoch();
         let _g = lock_ignore_poison(&self.inner.write.lock);
         let mut written = 0;
         while written < src.len() {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected());
+            }
             let n = self.inner.write_slice(&src[written..]);
             if n > 0 {
                 written += n;
@@ -307,6 +370,10 @@ impl<T: Copy> LockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected());
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();
@@ -393,7 +460,7 @@ impl<T> UnlockedWriter<T> {
         }
     }
 
-    /// 非阻塞写入单个元素。
+    /// 非阻塞写入单个元素。不受 `reject_pending_writers` 影响。
     ///
     /// # 示例
     ///
@@ -421,8 +488,12 @@ impl<T> UnlockedWriter<T> {
     /// assert_eq!(reader.pop(), Some(1));
     /// ```
     pub fn push_wait(&mut self, value: T) -> Result<(), Error<T>> {
+        let my_epoch = self.inner.current_rejection_epoch();
         let mut value = value;
         loop {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected_value(value));
+            }
             match self.inner.push_one(value) {
                 Ok(()) => return Ok(()),
                 Err(Kind::Full(v)) | Err(Kind::Clearing(v)) | Err(Kind::Truncating(v)) => value = v,
@@ -432,6 +503,10 @@ impl<T> UnlockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected_value(value));
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();
@@ -479,6 +554,22 @@ impl<T> UnlockedWriter<T> {
     /// ```
     pub fn truncate_back(&mut self, keep: usize) {
         self.inner.truncate_back(keep);
+    }
+
+    /// 清空缓冲区并拒绝当前所有 pending 的阻塞写端。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<u8>(4);
+    /// assert!(writer.push(1).is_ok());
+    /// writer.reject_pending_writers();
+    /// assert_eq!(reader.len(), 0);
+    /// ```
+    pub fn reject_pending_writers(&self) {
+        self.inner.reject_pending_writers();
     }
 
     /// 当前已写元素数。
@@ -565,7 +656,11 @@ impl<T: Copy> UnlockedWriter<T> {
         if src.is_empty() {
             return Ok(0);
         }
+        let my_epoch = self.inner.current_rejection_epoch();
         loop {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected());
+            }
             let n = self.inner.write_slice(src);
             if n > 0 {
                 return Ok(n);
@@ -574,6 +669,10 @@ impl<T: Copy> UnlockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected());
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();
@@ -605,8 +704,12 @@ impl<T: Copy> UnlockedWriter<T> {
         if src.is_empty() {
             return Ok(());
         }
+        let my_epoch = self.inner.current_rejection_epoch();
         let mut written = 0;
         while written < src.len() {
+            if self.inner.rejection_changed(my_epoch) {
+                return Err(Error::write_rejected());
+            }
             let n = self.inner.write_slice(&src[written..]);
             if n > 0 {
                 written += n;
@@ -616,6 +719,10 @@ impl<T: Copy> UnlockedWriter<T> {
                 return Err(Error::cannot_wait());
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
+            if self.inner.rejection_changed(my_epoch) {
+                drop(g);
+                return Err(Error::write_rejected());
+            }
             self.inner.write.enter_wait();
             if self.inner.read.is_closed() {
                 self.inner.write.leave_wait();

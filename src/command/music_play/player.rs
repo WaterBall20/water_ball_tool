@@ -1,4 +1,4 @@
-use crate::command::music_play::decoder::{Decoder, DecoderResult};
+use crate::command::music_play::decoder_runtime::{DecoderResult, DecoderRuntime};
 use crate::command::music_play::effect::cross_bridge::CrossBridgeEffect;
 use crate::command::music_play::effect::resampler::ResamplerEffect;
 use crate::command::music_play::effect::runtime::{
@@ -13,6 +13,7 @@ use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -24,7 +25,7 @@ use water_ball_tool_lib::split_ring_buffer::{LockedWriter, UnlockedReader};
 
 #[derive(Clone)]
 pub(super) struct Player {
-    played_samples: Arc<AtomicU64>,
+    pos: Arc<AtomicU64>,
     sound_engine: SoundEngine,
     control: Control,
     event_content: EventContent,
@@ -35,7 +36,7 @@ pub(super) struct Player {
 struct SoundEngine {
     pre_effect_ring_buf: ConcurrentRing<AudioData>,
     audio_ring_buffer: LockedWriter<f32>,
-    decoder: Arc<Mutex<Option<Decoder>>>,
+    decoder_runtime: DecoderRuntime,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
     effect_chain: Arc<Mutex<PostEffectChain>>,
@@ -64,7 +65,7 @@ impl Player {
         config: StreamConfig,
         ring_buf: UnlockedReader<f32>,
         control: Control,
-        played_samples: Arc<AtomicU64>,
+        pos: Arc<AtomicU64>,
         event_content: EventContent,
         rx_cmd: Receiver<PlayCmd>,
         tx_done: Sender<PlayCmd>,
@@ -94,7 +95,7 @@ impl Player {
                             let _ = ring_buf.release(0..re_len);
                             pre_effect_item_eof_pos.store(0, Ordering::Release);
                             pre_effect_item_eof.store(false, Ordering::Release);
-                            played_samples.store(0, Ordering::Release);
+                            pos.store(0, Ordering::Release);
                         }
                         if matches!(effect_chain.dispatch_transport(cmd), Decision::Pass) {
                             let _ = tx_done.try_send(cmd);
@@ -128,38 +129,36 @@ impl Player {
 
                 // 3. 效果处理（仅当有数据）
                 #[cfg(not(feature = "debug-no-audio"))]
-                if len > 0 {
-                    let t2 = Instant::now();
-                    if let Ok(mut effect_chain) = effect_chain.try_lock() {
-                        effect_chain.process(data[..len].as_mut());
-                        scratch.clear();
-                        effect_chain.poll_transport(&mut scratch);
-                        for cmd in scratch.drain(..) {
-                            let _ = tx_done.try_send(cmd);
+                {
+                    if len > 0 {
+                        let t2 = Instant::now();
+                        if let Ok(mut effect_chain) = effect_chain.try_lock() {
+                            effect_chain.process(data[..len].as_mut());
+                            scratch.clear();
+                            effect_chain.poll_transport(&mut scratch);
+                            for cmd in scratch.drain(..) {
+                                let _ = tx_done.try_send(cmd);
+                            }
+                            post_effect_acc.record(t2.elapsed());
                         }
-                        post_effect_acc.record(t2.elapsed());
-                    }
 
-                    if (volume - 1.0).abs() > 0.0 {
-                        for datum in &mut data[..len] {
-                            *datum *= volume;
+                        if (volume - 1.0).abs() > 0.0 {
+                            for datum in &mut data[..len] {
+                                *datum *= volume;
+                            }
                         }
                     }
                     data[len..].fill(0.0);
                 }
-                played_samples.fetch_add(len as u64, Ordering::Relaxed);
+                pos.fetch_add(len as u64, Ordering::Relaxed);
                 // 4. EOF 检查（无论 try_read 成功/失败都走）
                 if pre_effect_item_eof.load(Ordering::Acquire) {
-                    let mut pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
-                    if len >= pos {
-                        pre_effect_item_eof_pos.store(0, Ordering::Release);
-                    } else {
-                        pre_effect_item_eof_pos.fetch_sub(len, Ordering::Release);
-                    }
-                    pos = pos.saturating_sub(len);
-                    if pos == 0 {
+                    let mut this_pos = pre_effect_item_eof_pos.load(Ordering::Acquire);
+                    this_pos = this_pos.saturating_sub(len);
+                    pre_effect_item_eof_pos.store(this_pos, Ordering::Release);
+                    if this_pos == 0 {
                         pre_effect_item_eof.store(false, Ordering::Release);
-                        played_samples.store(0, Ordering::Relaxed);
+                        pos.store(0, Ordering::Release);
                         Self::emit(
                             PlayerEvent {
                                 result: Ok(PlayerEventType::TrackEnded),
@@ -231,9 +230,14 @@ impl Player {
         pre_effect_runtime.add_effect(ResamplerEffect::new(output_format))?;
         pre_effect_runtime.add_effect(CrossBridgeEffect::new(output_format))?;
 
-        let decoder = Arc::new(Mutex::new(None));
+        let mut decoder_runtime = DecoderRuntime::new(
+            pre_effect_ring_buf.clone(),
+            pre_effect_runtime.clone(),
+            time_metrics.clone(),
+        );
+        decoder_runtime.run();
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
-        let played_samples = Arc::new(AtomicU64::new(0));
+        let pos = Arc::new(AtomicU64::new(0));
         let is_playing = Arc::new(AtomicBool::new(false));
 
         let pre_effect_item_eof = Arc::new(AtomicBool::new(false));
@@ -286,7 +290,7 @@ impl Player {
             *stream_config,
             audio_ring_buffer_reader,
             control.clone(),
-            played_samples.clone(),
+            pos.clone(),
             event_content.clone(),
             rx_cmd,
             tx_done,
@@ -330,7 +334,7 @@ impl Player {
             sound_engine: SoundEngine {
                 pre_effect_ring_buf,
                 audio_ring_buffer,
-                decoder,
+                decoder_runtime,
                 stream_config,
                 stream,
                 effect_chain,
@@ -338,7 +342,7 @@ impl Player {
                 time_metrics,
             },
             control,
-            played_samples,
+            pos,
             event_content,
             rx_cmd_thread,
         })
@@ -354,7 +358,7 @@ impl Player {
 
     pub fn get_pos(&self) -> Duration {
         Duration::from_millis(
-            self.played_samples.load(Ordering::Acquire) * 1000
+            self.pos.load(Ordering::Acquire) * 1000
                 / u64::from(self.sound_engine.stream_config.channels)
                 / u64::from(self.sound_engine.stream_config.sample_rate),
         )
@@ -410,18 +414,31 @@ impl Player {
         Ok(())
     }
 
+    pub fn decoder_runtime(&self) -> &DecoderRuntime {
+        &self.sound_engine.decoder_runtime
+    }
+
+    pub fn decoder_runtime_mut(&mut self) -> &mut DecoderRuntime {
+        &mut self.sound_engine.decoder_runtime
+    }
     pub fn audio_ring_buffer(&self) -> &LockedWriter<f32> {
         &self.sound_engine.audio_ring_buffer
     }
-
+    pub fn audio_ring_buffer_mut(&mut self) -> &mut LockedWriter<f32> {
+        &mut self.sound_engine.audio_ring_buffer
+    }
     pub fn pre_effect_ring_buffer(&self) -> &ConcurrentRing<AudioData> {
         &self.sound_engine.pre_effect_ring_buf
     }
-
+    pub fn pre_effect_ring_buffer_mut(&mut self) -> &mut ConcurrentRing<AudioData> {
+        &mut self.sound_engine.pre_effect_ring_buf
+    }
     pub fn pre_effect_runtime(&self) -> &PreEffectRuntime {
         &self.sound_engine.pre_effect_runtime
     }
-
+    pub fn pre_effect_runtime_mut(&mut self) -> &mut PreEffectRuntime {
+        &mut self.sound_engine.pre_effect_runtime
+    }
     pub fn time_metrics(&self) -> &Arc<TimeMetrics> {
         &self.sound_engine.time_metrics
     }
@@ -431,37 +448,20 @@ impl Player {
     }
 
     pub fn try_stop(&self) -> DecoderResult<()> {
-        if let Some(decoder) = self
-            .sound_engine
-            .decoder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            decoder.stop()?;
-        }
         if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
             error!("stop pre_effect runtime error: {e:?}");
         }
         Ok(())
     }
 
-    pub fn set_decoder(&mut self, decoder: Decoder) -> DecoderResult<()> {
-        let mut decoder = decoder;
-        let mut decoder_lock = self
-            .sound_engine
-            .decoder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(decoder) = decoder_lock.take() {
-            decoder.stop()?;
-        }
-        {
-            let per = &mut self.sound_engine.pre_effect_runtime;
-            per.send_skip().expect("skip failed");
-            per.reset(*decoder.decoder_format()).expect("reset failed");
-        }
-        self.sound_engine.audio_ring_buffer.clear();
+    pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
+        self.sound_engine.decoder_runtime.set_resetting();
+        self.sound_engine
+            .pre_effect_runtime
+            .send_skip()
+            .expect("skip failed");
+        self.sound_engine.audio_ring_buffer.reject_pending_writers();
+        self.sound_engine.decoder_runtime.set_decoder_path(path)?;
         // A5: 作废旧自动 Eof 状态
         self.event_content
             .pre_effect_item_eof
@@ -470,9 +470,7 @@ impl Player {
             .pre_effect_item_eof_pos
             .store(0, Ordering::Release);
         // B3: 在启动新 decoder 之前清零进度
-        self.played_samples.store(0, Ordering::Relaxed);
-        decoder.run()?;
-        decoder_lock.replace(decoder);
+        self.pos.store(0, Ordering::Relaxed);
         Ok(())
     }
 
@@ -486,21 +484,8 @@ impl Player {
     /// **永久阻塞（线程泄漏）**，且 `reset` 会与旧线程 push 竞争。
     ///
     /// 手动切换 / 需要丢弃旧曲尾音 / 无法保证已 EOF 时，请使用 `set_decoder`。
-    pub fn set_decoder_no_clear(&mut self, decoder: Decoder) -> DecoderResult<()> {
-        let mut decoder = decoder;
-        let mut decoder_lock = self
-            .sound_engine
-            .decoder
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        decoder_lock.take();
-        self.sound_engine
-            .pre_effect_runtime
-            .reset(*decoder.decoder_format())
-            .expect("reset failed");
-        decoder.run()?;
-        decoder_lock.replace(decoder);
-        Ok(())
+    pub fn set_decoder_path_no_clear(&mut self, path: &Path) -> DecoderResult<()> {
+        self.sound_engine.decoder_runtime.set_decoder_path(path)
     }
 
     pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn std::error::Error>> {
@@ -526,7 +511,7 @@ impl Player {
                 .load(Ordering::Acquire)
                 != 0
         {
-            self.pre_effect_ring_buffer().clear();
+            self.pre_effect_ring_buffer().reject_waiting_writers();
             self.sound_engine
                 .pre_effect_runtime
                 .send_skip()

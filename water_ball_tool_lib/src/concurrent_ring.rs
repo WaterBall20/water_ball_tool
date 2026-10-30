@@ -78,10 +78,6 @@ struct LockContent {
     not_empty: Condvar,   // 读者在此等待“有数据”
 
     // —— 唤醒优化与死锁检测 ——
-    // 注意：`read_waiters` / `write_waiters` 的值包含“已通过 ensure_waitable
-    // 并 fetch_add(1)、正在或即将进入 Condvar::wait”的线程。
-    // `ensure_waitable` 与 `fetch_add` 均在 `wait_lock` 下执行，
-    // 因此二者对 `wait_lock` 的串行化保证了计数的原子一致性。
     read_waiters: AtomicUsize,  // 正在或即将等待 not_empty 的读者数
     write_waiters: AtomicUsize, // 正在或即将等待 not_full 的写者数
 }
@@ -96,10 +92,6 @@ impl LockContent {
 // Inner<T>：共享内部数据，由所有 `ConcurrentRing` clone 共同持有
 // ============================================================
 
-/// 环形缓冲区的共享内核。
-///
-/// 通过 [`ConcurrentRing`] 的 `Deref` 透明暴露，外部使用者通常不需要直接
-/// 命名此类型。它包含全部原子状态与锁；`ConcurrentRing` 本身只是句柄。
 pub struct Inner<T> {
     slots: UnsafeCell<Box<[Slot<T>]>>,
     cap: AtomicUsize,
@@ -109,14 +101,18 @@ pub struct Inner<T> {
     max_cap: AtomicUsize,
     is_max_cap: AtomicBool,
 
-    /// 当前共享此 `Inner` 的 [`ConcurrentRing`] 实例数（含自身）。
+    /// 写入拒绝代际。
     ///
-    /// `Clone` 时 `fetch_add(1)`；`Drop` 时 `fetch_sub(1)`，并按需唤醒
-    /// Condvar 等待者：
-    /// - 减后剩 1 个实例 → 唤醒所有等待者，让它们重新检查 `ensure_waitable`
-    ///   并返回 `SingleInstance`。
-    /// - 减后剩 ≥ 2 个实例且所有剩余实例都在等待 → 唤醒它们，让它们返回
-    ///   `AllWaiting`。
+    /// 每次 [`reject_waiting_writers`] 调用时 `fetch_add(1)`。阻塞写者在
+    /// `wait_not_full` 前后各加载一次；值不等即说明期间发生了拒绝操作，
+    /// 应立即返回 [`ConcurrentRingErrorKind::WriteRejected`] /
+    /// [`ConcurrentRingErrorKind::WriteRejectedPartial`]，不再重试。
+    ///
+    /// 该计数只增不减，因此仅影响“本次拒绝操作之前已在等待”的写者：
+    /// 之后进入等待的写者加载到的 `gen_before` 已是新值，不会被误拒。
+    write_reject_gen: AtomicUsize,
+
+    /// 当前共享此 `Inner` 的 [`ConcurrentRing`] 实例数（含自身）。
     ref_count: AtomicUsize,
 }
 
@@ -157,13 +153,6 @@ impl<T> Drop for Inner<T> {
 
 pub struct ConcurrentRing<T> {
     inner: Arc<Inner<T>>,
-
-    // 强制 `!Sync`：`Cell<()>` 不是 `Sync`。
-    //
-    // 与 `Arc` 语义一致 —— 多线程协作时，应为每个线程 clone 一个
-    // `ConcurrentRing` 并 move 到线程，而不是通过 `&ConcurrentRing`
-    // 直接共享。`Sync` 被移除也提醒调用方：等待类 API 依赖另一持有者
-    // 存在，否则会返回 `SingleInstance` / `AllWaiting`。
     _not_sync: PhantomData<Cell<()>>,
 }
 
@@ -176,10 +165,6 @@ impl<T> Deref for ConcurrentRing<T> {
 
 impl<T> Clone for ConcurrentRing<T> {
     fn clone(&self) -> Self {
-        // 实例计数 +1，与 `Arc::clone` 严格同步。
-        // `ensure_waitable` 与 `Drop` 均依赖此计数；
-        // Relaxed 足够：计数值本身无跨线程同步语义，配对的是 Drop 侧的
-        // `fetch_sub(AcqRel)`，后者对 `prev - 1` 的判定建立了必要的 happens-before。
         self.inner.ref_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
@@ -190,26 +175,11 @@ impl<T> Clone for ConcurrentRing<T> {
 
 impl<T> Drop for ConcurrentRing<T> {
     fn drop(&mut self) {
-        // 实例计数 -1。`prev` 是减之前的值，`remaining = prev - 1` 是减后实例数。
         let prev = self.inner.ref_count.fetch_sub(1, Ordering::AcqRel);
         let remaining = prev.saturating_sub(1);
         if remaining == 0 {
-            // 最后一个实例：`Arc` 的 drop 会同时销毁 `Inner`（在其它字段全部
-            // 释放后触发 `Inner::drop`）。此时不可能有等待者（阻塞 API 需要
-            // `&self`，持有 `&self` 必然使 `ref_count ≥ 1`）。
             return;
         }
-        // 决定是否需要唤醒等待者：
-        // 1. `remaining == 1`：本次 drop 后仅剩 1 个实例。若该实例正在等待
-        //    或即将进入等待，它将无人唤醒 → 主动唤醒以让它重新检查并返回
-        //    `SingleInstance`。
-        // 2. `remaining >= 2` 且 `waiting >= remaining`：所有剩余实例都已
-        //    在等待，无人能作为对端操作 → 唤醒它们以让它们返回 `AllWaiting`。
-        //
-        // 注意：此判定存在极罕见的时序竞态（某线程刚通过 `ensure_waitable`
-        // 检查、尚未 `fetch_add` 时被并发 drop 观察），但 Drop 的唤醒是无害的
-        // （`notify_all` 无等待者时是 no-op），且 `remaining == 1` 条件已覆盖
-        // 主要死锁场景。
         let waiting = self.inner.lock_content.read_waiters.load(Ordering::Acquire)
             + self
                 .inner
@@ -218,14 +188,6 @@ impl<T> Drop for ConcurrentRing<T> {
                 .load(Ordering::Acquire);
         let need_wake = remaining == 1 || waiting >= remaining;
         if need_wake {
-            // 持 `wait_lock` 做 notify，与 `wait_not_empty` / `wait_not_full`
-            // 的"检查条件 + wait"临界区互斥，避免丢失唤醒。
-            //
-            // SAFETY 说明（无 unsafe 代码，仅说明为何不会死锁）：
-            // - 本线程已在 `Inner::drop` 前完成 `fetch_sub`，其他线程不可
-            //   再从本实例发起阻塞调用（本实例已消亡）。
-            // - `wait_lock` 与 `write_lock` / `read_gate` 独立，不存在锁顺序反转。
-            // - 若存在正在 `wait` 的线程，`wait_lock` 已被其释放，可直接获取。
             let _wl = self.inner.lock_wait_lock();
             if self.inner.lock_content.read_waiters.load(Ordering::Acquire) > 0 {
                 self.inner.lock_content.not_empty.notify_all();
@@ -255,13 +217,13 @@ impl<T> ConcurrentRing<T> {
                 lock_content: LockContent::default(),
                 max_cap: AtomicUsize::new(0),
                 is_max_cap: AtomicBool::new(false),
+                write_reject_gen: AtomicUsize::new(0),
                 ref_count: AtomicUsize::new(1),
             }),
             _not_sync: PhantomData,
         }
     }
 
-    ///
     /// # Error
     /// cap == 0, panic: capacity must be non-zero
     pub fn new_max_capacity(cap: usize) -> ConcurrentRingResult<Self, T> {
@@ -280,6 +242,7 @@ impl<T> ConcurrentRing<T> {
                 lock_content: LockContent::new(),
                 max_cap: AtomicUsize::new(cap),
                 is_max_cap: AtomicBool::new(true),
+                write_reject_gen: AtomicUsize::new(0),
                 ref_count: AtomicUsize::new(1),
             }),
             _not_sync: PhantomData,
@@ -292,12 +255,6 @@ impl<T> ConcurrentRing<T> {
     }
 
     /// 进入全锁模式：同时持有 `write_lock` 与 `read_gate.write`。
-    ///
-    /// Guard 存活期间，任何 `push/pop/write/read/borrow/*_wait/*` 及
-    /// `clear` 都会被阻塞（因为它们需要同两把锁之一）；Guard drop 后恢复。
-    ///
-    /// 加锁顺序固定为 `write_lock → read_gate.write`，与 `clear` 一致，
-    /// 不会与任何现有路径形成顺序反转。
     pub fn lock(&self) -> ConcurrentRingGuard<'_, T> {
         let write_guard = self.lock_write_lock();
         let read_guard = self.lock_read_gate_write();
@@ -379,7 +336,6 @@ impl<T> Inner<T> {
         }
     }
 
-    // try 版本：None 表示锁被占用，调用方转 Locked
     fn try_lock_write_lock(&self) -> Option<MutexGuard<'_, ()>> {
         match self.lock_content.write_lock.try_lock() {
             Ok(g) => Some(g),
@@ -419,13 +375,7 @@ impl<T> Inner<T> {
         let cap = self.cap.load(Ordering::Acquire);
         if self.is_max_cap.load(Ordering::Acquire) {
             let max_cap = self.max_cap.load(Ordering::Acquire);
-            if max_cap == 0 {
-                // 观察到 (is_max_cap=true, max_cap=0)：disable/enable 的中间态，
-                // 语义等价于「未设置上限」，返回 cap 避免 min(cap, 0)=0 误判满。
-                cap
-            } else {
-                cap.min(max_cap)
-            }
+            if max_cap == 0 { cap } else { cap.min(max_cap) }
         } else {
             cap
         }
@@ -437,6 +387,36 @@ impl<T> Inner<T> {
     unsafe fn slots_ref(&self) -> &[Slot<T>] {
         // SAFETY: 由调用方持锁保证 slots 不会被替换。
         unsafe { &*self.slots.get() }
+    }
+
+    /// 清空缓冲区：`[r, w)` 内已初始化槽位全部 drop，读指针推进到写指针。
+    ///
+    /// # Safety 前置条件
+    /// 调用方必须持 `write_lock` + `read_gate.write`（与 `clear` / `reject_waiting_writers`
+    /// 的持有条件一致）。
+    fn clear_locked(&self) {
+        let r = self.read_pos.load(Ordering::Acquire);
+        let w = self.write_pos.load(Ordering::Acquire);
+        if std::mem::needs_drop::<T>() {
+            let cap = self.cap.load(Ordering::Acquire);
+            // SAFETY: 调用方按契约持 `write_lock` + `read_gate.write`，在本次函数
+            // 调用期间无人能替换 `slots` 内部的 `Box<[Slot<T>]>`（替换只发生在
+            // `grow_locked`，其也需同样两把锁）。
+            let slots = unsafe { self.slots_ref() };
+            let mut i = r;
+            while i != w {
+                let idx = i % cap;
+                // SAFETY: idx 位于 [r, w) 内，槽位已初始化；持全锁独占。
+                unsafe {
+                    slots[idx].take();
+                }
+                i = i.wrapping_add(1);
+            }
+            self.read_pos.store(w, Ordering::Release);
+        } else {
+            // T 无 drop glue：无需逐槽 take，O(1)。
+            self.read_pos.store(w, Ordering::Release);
+        }
     }
 
     /// # Safety 前置条件
@@ -507,19 +487,6 @@ impl<T> Inner<T> {
         Some(v)
     }
 
-    /// 检查是否允许进入阻塞等待。
-    ///
-    /// 需同时满足：
-    /// 1. 至少 2 个共享实例（否则无对端可唤醒）。
-    /// 2. 加上「即将进入等待的当前线程」后，等待者数量仍未达到实例总数
-    ///    （否则所有实例都在等待，无对端能操作 → 死锁）。
-    ///
-    /// 调用方必须持有 `wait_lock`；`fetch_add(1)` 与 `wait` 在其保护下
-    /// 串行化，保证计数反映真实的等待状态。
-    ///
-    /// # Error
-    /// - `SingleInstance`：`ref_count <= 1`。
-    /// - `AllWaiting`：`waiting_readers + waiting_writers + 1 >= ref_count`。
     fn ensure_waitable(&self) -> ConcurrentRingResult<(), T> {
         let ref_count = self.ref_count.load(Ordering::Acquire);
         if ref_count <= 1 {
@@ -530,8 +497,6 @@ impl<T> Inner<T> {
         }
         let waiting_readers = self.lock_content.read_waiters.load(Ordering::Acquire);
         let waiting_writers = self.lock_content.write_waiters.load(Ordering::Acquire);
-        // `+ 1` 表示即将进入等待的当前线程；若加上它后 ≥ ref_count，
-        // 说明所有实例都进入等待，无人能作为对端操作 → 必然死锁。
         if waiting_readers + waiting_writers + 1 >= ref_count {
             return Err(ConcurrentRingError::new(
                 "all instances are blocked; no peer can wake this thread",
@@ -560,14 +525,12 @@ impl<T> Inner<T> {
     }
 
     fn push_slow(&self, value: T) -> ConcurrentRingResult<(), T> {
-        // 已满：若已启用 max_cap 则是硬上限 → Full
         if self.is_max_cap.load(Ordering::Acquire) {
             return Err(ConcurrentRingError::new(
                 "Full",
                 ConcurrentRingErrorKind::Full(value),
             ));
         }
-        // 不定长模式：阻塞获取全锁扩容（与 clear / lock() 同序）
         let _wg = self.lock_write_lock();
         let _rg = self.lock_read_gate_write();
         let cap = self.cap.load(Ordering::Acquire);
@@ -624,7 +587,8 @@ impl<T: Copy> Inner<T> {
             }
         }
         for i in first_len..n {
-            // SAFETY: 第二段物理下标从 0 开始。
+            // SAFETY: 第二段物理下标从 0 开始，均不在 [r, w) 内，未初始化；
+            // 持 write_lock 独占。
             unsafe {
                 slots[i - first_len].write(values[i]);
             }
@@ -653,7 +617,8 @@ impl<T: Copy> Inner<T> {
             }
         }
         for i in first_len..n {
-            // SAFETY: 第二段物理下标从 0 开始。
+            // SAFETY: 第二段物理下标从 0 开始，均在 [r, w) 内已初始化；
+            // 持 read_gate.write 独占。
             unsafe {
                 out[i] = slots[i - first_len].copy_out();
             }
@@ -726,7 +691,8 @@ impl<T: Copy> Inner<T> {
             }
         }
         for i in first_len..n {
-            // SAFETY: 第二段物理下标从 0 开始。
+            // SAFETY: 第二段物理下标从 0 开始，均在 [r, r+n) 内已初始化；
+            // 持 read_gate.read 共享锁，copy_out 只读。
             unsafe {
                 out[i] = slots[i - first_len].copy_out();
             }
@@ -860,15 +826,7 @@ impl<T: Copy> Inner<T> {
         }
     }
 
-    /// 完全无锁批量读：仅尝试获取 `read_gate.write`，冲突立即返回 `Locked(None)`。
-    ///
-    /// 语义与 [`read`] 一致（消耗数据、推进读指针、唤醒写者），但不阻塞：
-    /// - 锁被占用（例如另一个 `read` / `pop` / `clear` 或 `borrow` 正在运行）
-    ///   → `Locked(None)`，调用方可稍后重试。
-    /// - 缓冲区空 → `Ok(0)`（与 `read` 一致，不视为错误）。
-    /// - `out` 为空 → `Ok(0)`，完全不碰锁。
-    ///
-    /// 读不涉及扩容，因此只需 `read_gate.write` 一把锁，不触碰 `write_lock`。
+    /// 完全无锁批量读。
     pub fn try_read(&self, out: &mut [T]) -> ConcurrentRingResult<usize, T> {
         if out.is_empty() {
             return Ok(0);
@@ -895,9 +853,9 @@ impl<T> Inner<T> {
     /// 阻塞写入单元素。
     ///
     /// # Error
-    /// - `SingleInstance`：当前仅剩 1 个共享实例，无人可唤醒本线程。
-    /// - `AllWaiting`：所有实例（含即将进入等待的当前线程）都在等待，
-    ///   无人能作为对端操作 → 必然死锁。
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WriteRejected(Some(value))`：被 [`reject_waiting_writers`] 清空并拒绝，
+    ///   返回未写入的值，调用方可取回。
     pub fn push_wait(&self, value: T) -> ConcurrentRingResult<(), T> {
         let mut value = value;
         let mut guard = self.lock_wait_lock();
@@ -916,8 +874,8 @@ impl<T> Inner<T> {
                 Err(v) => {
                     value = v;
                     if self.is_max_cap.load(Ordering::Acquire) {
-                        // 固定模式：即将进入等待，先做安全检查
                         self.ensure_waitable()?;
+                        let gen_before = self.write_reject_gen.load(Ordering::Acquire);
                         self.lock_content
                             .write_waiters
                             .fetch_add(1, Ordering::Release);
@@ -925,8 +883,13 @@ impl<T> Inner<T> {
                         self.lock_content
                             .write_waiters
                             .fetch_sub(1, Ordering::Release);
+                        if self.write_reject_gen.load(Ordering::Acquire) != gen_before {
+                            return Err(ConcurrentRingError::new(
+                                "write rejected by reject_waiting_writers",
+                                ConcurrentRingErrorKind::WriteRejected(Some(value)),
+                            ));
+                        }
                     } else {
-                        // 不定长模式：持 wait_lock 下全锁扩容，随后 loop 重试
                         let _wg = self.lock_write_lock();
                         let _rg = self.lock_read_gate_write();
                         let cap = self.cap.load(Ordering::Acquire);
@@ -947,9 +910,6 @@ impl<T> Inner<T> {
     }
 
     /// 阻塞读取单元素。
-    ///
-    /// # Error
-    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn pop_wait(&self) -> ConcurrentRingResult<T, T> {
         let mut guard = self.lock_wait_lock();
         loop {
@@ -979,7 +939,9 @@ impl<T: Copy> Inner<T> {
     /// 阻塞写入至少 1 个元素，最多 `values.len()`。
     ///
     /// # Error
-    /// - `SingleInstance` / `AllWaiting`：同上。
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WriteRejected(None)`：进入等待时 `written == 0`（因为 `n > 0` 会先返回），
+    ///   被拒绝时输入 slice 仍在调用方手中。
     pub fn write_wait(&self, values: &[T]) -> ConcurrentRingResult<usize, T> {
         if values.is_empty() {
             return Ok(0);
@@ -998,6 +960,7 @@ impl<T: Copy> Inner<T> {
             }
             if self.is_max_cap.load(Ordering::Acquire) {
                 self.ensure_waitable()?;
+                let gen_before = self.write_reject_gen.load(Ordering::Acquire);
                 self.lock_content
                     .write_waiters
                     .fetch_add(1, Ordering::Release);
@@ -1005,6 +968,12 @@ impl<T: Copy> Inner<T> {
                 self.lock_content
                     .write_waiters
                     .fetch_sub(1, Ordering::Release);
+                if self.write_reject_gen.load(Ordering::Acquire) != gen_before {
+                    return Err(ConcurrentRingError::new(
+                        "write rejected by reject_waiting_writers",
+                        ConcurrentRingErrorKind::WriteRejected(None),
+                    ));
+                }
             } else {
                 let _wg = self.lock_write_lock();
                 let _rg = self.lock_read_gate_write();
@@ -1027,7 +996,9 @@ impl<T: Copy> Inner<T> {
     ///
     /// # Error
     /// - `TooLarge`：固定模式下 `values.len() > max_cap`。
-    /// - `SingleInstance` / `AllWaiting`：同上。
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WriteRejectedPartial { written }`：被 [`reject_waiting_writers`] 拒绝，
+    ///   `written` 为已成功写入的数量；未写入部分仍在调用方 slice 中。
     pub fn write_all(&self, values: &[T]) -> ConcurrentRingResult<(), T> {
         if values.is_empty() {
             return Ok(());
@@ -1059,6 +1030,7 @@ impl<T: Copy> Inner<T> {
             }
             if self.is_max_cap.load(Ordering::Acquire) {
                 self.ensure_waitable()?;
+                let gen_before = self.write_reject_gen.load(Ordering::Acquire);
                 self.lock_content
                     .write_waiters
                     .fetch_add(1, Ordering::Release);
@@ -1066,6 +1038,12 @@ impl<T: Copy> Inner<T> {
                 self.lock_content
                     .write_waiters
                     .fetch_sub(1, Ordering::Release);
+                if self.write_reject_gen.load(Ordering::Acquire) != gen_before {
+                    return Err(ConcurrentRingError::new(
+                        "write rejected by reject_waiting_writers",
+                        ConcurrentRingErrorKind::WriteRejectedPartial { written },
+                    ));
+                }
             } else {
                 let _wg = self.lock_write_lock();
                 let _rg = self.lock_read_gate_write();
@@ -1088,9 +1066,6 @@ impl<T: Copy> Inner<T> {
     }
 
     /// 阻塞读取至少 1 个元素。
-    ///
-    /// # Error
-    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn read_wait(&self, out: &mut [T]) -> ConcurrentRingResult<usize, T> {
         if out.is_empty() {
             return Ok(0);
@@ -1119,10 +1094,6 @@ impl<T: Copy> Inner<T> {
     }
 
     /// 阻塞读满 `out`。
-    ///
-    /// # Error
-    /// - `TooLarge`：固定模式下 `out.len() > max_cap`（参数误用）。
-    /// - `SingleInstance` / `AllWaiting`：同上。
     pub fn read_exact(&self, out: &mut [T]) -> ConcurrentRingResult<(), T> {
         if out.is_empty() {
             return Ok(());
@@ -1232,7 +1203,6 @@ impl<T> Inner<T> {
 
     /// 关闭上限：不加锁，仅以 store 顺序保证读者不会看到不一致中间态。
     pub fn disable_max_capacity(&self) {
-        // 先关标志，再置 0：读到 is_max_cap=false 的线程不使用 max_cap。
         self.is_max_cap.store(false, Ordering::Release);
         self.max_cap.store(0, Ordering::Release);
     }
@@ -1241,31 +1211,58 @@ impl<T> Inner<T> {
         {
             let _wg = self.lock_write_lock();
             let _rg = self.lock_read_gate_write();
-            let r = self.read_pos.load(Ordering::Acquire);
-            let w = self.write_pos.load(Ordering::Acquire);
-
-            if std::mem::needs_drop::<T>() {
-                let cap = self.cap.load(Ordering::Acquire);
-                // SAFETY: 持全锁独占 slots；[r, w) 内已初始化，take 后立即 drop。
-                let slots = unsafe { self.slots_ref() };
-                let mut i = r;
-                while i != w {
-                    let idx = i % cap;
-                    // SAFETY: idx 位于 [r, w) 内，槽位已初始化。
-                    unsafe {
-                        slots[idx].take();
-                    }
-                    i = i.wrapping_add(1);
-                }
-                self.read_pos.store(w, Ordering::Release);
-            } else {
-                // T 无 drop glue：无需逐槽 take，O(1)。
-                // 槽位内的旧字节仍在，但逻辑上视为未初始化；
-                // 后续 push/write 会用 MaybeUninit::write 覆盖（不读旧值）。
-                self.read_pos.store(w, Ordering::Release);
-            }
+            self.clear_locked();
         }
         self.wake_writers();
+    }
+
+    /// 清空缓冲区并拒绝所有当前阻塞的写者。
+    ///
+    /// 语义（“清空 + 拒绝”）：
+    /// 1. **清空**：本函数返回时，在其持锁清空的瞬间，缓冲区逻辑上为空
+    ///    （`read_pos == write_pos`，`[r, w)` 内已初始化槽位已 drop）。
+    /// 2. **拒绝当前等待者**：调用本函数那一刻已阻塞在 `not_full` 上的写者
+    ///    （`push_wait` / `write_wait` / `write_all` 的固定模式分支）会被
+    ///    `notify_all` 唤醒，并**必定**返回
+    ///    [`ConcurrentRingErrorKind::WriteRejected`] 或
+    ///    [`ConcurrentRingErrorKind::WriteRejectedPartial`]。
+    /// 3. **不影响之后的写入阻塞**：本函数只递增 `write_reject_gen`，
+    ///    不修改 `is_max_cap` / `max_cap` / `cap` 等状态；之后进入等待的
+    ///    写者加载到的代际已是新值，照常阻塞、照常被正常唤醒返回。
+    /// 4. **不需同步**：本函数非阻塞返回，不等待被唤醒的写者实际退出；
+    ///    返回后新写者可立即写入，因此“返回后缓冲区仍为空”不作为保证。
+    ///
+    /// 不定长模式（`is_max_cap == false`）的写者不进入 `not_full` 等待，
+    /// 因此不受影响：它们扩容重试会正常成功。
+    ///
+    /// # 返回值
+    /// 本函数获取 `wait_lock` 后、notify 前的 `write_waiters` 快照
+    /// （即“被通知的写者数”）。该值仅供日志/统计使用，不构成
+    /// “被拒绝者已退出”的语义保证。
+    ///
+    /// # 锁顺序
+    /// `wait_lock → write_lock → read_gate.write`，与阻塞写者的
+    /// `wait_lock → write_lock` 前缀、`clear` 的 `write_lock → read_gate.write`
+    /// 后缀一致，不存在锁序反转。
+    pub fn reject_waiting_writers(&self) -> usize {
+        let _wl = self.lock_wait_lock();
+        let _wg = self.lock_write_lock();
+        let _rg = self.lock_read_gate_write();
+
+        // 1. 清空（与 clear 同语义；O(1) 或逐槽 drop）。
+        self.clear_locked();
+
+        // 2. 递增拒绝代际：所有 gen_before < 新值的等待者醒来后即返回拒绝错误。
+        self.write_reject_gen.fetch_add(1, Ordering::AcqRel);
+
+        // 3. 唤醒所有当前等待的写者。
+        let waiters = self.lock_content.write_waiters.load(Ordering::Acquire);
+        if waiters > 0 {
+            self.lock_content.not_full.notify_all();
+        }
+
+        // _rg → _wg → _wl 按声明逆序自动 drop，解锁顺序正确。
+        waiters
     }
 }
 
@@ -1296,8 +1293,6 @@ impl<T> Inner<T> {
 
 impl<T> Inner<T> {
     // ---------- 唤醒辅助 ----------
-    // 注意：即使无等待者也必须获取 wait_lock，以建立 happens-before，
-    // 否则“刚准备进入等待的线程”可能看不到刚才的写入。
     fn wake_readers(&self) {
         let _wl = self.lock_wait_lock();
         if self.lock_content.read_waiters.load(Ordering::Acquire) > 0 {
@@ -1341,6 +1336,8 @@ impl<T> Debug for ConcurrentRingError<T> {
             ConcurrentRingErrorKind::MaxCapacityZero => "MaxCapacityZero",
             ConcurrentRingErrorKind::SingleInstance => "SingleInstance",
             ConcurrentRingErrorKind::AllWaiting => "AllWaiting",
+            ConcurrentRingErrorKind::WriteRejected(_) => "WriteRejected",
+            ConcurrentRingErrorKind::WriteRejectedPartial { .. } => "WriteRejectedPartial",
         };
         write!(
             f,
@@ -1362,50 +1359,39 @@ impl<T> std::error::Error for ConcurrentRingError<T> {}
 pub enum ConcurrentRingErrorKind<T> {
     Full(T),
     Locked(Option<T>),
-    /// 单次批量操作的请求量超过环形缓冲区容量上限。
-    ///
-    /// 与 `Full(T)` 语义不同：这是**参数非法**（数量本身就超出上限），
-    /// 任何时刻都不可能在一次调用内完成，调用方不应重试，而应改用
-    /// `write_wait` / `read_wait` 分批处理。
-    ///
-    /// **不携带任何数据**：错误原因只与「数量」有关，与具体元素无关；
-    /// 输入 slice 仍在调用方手中，无需回传。
     TooLarge,
     MaxCapacityZero,
-
-    /// 阻塞等待需要至少 2 个共享实例，但当前只有 1 个。
-    ///
-    /// 当调用 [`push_wait`] / [`pop_wait`] / [`write_wait`] / [`write_all`] /
-    /// [`read_wait`] / [`read_exact`] 且即将进入 `Condvar::wait` 时，若
-    /// `ref_count() <= 1`，说明没有其他持有者可以执行唤醒动作 —— 阻塞
-    /// 将永不返回，故立即返回此错误。
-    ///
-    /// **不携带数据**：错误原因与输入值无关。
     SingleInstance,
-
-    /// 阻塞等待会导致所有共享实例全部进入等待状态。
-    ///
-    /// 当即将进入 `Condvar::wait` 时，若「即将进入等待的当前线程 + 现有
-    /// 等待者」数量达到或超过共享实例总数（`ref_count()`），说明没有任何
-    /// 实例还能作为对端执行 `push` / `pop` 来产生唤醒事件 —— 阻塞将永不
-    /// 返回，故立即返回此错误。
-    ///
-    /// 与 [`SingleInstance`] 的关系：`ref_count == 1` 优先返回 `SingleInstance`
-    /// （语义更精确）；`ref_count >= 2` 且所有实例都在等待时返回 `AllWaiting`。
-    ///
-    /// **不携带数据**：错误原因与输入值无关。
     AllWaiting,
+
+    /// 写入被 [`Inner::reject_waiting_writers`] 清空并拒绝。
+    ///
+    /// - `push_wait`：`Some(未写入的值)`，调用方可取回。
+    /// - `write_wait`：`None`（进入等待时 `written == 0`；输入 slice 仍在
+    ///   调用方手中）。
+    ///
+    /// 被拒绝后**不应重试同一调用**：应检查缓冲区当前状态（可能已被其他
+    /// 写者填充），或改用非阻塞 API 重新尝试。之后新的阻塞写入不受影响。
+    WriteRejected(Option<T>),
+
+    /// 批量写入被 [`Inner::reject_waiting_writers`] 清空并拒绝，且已部分写入。
+    ///
+    /// `written` 为已成功写入的元素数；未写入部分 `values[written..]` 仍在
+    /// 调用方 slice 中（`write_all` 的 `values` 为 `&[T]`，不消耗所有权）。
+    ///
+    /// 与 `WriteRejected` 的关系：`write_all` 在 `written == 0` 时也可返回
+    /// `WriteRejectedPartial { written: 0 }`，但为语义清晰，本实现选择：
+    /// `write_all` 一律返回 `WriteRejectedPartial { written }`
+    /// （包括 `written == 0`），以便调用方统一处理“部分写入进度”。
+    WriteRejectedPartial {
+        written: usize,
+    },
 }
 
 // ============================================================
 // 全锁 Guard（引用 Inner<T>）
 // ============================================================
 
-/// 全锁模式的 RAII Guard，提供 Vec / VecDeque 风格的读写接口。
-///
-/// **字段声明顺序**：`_read_guard` 在前，`_write_guard` 在后。
-/// Rust 按声明顺序 drop 字段，故 `_read_guard` 先释放、`_write_guard` 后释放，
-/// 与获取顺序（write_lock → read_gate.write）相反 —— 正确的解锁顺序。
 pub struct ConcurrentRingGuard<'a, T> {
     ring: &'a Inner<T>,
     _read_guard: RwLockWriteGuard<'a, ()>,
@@ -1421,13 +1407,11 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
     }
 
     fn grow_if_needed(&mut self, min_extra: usize) {
-        // 固定模式不扩容。
         if self.ring.is_max_cap.load(Ordering::Acquire) {
             return;
         }
         let cap = self.ring.cap.load(Ordering::Acquire);
         let len = self.len();
-        // 目标容量：至少能容纳当前元素 + 额外 min_extra。
         let target = cap.saturating_mul(2).max(len + min_extra).max(1);
         if target > cap {
             self.ring.grow_locked(target);
@@ -1572,7 +1556,6 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
     }
 
     pub fn clear(&mut self) {
-        // 逐个 pop_front，每个 take 出的 T 立即 drop。
         while self.pop_front().is_some() {}
     }
 
@@ -1716,7 +1699,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
         let slots: &'a [Slot<T>] = unsafe { &*self.ring.slots.get() };
         // SAFETY: `IterMut<'a, T>` 只能由 `&'a mut ConcurrentRingGuard` 的
         // `iter_mut()` 构造，因此 Guard 的生命周期覆盖 `'a`，Guard 在 `'a` 内
-        // 持有全锁，期间无人能替换 `slots`。
+        // 持有全锁，期间无人能替换 `slots`；phys 互不重复保证无别名。
         unsafe { Some(&mut *slots[phys].get_mut_ptr()) }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {

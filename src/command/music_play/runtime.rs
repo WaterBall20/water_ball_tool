@@ -1,6 +1,6 @@
-use crate::command::music_play::decoder::{
-    Decoder, DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventSink,
-    DecoderEventType, DecoderResult,
+use crate::command::music_play::decoder_runtime::{
+    DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventSink, DecoderEventType,
+    DecoderResult,
 };
 use crate::command::music_play::effect::fade::FadeEffect;
 use crate::command::music_play::effect::runtime::PreEffectRuntime;
@@ -78,19 +78,20 @@ impl Runtime {
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         let mut player = Player::new()?;
         let decoder_track = Arc::new(Mutex::new(None));
+        //控制变量
+        let condvar = Arc::new(Condvar::new());
 
-        let play_object = PlayObject {
-            play_list: Arc::new(Mutex::new(play_list)),
-            player: player.clone(),
-            decoder_track: decoder_track.clone(),
-            next_content: NextContent {
+        let play_object = PlayObject::new(
+            Arc::new(Mutex::new(play_list)),
+            player.clone(),
+            decoder_track.clone(),
+            NextContent {
                 next_id: Arc::new(AtomicUsize::new(0)),
                 err_count: Arc::new(AtomicUsize::new(0)),
             },
-            time_metrics: player.time_metrics().clone(),
-        };
-        //控制变量
-        let condvar = Arc::new(Condvar::new());
+            player.time_metrics().clone(),
+            condvar.clone(),
+        );
         let run_stop = Arc::new(AtomicBool::new(false));
         let ui_content = Arc::new(Mutex::new(UIContent {
             ui_track: None,
@@ -402,6 +403,64 @@ impl Runtime {
     }
 }
 impl PlayObject {
+    fn new(
+        play_list: Arc<Mutex<PlayList>>,
+        player: Player,
+        decoder_track: Arc<Mutex<Option<Track>>>,
+        next_content: NextContent,
+        time_metrics: Arc<TimeMetrics>,
+        condvar: Arc<Condvar>,
+    ) -> Self {
+        {
+            let play_list = play_list.clone();
+            let player = player.clone();
+            let decoder_track = decoder_track.clone();
+            let next_content = next_content.clone();
+            let pre_effect_runtime = player.pre_effect_runtime().clone();
+            player
+                .decoder_runtime()
+                .clone()
+                .add_event(Box::new(DecoderEventDirectSink::new(move |e| {
+                    debug!("解码器事件触发：{e:?}");
+                    match e.result() {
+                        Ok(decoder_event) => match decoder_event {
+                            DecoderEventType::Eof => {
+                                if let Err(e) = Self::next_inner(
+                                    &play_list,
+                                    true,
+                                    player.clone(),
+                                    &decoder_track,
+                                    None,
+                                    &next_content,
+                                    &pre_effect_runtime,
+                                    &condvar,
+                                ) {
+                                    error!("自动换曲发生错误，err:{e}");
+                                }
+                            }
+                            DecoderEventType::Stop => {
+                                debug!("解码退出事件");
+                            }
+                        },
+                        Err(err) => {
+                            if let Err(e) = player.pause() {
+                                error!("暂停发生错误, err: {e}");
+                            }
+                            error!("发生解码错误事件, 将暂停： {err:?}");
+                        }
+                    }
+                })));
+        }
+
+        Self {
+            play_list,
+            player,
+            decoder_track,
+            next_content,
+            time_metrics,
+        }
+    }
+
     ///播放
     fn play(&self) -> Result<(), Box<dyn Error>> {
         self.player.play()
@@ -482,90 +541,47 @@ impl PlayObject {
             info!("换曲： {:?}", t.track());
             next_id.store(t.next_id(), Ordering::Release);
 
-            let mut decoder = loop {
-                let decoder = Decoder::new(
-                    t.track().path(),
-                    player.pre_effect_ring_buffer().clone(),
-                    player.pre_effect_runtime().clone(),
-                    player.time_metrics().clone(),
-                );
-                match decoder {
-                    Ok(decoder) => break decoder,
-                    Err(e) => {
-                        let err_action = Self::new_decoder_err_action_inner(&e, next_content);
-                        match err_action {
-                            DecoderErrorAction::Skip => {
-                                drop(play_list_lock); //必须提前释放，否则死锁
-                                return Self::next_inner(
-                                    play_list,
-                                    play_end,
-                                    player.clone(),
-                                    decoder_track,
-                                    ui_track,
-                                    next_content,
-                                    pre_effect_runtime,
-                                    condvar,
-                                );
-                            }
-                            DecoderErrorAction::AutoRetry => {}
-                            DecoderErrorAction::Pause => {
-                                if let Err(e) = player.pause() {
-                                    error!("暂停发生错误, err: {e}");
-                                }
-                                return Err(e);
-                            }
-                        }
+            loop {
+                if let Err(e) = {
+                    if play_end {
+                        player.set_decoder_path_no_clear(t.track().path())
+                    } else {
+                        player.set_decoder_path(t.track().path())
                     }
-                }
-            };
-
-            {
-                let condvar = condvar.clone();
-                let play_list = play_list.clone();
-                let track = t.track().clone();
-                let decoder_track = decoder_track.clone();
-                let player = player.clone();
-                let next_content = next_content.clone();
-                let pre_effect_runtime = pre_effect_runtime.clone();
-                decoder.add_event(Box::new(DecoderEventDirectSink::new(move |e| {
-                    debug!("解码器事件触发：{e:?}");
-                    match e.result() {
-                        Ok(decoder_event) => match decoder_event {
-                            DecoderEventType::Eof => {
-                                if let Err(e) = Self::next_inner(
-                                    &play_list,
-                                    true,
-                                    player.clone(),
-                                    &decoder_track,
-                                    None,
-                                    &next_content,
-                                    &pre_effect_runtime,
-                                    &condvar,
-                                ) {
-                                    error!("自动换曲发生错误，err:{e}");
-                                }
-                            }
-                            DecoderEventType::Stop => {
-                                debug!("解码退出事件, track: {track:?}");
-                            }
-                        },
-                        Err(err) => {
+                } {
+                    let err_action = Self::decoder_err_action_inner(&e, next_content);
+                    match err_action {
+                        DecoderErrorAction::Skip => {
+                            drop(play_list_lock); //必须提前释放，否则死锁
+                            return Self::next_inner(
+                                play_list,
+                                play_end,
+                                player.clone(),
+                                decoder_track,
+                                ui_track,
+                                next_content,
+                                pre_effect_runtime,
+                                condvar,
+                            );
+                        }
+                        DecoderErrorAction::AutoRetry => {}
+                        DecoderErrorAction::Pause => {
                             if let Err(e) = player.pause() {
                                 error!("暂停发生错误, err: {e}");
                             }
-                            error!("发生解码错误事件, 将暂停： {err:?}");
+                            return Err(e);
                         }
                     }
-                })));
+                } else {
+                    break;
+                };
             }
-            if play_end {
-                player.set_decoder_no_clear(decoder)?;
-            } else {
+
+            if !play_end {
                 if let Some(ui_track) = ui_track {
                     ui_track.replace(t.track().clone());
                     condvar.notify_all();
                 }
-                player.set_decoder(decoder)?;
             }
             decoder_track
                 .lock()
@@ -594,8 +610,8 @@ impl PlayObject {
         }
     }
 
-    //
-    fn new_decoder_err_action_inner(
+    //解码器错误内部处理
+    fn decoder_err_action_inner(
         e: &DecoderError,
         next_content: &NextContent,
     ) -> DecoderErrorAction {
@@ -606,7 +622,7 @@ impl PlayObject {
             return DecoderErrorAction::Pause;
         }
         match e.kind() {
-            DecoderErrorKind::IOError(io_e) => {
+            DecoderErrorKind::IoError(io_e) => {
                 match io_e.kind() {
                     // 永久性，建议跳过
                     io::ErrorKind::NotFound
@@ -649,8 +665,7 @@ impl PlayObject {
             | DecoderErrorKind::MakeAudioDecoderError(_)
             | DecoderErrorKind::GetProbeError(_)
             | DecoderErrorKind::NoSampleRate
-            | DecoderErrorKind::NoChannels
-            | DecoderErrorKind::ResamplerConstructionError(_) => {
+            | DecoderErrorKind::NoChannels => {
                 error!("创建解码器错误， 将跳过， err: {e}");
                 DecoderErrorAction::Skip
             }

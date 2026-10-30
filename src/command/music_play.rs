@@ -8,7 +8,7 @@ use std::error;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-mod decoder;
+mod decoder_runtime;
 pub mod effect;
 mod play_list;
 mod player;

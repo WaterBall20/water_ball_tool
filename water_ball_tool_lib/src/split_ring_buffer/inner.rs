@@ -105,13 +105,16 @@ pub(crate) struct Inner<T> {
     in_flight: AtomicUsize,
     clear_cvar: Condvar,
     mutation_mutex: Mutex<()>,
+    /// `reject_pending_writers` 代际计数。阻塞写端入口记录当前值，若后续
+    /// 发现值变化则返回拒绝错误。
+    rejection_epoch: AtomicUsize,
 }
 
 // SAFETY: 手写 `Send`。`UnsafeCell` / `MaybeUninit` 抑制自动推导。
 // - `T: Send` 足够：元素由写端 move 入、读端 move 出，跨线程一次转移。
 // - 同一槽位同一时刻只被一方访问；同端锁串行化。
-// - `clear` / `truncate_back` 在 `in_flight == 0` 时修改结构，期间读写端被
-//   `clear_pending` / `truncate_pending` 阻止进入。
+// - `clear` / `truncate_back` / `reject_pending_writers` 在 `in_flight == 0`
+//   时修改结构，期间读写端被 `clear_pending` / `truncate_pending` 阻止进入。
 unsafe impl<T: Send> Send for Inner<T> {}
 
 // SAFETY: 手写 `Sync`。`UnsafeCell` / `MaybeUninit` 抑制自动推导。
@@ -119,6 +122,7 @@ unsafe impl<T: Send> Send for Inner<T> {}
 // - 同端锁串行化；读写端区间分离。
 // - `clear_pending` / `truncate_pending` / `b_dropping` / `in_flight` 与
 //   `clear_cvar` / `mutation_mutex` 协调交换、截断与 drop。
+// - `rejection_epoch` 是原子计数，读写端以 `Acquire` / `Release` 读取。
 unsafe impl<T: Send> Sync for Inner<T> {}
 
 impl<T> Inner<T> {
@@ -137,6 +141,7 @@ impl<T> Inner<T> {
             in_flight: AtomicUsize::new(0),
             clear_cvar: Condvar::new(),
             mutation_mutex: Mutex::new(()),
+            rejection_epoch: AtomicUsize::new(0),
         }
     }
 
@@ -167,6 +172,18 @@ impl<T> Inner<T> {
         self.clear_pending.load(Ordering::Acquire)
             || self.truncate_pending.load(Ordering::Acquire)
             || self.is_full()
+    }
+
+    /// 当前拒绝代际。阻塞写端入口记录，循环内比较。
+    #[inline]
+    pub(crate) fn current_rejection_epoch(&self) -> usize {
+        self.rejection_epoch.load(Ordering::Acquire)
+    }
+
+    /// 检查是否已被拒绝。若 `rejection_epoch` 与入口记录不同则返回 `true`。
+    #[inline]
+    pub(crate) fn rejection_changed(&self, my_epoch: usize) -> bool {
+        self.rejection_epoch.load(Ordering::Acquire) != my_epoch
     }
 
     pub(crate) fn enter(&self) -> Option<InFlightGuard<'_, T>> {
@@ -203,8 +220,8 @@ impl<T> Inner<T> {
         let val = unsafe {
             // SAFETY: `enter` 已成功，保证 `clear_pending == false` 且
             // `truncate_pending == false`，`in_flight > 0`，因此 `clear` /
-            // `truncate_back` 不会在此刻交换 `a`/`b` 或修改 `write_pos`；
-            // 同端由端锁或 `&mut self` 串行化。
+            // `truncate_back` / `reject_pending_writers` 不会在此刻交换
+            // `a`/`b` 或修改 `write_pos`；同端由端锁或 `&mut self` 串行化。
             // `idx = r % cap` 且 `r != w`，槽位位于已初始化区间 `[r, w)`。
             // `ptr::read` move 出 `MaybeUninit<T>`，`assume_init` 取出 `T`。
             // 读取后槽位回到未初始化状态，`push_one` 可覆盖。
@@ -233,11 +250,11 @@ impl<T> Inner<T> {
         }
         let idx = w % self.cap;
         unsafe {
-            // SAFETY: `enter` 成功保证 `clear` / `truncate_back` 不修改 `a`
-            // 或 `write_pos`；同端由端锁或 `&mut self` 串行化。
-            // `used < cap` 保证 `idx = w % cap` 不在 `[r, w)` 内，槽位空闲。
-            // `ptr::write` 直接覆盖裸槽位（不 drop 旧值，槽位本就是 uninit）。
-            // 写入后 `write.pos.store(Release)` 发布。
+            // SAFETY: `enter` 成功保证 `clear` / `truncate_back` /
+            // `reject_pending_writers` 不修改 `a` 或 `write_pos`；同端由端锁
+            // 或 `&mut self` 串行化。`used < cap` 保证 `idx = w % cap` 不在
+            // `[r, w)` 内，槽位空闲。`ptr::write` 直接覆盖裸槽位（不 drop 旧
+            // 值，槽位本就是 uninit）。写入后 `write.pos.store(Release)` 发布。
             std::ptr::write((*self.a.get())[idx].get(), MaybeUninit::new(value));
         }
         self.write.pos.store(w.wrapping_add(1), Ordering::Release);
@@ -259,7 +276,101 @@ impl<T> Inner<T> {
         }
         let mut cp_guard = ClearPendingGuard::new(self);
 
-        // 等 b_dropping 空闲并占用
+        self.acquire_b_dropping(&mut cp_guard);
+        self.wait_in_flight_zero();
+
+        let (old_r, old_w) = unsafe {
+            // SAFETY: clear_pending == true 阻止新 pop/push 进入；in_flight == 0
+            // 保证已进入的底层操作均已退出；mutation_mutex 阻止并发 truncate /
+            // reject。`ptr::swap(a, b)` 交换两块 Cells 实例（Box 指针）；
+            // `swap(0)` 取回旧位置用于后续 drop 并归零新 a 的位置。
+            std::ptr::swap(self.a.get(), self.b.get());
+            let r = self.read.pos.swap(0, Ordering::AcqRel);
+            let w = self.write.pos.swap(0, Ordering::AcqRel);
+            (r, w)
+        };
+        // 由 BDroppingGuard 记录 old_r / old_w，用于 panic 兜底
+        self.set_b_range(&mut cp_guard, old_r, old_w);
+
+        self.open_rw_window_and_notify(&mut cp_guard);
+        self.drop_b_range(old_r, old_w);
+        self.release_b_dropping();
+    }
+
+    /// 清空缓冲区并拒绝所有当前 pending 的阻塞写端，让它们返回
+    /// `Kind::WriteRejected` / `Kind::WriteRejectedValue`。之后进入的写端不受
+    /// 影响。
+    ///
+    /// 本方法**不获取 `write.lock`**：与 `write_all`（持写端锁直至完成并在
+    /// `write_cvar` 等待）互斥由内部机制保证：
+    /// - `mutation_mutex` 串行化 `clear` / `truncate_back` / 本方法；
+    /// - `clear_pending` 阻止新的 `pop_one` / `push_one` 进入；
+    /// - 等 `in_flight == 0` 保证所有已进入的底层操作退出；
+    /// - 交换 `a`/`b` 与重置 `read.pos` / `write.pos` 在此期间无并发。
+    /// 若获取 `write.lock`，会与 `write_all` 形成死锁：`write_all` 持锁等待
+    /// `write_cvar`，而本方法拿不到锁无法 `notify_all`。
+    pub(crate) fn reject_pending_writers(&self) {
+        let _m = lock_ignore_poison(&self.mutation_mutex);
+
+        // 与 truncate_back 互斥
+        if self.truncate_pending.load(Ordering::Acquire) {
+            return;
+        }
+
+        // 与 clear / 另一个 reject 互斥
+        if self
+            .clear_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let mut cp_guard = ClearPendingGuard::new(self);
+
+        // 等 b_dropping 空闲并占用（防与 clear 的 drop b 并发）
+        self.acquire_b_dropping(&mut cp_guard);
+        // 等所有底层操作退出
+        self.wait_in_flight_zero();
+
+        // 交换 a/b、重置 pos（此时无并发访问）
+        let (old_r, old_w) = unsafe {
+            // SAFETY: clear_pending == true 阻止新 pop/push 进入；in_flight == 0
+            // 保证已进入的底层操作均已退出；mutation_mutex 阻止并发 truncate /
+            // clear。`ptr::swap(a, b)` 交换两块 Cells 实例（Box 指针）；`swap(0)`
+            // 取回旧位置用于后续 drop 并归零新 a 的位置。
+            std::ptr::swap(self.a.get(), self.b.get());
+            let r = self.read.pos.swap(0, Ordering::AcqRel);
+            let w = self.write.pos.swap(0, Ordering::AcqRel);
+            (r, w)
+        };
+        self.set_b_range(&mut cp_guard, old_r, old_w);
+
+        // 关键：递增 epoch 与 notify_all(write) 必须在同一 wait_mutex 临界区内，
+        // 且发生在 clear_pending 复位之前。
+        // - epoch 递增后，被唤醒的写端循环开头检查到 epoch 变化，返回拒绝；
+        // - clear_pending 仍为 true，新写端 enter 返回 None 进入 wait；
+        //   clear_pending 复位后，新写端进入时记录的 my_epoch 已是新值，不受影响。
+        // - 若先复位 clear_pending 再递增 epoch，新写端可能在递增之前拿锁进入
+        //   wait 并记录旧 epoch，然后被递增拒绝——语义错误。
+        {
+            let _g = lock_ignore_poison(&self.wait_mutex);
+            self.rejection_epoch.fetch_add(1, Ordering::AcqRel);
+            self.write.notify_all_locked();
+        }
+
+        // 复位 clear_pending，唤醒读写端与等待 clear / truncate 的写端
+        self.open_rw_window_and_notify(&mut cp_guard);
+
+        // 读写端已恢复；本线程独占 b，drop 其中 [old_r, old_w) 元素
+        self.drop_b_range(old_r, old_w);
+
+        // 复位 b_dropping，唤醒等待 clear / truncate 的线程
+        self.release_b_dropping();
+    }
+
+    // ----- clear / reject_pending_writers 共用的辅助步骤 -----
+
+    fn acquire_b_dropping(&self, cp_guard: &mut ClearPendingGuard<'_, T>) {
         loop {
             if self
                 .b_dropping
@@ -274,9 +385,10 @@ impl<T> Inner<T> {
             }
             drop(g);
         }
-        let mut bd_guard = BDroppingGuard::new(self);
+        cp_guard.b_acquired = true;
+    }
 
-        // 等 in_flight == 0
+    fn wait_in_flight_zero(&self) {
         loop {
             if self.in_flight.load(Ordering::Acquire) == 0 {
                 break;
@@ -287,21 +399,15 @@ impl<T> Inner<T> {
             }
             drop(g);
         }
+    }
 
-        // 交换 a/b、重置 pos
-        let (old_r, old_w) = unsafe {
-            // SAFETY: clear_pending == true 阻止新 pop/push 进入；in_flight == 0
-            // 保证已进入的底层操作均已退出；mutation_mutex 阻止并发 truncate_back。
-            // `ptr::swap(a, b)` 交换两块 Cells 实例（Box 指针）；`swap(0)` 取回
-            // 旧位置用于后续 drop 并归零新 a 的位置。
-            std::ptr::swap(self.a.get(), self.b.get());
-            let r = self.read.pos.swap(0, Ordering::AcqRel);
-            let w = self.write.pos.swap(0, Ordering::AcqRel);
-            (r, w)
-        };
-        bd_guard.set_range(old_r, old_w);
+    fn set_b_range(&self, cp_guard: &mut ClearPendingGuard<'_, T>, old_r: usize, old_w: usize) {
+        cp_guard.old_r = old_r;
+        cp_guard.old_w = old_w;
+        cp_guard.has_range = true;
+    }
 
-        // 清 clear_pending 并唤醒读写端 —— 读写窗口在此打开
+    fn open_rw_window_and_notify(&self, cp_guard: &mut ClearPendingGuard<'_, T>) {
         self.clear_pending.store(false, Ordering::Release);
         {
             let _g = lock_ignore_poison(&self.wait_mutex);
@@ -310,12 +416,13 @@ impl<T> Inner<T> {
             self.clear_cvar.notify_all();
         }
         cp_guard.mark_released();
+    }
 
-        // 原地 drop b 中 [old_r, old_w) 元素并置 uninit
+    fn drop_b_range(&self, old_r: usize, old_w: usize) {
         unsafe {
             // SAFETY: 仅访问 `b`；读写端只访问 `a`（新空块）。`b` 是旧 `a`，
-            // `[old_r, old_w)` 由写端初始化。`ptr::read` 后立即 `ptr::write(uninit)`，
-            // 即使 `T::drop` panic 也不会二次 drop。
+            // `[old_r, old_w)` 由写端初始化。`ptr::read` 后立即
+            // `ptr::write(uninit)`，即使 `T::drop` panic 也不会二次 drop。
             let b = &*self.b.get();
             let mut idx = old_r;
             while idx != old_w {
@@ -327,21 +434,15 @@ impl<T> Inner<T> {
                 idx = idx.wrapping_add(1);
             }
         }
+    }
 
+    fn release_b_dropping(&self) {
         self.b_dropping.store(false, Ordering::Release);
-        {
-            let _g = lock_ignore_poison(&self.wait_mutex);
-            self.clear_cvar.notify_all();
-        }
-        bd_guard.mark_released();
+        let _g = lock_ignore_poison(&self.wait_mutex);
+        self.clear_cvar.notify_all();
     }
 
     /// 保留 `[r, r + keep)`，丢弃尾部 `[r + keep, w)`，不交换 A/B。
-    ///
-    /// - 与 `clear` 通过 `mutation_mutex` 串行化，不能并发。
-    /// - 与底层读写通过 `truncate_pending` + 等 `in_flight == 0` 互斥。
-    /// - `clear` 或另一个 `truncate_back` 在进行时直接返回（无操作）。
-    /// - `keep >= len` 时视为保留全部，不修改指针。
     pub(crate) fn truncate_back(&self, keep: usize) {
         let _m = lock_ignore_poison(&self.mutation_mutex);
         if self.clear_pending.load(Ordering::Acquire) {
@@ -356,7 +457,6 @@ impl<T> Inner<T> {
         }
         let mut tp_guard = TruncatePendingGuard::new(self);
 
-        // 等 in_flight == 0
         loop {
             if self.in_flight.load(Ordering::Acquire) == 0 {
                 break;
@@ -378,9 +478,10 @@ impl<T> Inner<T> {
             unsafe {
                 // SAFETY: truncate_pending == true 阻止新 pop/push 进入；
                 // in_flight == 0 保证已进入的底层操作均已退出；
-                // mutation_mutex 阻止并发 clear。因此 `a` 与 read/write.pos
-                // 无并发访问。`[new_w, w)` 槽位已初始化；`ptr::read` 后立即
-                // `ptr::write(uninit)`，即使 `T::drop` panic 也不会二次 drop。
+                // mutation_mutex 阻止并发 clear / reject。因此 `a` 与
+                // read/write.pos 无并发访问。`[new_w, w)` 槽位已初始化；
+                // `ptr::read` 后立即 `ptr::write(uninit)`，即使 `T::drop`
+                // panic 也不会二次 drop。
                 let a = &*self.a.get();
                 let mut idx = new_w;
                 while idx != w {
@@ -414,9 +515,9 @@ impl<T> Inner<T> {
             return 0;
         }
         let a = unsafe {
-            // SAFETY: 调用方已持有 InFlightGuard，`clear` / `truncate_back`
-            // 不会交换 `a`/`b` 或修改 `write_pos`；同端由端锁或 `&mut self`
-            // 串行化，无并发读者。
+            // SAFETY: 调用方已持有 InFlightGuard，`clear` / `truncate_back` /
+            // `reject_pending_writers` 不会交换 `a`/`b` 或修改 `write_pos`；
+            // 同端由端锁或 `&mut self` 串行化，无并发读者。
             &*self.a.get()
         };
         out.reserve(n);
@@ -531,8 +632,8 @@ impl<T: Copy> Inner<T> {
         let start = r % self.cap;
         let first = (self.cap - start).min(n);
         let a = unsafe {
-            // SAFETY: InFlightGuard 保护下 clear / truncate 不会修改 a；同端
-            // 由端锁或 &mut self 串行化。
+            // SAFETY: InFlightGuard 保护下 clear / truncate / reject 不会修改
+            // a；同端由端锁或 &mut self 串行化。
             &*self.a.get()
         };
         for i in 0..first {
@@ -609,9 +710,20 @@ impl<T> Drop for InFlightGuard<'_, T> {
     }
 }
 
+/// `clear` / `reject_pending_writers` 的 panic 兜底。
+///
+/// 未 `mark_released` 时在 drop 中：
+/// - 若已记录 `b` 范围（交换发生），把 `b` 的 `[old_r, old_w)` 全部置 uninit，
+///   避免下次交换后读到残留；
+/// - 复位 `clear_pending`，唤醒所有等待方；
+/// - 若已占用 `b_dropping`，复位它并唤醒等待 clear 的线程。
 struct ClearPendingGuard<'a, T> {
     inner: &'a Inner<T>,
     released: bool,
+    b_acquired: bool,
+    has_range: bool,
+    old_r: usize,
+    old_w: usize,
 }
 
 impl<'a, T> ClearPendingGuard<'a, T> {
@@ -619,6 +731,10 @@ impl<'a, T> ClearPendingGuard<'a, T> {
         Self {
             inner,
             released: false,
+            b_acquired: false,
+            has_range: false,
+            old_r: 0,
+            old_w: 0,
         }
     }
     fn mark_released(&mut self) {
@@ -629,12 +745,30 @@ impl<'a, T> ClearPendingGuard<'a, T> {
 impl<T> Drop for ClearPendingGuard<'_, T> {
     fn drop(&mut self) {
         if !self.released {
-            // panic 兜底：复位 clear_pending 并唤醒读写端与等待 clear 的写端。
+            if self.has_range {
+                unsafe {
+                    // SAFETY: 仅访问 `b`；`b_dropping == true` 阻止其他 clear /
+                    // reject 交换 `a`/`b`；读写端只访问 `a`。
+                    // `ptr::write(b[slot], uninit)` 覆盖 `[old_r, old_w)` 内
+                    // 槽位；已 drop 的槽位再次置 uninit 无副作用，未 drop 的
+                    // 槽位被丢弃（泄漏资源但不破坏结构安全）。
+                    let b = &*self.inner.b.get();
+                    let mut idx = self.old_r;
+                    while idx != self.old_w {
+                        let slot = idx % self.inner.cap;
+                        std::ptr::write(b[slot].get(), MaybeUninit::uninit());
+                        idx = idx.wrapping_add(1);
+                    }
+                }
+            }
             self.inner.clear_pending.store(false, Ordering::Release);
             let _g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.notify_all_locked();
             self.inner.write.notify_all_locked();
             self.inner.clear_cvar.notify_all();
+            if self.b_acquired {
+                self.inner.b_dropping.store(false, Ordering::Release);
+            }
         }
     }
 }
@@ -671,59 +805,6 @@ impl<T> Drop for TruncatePendingGuard<'_, T> {
     }
 }
 
-struct BDroppingGuard<'a, T> {
-    inner: &'a Inner<T>,
-    released: bool,
-    old_r: usize,
-    old_w: usize,
-    has_range: bool,
-}
-
-impl<'a, T> BDroppingGuard<'a, T> {
-    fn new(inner: &'a Inner<T>) -> Self {
-        Self {
-            inner,
-            released: false,
-            old_r: 0,
-            old_w: 0,
-            has_range: false,
-        }
-    }
-    fn set_range(&mut self, old_r: usize, old_w: usize) {
-        self.old_r = old_r;
-        self.old_w = old_w;
-        self.has_range = true;
-    }
-    fn mark_released(&mut self) {
-        self.released = true;
-    }
-}
-
-impl<T> Drop for BDroppingGuard<'_, T> {
-    fn drop(&mut self) {
-        if !self.released {
-            if self.has_range {
-                unsafe {
-                    // SAFETY: 仅访问 `b`；`b_dropping == true` 阻止其他 `clear`
-                    // 交换 `a`/`b`；读写端只访问 `a`。`ptr::write(b[slot], uninit)`
-                    // 覆盖 `[old_r, old_w)` 内槽位；已 drop 的槽位再次置 uninit
-                    // 无副作用，未 drop 的槽位被丢弃（泄漏资源但不破坏结构安全）。
-                    let b = &*self.inner.b.get();
-                    let mut idx = self.old_r;
-                    while idx != self.old_w {
-                        let slot = idx % self.inner.cap;
-                        std::ptr::write(b[slot].get(), MaybeUninit::uninit());
-                        idx = idx.wrapping_add(1);
-                    }
-                }
-            }
-            self.inner.b_dropping.store(false, Ordering::Release);
-            let _g = lock_ignore_poison(&self.inner.wait_mutex);
-            self.inner.clear_cvar.notify_all();
-        }
-    }
-}
-
 impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         let r = self.read.pos.load(Ordering::Relaxed);
@@ -744,7 +825,7 @@ impl<T> Drop for Inner<T> {
             }
             idx = idx.wrapping_add(1);
         }
-        // b 由 clear / truncate_back 保证全 uninit；若从未 clear / truncate，
-        // b 保持初始 uninit。故不遍历 b。
+        // b 由 clear / truncate_back / reject_pending_writers 保证全 uninit；
+        // 若从未执行，b 保持初始 uninit。故不遍历 b。
     }
 }

@@ -486,11 +486,14 @@ fn clear_wakes_blocked_writers() {
     let r = ring.clone();
     let writer = thread::spawn(move || r.write_wait(&[3, 4]));
     thread::sleep(Duration::from_millis(50));
-    assert_eq!(ring.len(), 2);
+    assert_eq!(ring.len(), 2); // 写者阻塞期间，ring 仍满
     ring.clear();
-    assert!(ring.is_empty());
+    // 注意：clear 会立即唤醒写者，写者可能在 clear 返回后立即写入。
+    // 这里不能断言 ring.is_empty()——存在竞态。
+    // 正确做法：join 写者，验证最终数据。
     let n = expect_ok(join_ok(writer));
     assert_eq!(n, 2);
+    assert_eq!(ring.len(), 2); // 写者已写入 [3, 4]
     let mut buf = [0u32; 2];
     assert_eq!(ring.read(&mut buf), 2);
     assert_eq!(buf, [3, 4]);
@@ -1670,4 +1673,464 @@ fn concurrent_push_wait_to_indefinite_mode() {
     }
     got.sort();
     assert_eq!(got, (0..total as u32).collect::<Vec<_>>());
+}
+
+// ==================== reject_waiting_writers ====================
+
+// ---------- 测试辅助 ----------
+
+/// 轮询等待至少 `expected` 个写者阻塞在 `not_full` 上。
+///
+/// 依赖 `mod test` 作为子模块可访问父模块私有字段（`ConcurrentRing::inner`
+/// → `Inner::lock_content` → `LockContent::write_waiters`）。若模块结构
+/// 不满足，可改用 `thread::sleep(Duration::from_millis(50))`。
+fn wait_writers_blocked<T>(ring: &ConcurrentRing<T>, expected: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = ring.inner.lock_content.write_waiters.load(Ordering::SeqCst);
+        if n >= expected {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timeout: expected at least {} blocked writers, got {}",
+                expected, n
+            );
+        }
+        spin_loop();
+    }
+}
+
+// ---------- 基础行为 ----------
+
+#[test]
+fn reject_with_no_waiters_returns_zero_and_clears() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
+    ring.write(&[1, 2, 3]);
+    assert_eq!(ring.len(), 3);
+
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 0, "no waiters should be notified");
+    assert!(ring.is_empty(), "ring must be cleared even with no waiters");
+}
+
+#[test]
+fn reject_on_empty_ring_is_noop() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(4));
+    assert!(ring.is_empty());
+
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 0);
+    assert!(ring.is_empty());
+
+    // 之后可以正常使用
+    assert!(ring.push(1).is_ok());
+    assert_eq!(ring.pop(), Some(1));
+}
+
+// ---------- 单个写者被拒绝 ----------
+
+#[test]
+fn reject_single_blocked_writer_returns_value() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+    assert!(ring.push(1).is_ok());
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let res = r.push_wait(42);
+        send_ok(&tx, res);
+    });
+
+    wait_writers_blocked(&ring, 1);
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 1);
+
+    let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+    let err = expect_err(res);
+    if !matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(Some(42))) {
+        panic!("expected WriteRejected(Some(42)), got {:?}", err);
+    }
+
+    join_ok(handle);
+    assert!(ring.is_empty(), "ring must be empty after reject");
+}
+
+// ---------- 多个写者全部被拒绝 ----------
+
+#[test]
+fn reject_multiple_blocked_writers_all_rejected() {
+    const N: u32 = 4;
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+    assert!(ring.push(0).is_ok());
+
+    let mut handles = Vec::with_capacity(N as usize);
+    let mut receivers = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let r = ring.clone();
+        let (tx, rx) = mpsc::channel();
+        receivers.push(rx);
+        handles.push(thread::spawn(move || {
+            let res = r.push_wait(100 + i);
+            send_ok(&tx, res);
+        }));
+    }
+
+    wait_writers_blocked(&ring, N as usize);
+    let notified = ring.reject_waiting_writers();
+    assert!(notified >= N as usize, "notified {} < {}", notified, N);
+
+    let mut seen = [false; N as usize];
+    for rx in &receivers {
+        let res = recv_timeout_ok(rx, Duration::from_secs(5));
+        let err = expect_err(res);
+        match &err.kind {
+            ConcurrentRingErrorKind::WriteRejected(Some(v)) => {
+                let v = *v;
+                assert!(v >= 100 && v < 100 + N, "unexpected value {}", v);
+                let idx = (v - 100) as usize;
+                assert!(!seen[idx], "duplicate writer value {}", v);
+                seen[idx] = true;
+            }
+            _ => panic!("expected WriteRejected, got {:?}", err),
+        }
+    }
+    for (i, s) in seen.iter().enumerate() {
+        assert!(*s, "writer {} never returned", i);
+    }
+
+    for h in handles {
+        join_ok(h);
+    }
+    assert!(ring.is_empty());
+}
+
+// ---------- write_wait / write_all 被拒绝 ----------
+
+#[test]
+fn reject_blocked_write_wait_returns_none() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+    assert!(ring.push(1).is_ok());
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let res = r.write_wait(&[10, 20]);
+        send_ok(&tx, res);
+    });
+
+    wait_writers_blocked(&ring, 1);
+    let notified = ring.reject_waiting_writers();
+    assert!(notified >= 1);
+
+    let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+    let err = expect_err(res);
+    if !matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(None)) {
+        panic!("expected WriteRejected(None), got {:?}", err);
+    }
+
+    join_ok(handle);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn reject_write_all_partial_returns_written_count() {
+    // cap = 3；先占 1 个位置，write_all 只能写 2 个，随后阻塞等待第 3 个。
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(3));
+    assert!(ring.push(1).is_ok());
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let res = r.write_all(&[10u32, 20, 30]);
+        send_ok(&tx, res);
+    });
+
+    wait_writers_blocked(&ring, 1);
+    let notified = ring.reject_waiting_writers();
+    assert!(notified >= 1);
+
+    let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+    let err = expect_err(res);
+    if !matches!(
+        &err.kind,
+        ConcurrentRingErrorKind::WriteRejectedPartial { written: 2 }
+    ) {
+        panic!(
+            "expected WriteRejectedPartial {{ written: 2 }}, got {:?}",
+            err
+        );
+    }
+
+    join_ok(handle);
+    assert!(ring.is_empty());
+}
+
+#[test]
+fn reject_write_all_zero_written_returns_partial_zero() {
+    // cap = 2；先填满，write_all 一个都写不进去，阻塞后应被拒绝且 written = 0。
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    assert!(ring.push(1).is_ok());
+    assert!(ring.push(2).is_ok());
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let res = r.write_all(&[10u32, 20]);
+        send_ok(&tx, res);
+    });
+
+    wait_writers_blocked(&ring, 1);
+    let notified = ring.reject_waiting_writers();
+    assert!(notified >= 1);
+
+    let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+    let err = expect_err(res);
+    if !matches!(
+        &err.kind,
+        ConcurrentRingErrorKind::WriteRejectedPartial { written: 0 }
+    ) {
+        panic!(
+            "expected WriteRejectedPartial {{ written: 0 }}, got {:?}",
+            err
+        );
+    }
+
+    join_ok(handle);
+    assert!(ring.is_empty());
+}
+
+// ---------- 拒绝后新写者不受影响 ----------
+
+#[test]
+fn reject_does_not_affect_subsequent_writers() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    assert!(ring.push(1).is_ok());
+    assert!(ring.push(2).is_ok());
+
+    // 第一个写者阻塞 → 被拒绝
+    let r1 = ring.clone();
+    let (tx1, rx1) = mpsc::channel();
+    let h1 = thread::spawn(move || {
+        let res = r1.push_wait(10);
+        send_ok(&tx1, res);
+    });
+    wait_writers_blocked(&ring, 1);
+    let _ = ring.reject_waiting_writers();
+    let res1 = recv_timeout_ok(&rx1, Duration::from_secs(5));
+    let err1 = expect_err(res1);
+    if !matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))) {
+        panic!("expected first writer rejected with 10, got {:?}", err1);
+    }
+    join_ok(h1);
+    assert!(ring.is_empty());
+
+    // 再次填满，新写者阻塞
+    assert!(ring.push(3).is_ok());
+    assert!(ring.push(4).is_ok());
+    let r2 = ring.clone();
+    let (tx2, rx2) = mpsc::channel();
+    let h2 = thread::spawn(move || {
+        let res = r2.push_wait(20);
+        send_ok(&tx2, res);
+    });
+    wait_writers_blocked(&ring, 1);
+
+    // 正常 pop 唤醒 → 应成功，不被拒绝
+    assert_eq!(ring.pop(), Some(3));
+    let res2 = recv_timeout_ok(&rx2, Duration::from_secs(5));
+    expect_ok(res2);
+    join_ok(h2);
+    assert_eq!(ring.len(), 2, "ring should contain 4 and 20");
+}
+
+#[test]
+fn reject_then_push_wait_succeeds_immediately() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    assert!(ring.push(1).is_ok());
+    assert!(ring.push(2).is_ok());
+
+    // 制造一次拒绝
+    let r1 = ring.clone();
+    let (tx1, rx1) = mpsc::channel();
+    let h1 = thread::spawn(move || {
+        let res = r1.push_wait(10);
+        send_ok(&tx1, res);
+    });
+    wait_writers_blocked(&ring, 1);
+    let _ = ring.reject_waiting_writers();
+    let _ = recv_timeout_ok(&rx1, Duration::from_secs(5));
+    join_ok(h1);
+    assert!(ring.is_empty());
+
+    // ring 已空：新 push_wait 应立即成功（不能被旧的拒绝波及）
+    let r2 = ring.clone();
+    let (tx2, rx2) = mpsc::channel();
+    let h2 = thread::spawn(move || {
+        let res = r2.push_wait(99);
+        send_ok(&tx2, res);
+    });
+    let res2 = recv_timeout_ok(&rx2, Duration::from_secs(5));
+    expect_ok(res2);
+    join_ok(h2);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring.pop(), Some(99));
+}
+
+// ---------- 不定长模式不受影响 ----------
+
+#[test]
+fn reject_unbounded_mode_clears_and_no_waiters() {
+    let ring = ConcurrentRing::<u32>::new();
+    assert!(ring.push(1).is_ok());
+    assert!(ring.push(2).is_ok());
+    assert_eq!(ring.len(), 2);
+
+    // 不定长模式无写者阻塞在 not_full，reject 仅清空
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 0);
+    assert!(ring.is_empty());
+
+    // 之后的 push_wait 仍能正常扩容成功
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let h = thread::spawn(move || {
+        let res = r.push_wait(99);
+        send_ok(&tx, res);
+    });
+    let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+    expect_ok(res);
+    join_ok(h);
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring.pop(), Some(99));
+}
+
+// ---------- 多次拒绝相互独立 ----------
+
+#[test]
+fn multiple_rejects_are_independent() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+    assert!(ring.push(0).is_ok());
+
+    // 第一次拒绝
+    let r1 = ring.clone();
+    let (tx1, rx1) = mpsc::channel();
+    let h1 = thread::spawn(move || {
+        let res = r1.push_wait(10);
+        send_ok(&tx1, res);
+    });
+    wait_writers_blocked(&ring, 1);
+    let _ = ring.reject_waiting_writers();
+    let res1 = recv_timeout_ok(&rx1, Duration::from_secs(5));
+    let err1 = expect_err(res1);
+    if !matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))) {
+        panic!("expected first writer rejected with 10, got {:?}", err1);
+    }
+    join_ok(h1);
+    assert!(ring.is_empty());
+
+    // 第二次拒绝，只应拒绝第二次进入等待的写者
+    assert!(ring.push(0).is_ok());
+    let r2 = ring.clone();
+    let (tx2, rx2) = mpsc::channel();
+    let h2 = thread::spawn(move || {
+        let res = r2.push_wait(20);
+        send_ok(&tx2, res);
+    });
+    wait_writers_blocked(&ring, 1);
+    let _ = ring.reject_waiting_writers();
+    let res2 = recv_timeout_ok(&rx2, Duration::from_secs(5));
+    let err2 = expect_err(res2);
+    if !matches!(&err2.kind, ConcurrentRingErrorKind::WriteRejected(Some(20))) {
+        panic!("expected second writer rejected with 20, got {:?}", err2);
+    }
+    join_ok(h2);
+    assert!(ring.is_empty());
+}
+
+// ---------- 返回值（通知数）准确 ----------
+
+#[test]
+fn reject_returns_actual_waiter_count() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+    assert!(ring.push(0).is_ok());
+
+    let mut receivers = Vec::new();
+    let mut handles = Vec::new();
+    for i in 0..3u32 {
+        let r = ring.clone();
+        let (tx, rx) = mpsc::channel();
+        receivers.push(rx);
+        handles.push(thread::spawn(move || {
+            let res = r.push_wait(10 + i);
+            send_ok(&tx, res);
+        }));
+    }
+    wait_writers_blocked(&ring, 3);
+
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 3, "should return exactly 3 waiters");
+
+    for rx in receivers {
+        let res = recv_timeout_ok(&rx, Duration::from_secs(5));
+        let _ = expect_err(res);
+    }
+    for h in handles {
+        join_ok(h);
+    }
+    assert!(ring.is_empty());
+}
+
+// ---------- 清空时正确 drop ----------
+
+#[test]
+fn reject_drops_all_elements() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let ring = expect_ok(ConcurrentRing::<DropCounter>::new_max_capacity(4));
+    assert!(ring.push(DropCounter::new(1, counter.clone())).is_ok());
+    assert!(ring.push(DropCounter::new(2, counter.clone())).is_ok());
+    assert!(ring.push(DropCounter::new(3, counter.clone())).is_ok());
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+    let notified = ring.reject_waiting_writers();
+    assert_eq!(notified, 0, "no writers blocked");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "all elements must be dropped by reject"
+    );
+    assert!(ring.is_empty());
+}
+
+// ---------- 错误变体的 Debug / Display ----------
+
+#[test]
+fn reject_error_debug_display() {
+    let e: ConcurrentRingError<u32> = ConcurrentRingError::new(
+        "write rejected by reject_waiting_writers",
+        ConcurrentRingErrorKind::WriteRejected(Some(7)),
+    );
+    let debug = format!("{:?}", e);
+    assert!(
+        debug.contains("WriteRejected"),
+        "debug should contain WriteRejected, got: {}",
+        debug
+    );
+    let display = format!("{}", e);
+    assert!(
+        display.contains("rejected"),
+        "display should contain message, got: {}",
+        display
+    );
+
+    let e2: ConcurrentRingError<u32> = ConcurrentRingError::new(
+        "write rejected by reject_waiting_writers",
+        ConcurrentRingErrorKind::WriteRejectedPartial { written: 3 },
+    );
+    let debug2 = format!("{:?}", e2);
+    assert!(
+        debug2.contains("WriteRejectedPartial"),
+        "debug should contain WriteRejectedPartial, got: {}",
+        debug2
+    );
 }
