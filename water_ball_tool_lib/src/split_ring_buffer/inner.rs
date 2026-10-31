@@ -443,6 +443,9 @@ impl<T> Inner<T> {
     }
 
     /// 保留 `[r, r + keep)`，丢弃尾部 `[r + keep, w)`，不交换 A/B。
+    ///
+    /// 调用方不得持 `write.lock`：`write_all` 会持写端锁等待空位，本方法若
+    /// 也持该锁，两者将互相等待（本方法本应释放空间）。
     pub(crate) fn truncate_back(&self, keep: usize) {
         let _m = lock_ignore_poison(&self.mutation_mutex);
         if self.clear_pending.load(Ordering::Acquire) {

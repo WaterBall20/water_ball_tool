@@ -302,6 +302,9 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 - `//AI===` / `//AI_END===` are code change-region markers.
 - Every modified, added, or removed code segment MUST be wrapped in paired markers (`//AI===` start, `//AI_END===` end).
 - The start marker may carry a one-line note describing the change.
+- Markers wrap code only, never documentation: do NOT put a marker inside or around `///` / `//!` doc comments (a plain
+  `//` line between doc lines silently drops the following doc text). A doc-comment-only change needs no marker at all;
+  when code and its doc comment change together, mark only the code.
 
 ### gakumasu
 

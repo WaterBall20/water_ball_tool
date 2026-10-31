@@ -144,6 +144,10 @@ impl<T> LockedWriter<T> {
     /// `keep >= len` 时不丢弃任何元素。`clear` 或另一个 `truncate_back` 正在
     /// 进行时直接返回（无操作）。
     ///
+    /// 不获取写端锁：`write_all` 会持写端锁等待空位，若本方法也抢写端锁，
+    /// 两者将互相等待（本方法本应释放空间）。互斥由内部的 `mutation_mutex` +
+    /// `truncate_pending` 保证。
+    ///
     /// # 示例
     ///
     /// ```
@@ -157,8 +161,9 @@ impl<T> LockedWriter<T> {
     /// assert_eq!(reader.pop().as_deref(), Some("a"));
     /// ```
     pub fn truncate_back(&self, keep: usize) {
-        let _w = lock_ignore_poison(&self.inner.write.lock);
+        //AI=== 不再获取写端锁，避免与持锁等待空位的 write_all 互相等待。
         self.inner.truncate_back(keep);
+        //AI_END===
     }
 
     /// 清空缓冲区并拒绝当前所有 pending 的阻塞写端，让它们返回

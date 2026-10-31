@@ -1,7 +1,8 @@
 //! 阻塞等待、对端关闭、CannotWait、read_exact / write_all。
 
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::split_ring_buffer::*;
 
@@ -188,4 +189,41 @@ fn writer_drop_wakes_multiple_readers() {
     let res2 = h2.join().expect("reader2 thread should not panic");
     assert!(matches!(res1, Err(ref e) if matches!(e.kind, Kind::CannotWait)));
     assert!(matches!(res2, Err(ref e) if matches!(e.kind, Kind::CannotWait)));
+}
+
+// ---------- truncate_back 与阻塞写端 ----------
+
+#[test]
+fn truncate_back_unblocks_waiting_write_all() {
+    let (reader, writer) = locked_ring_buffer::<u8>(4);
+    writer.write_all(&[1, 2, 3, 4]).expect("write_all should succeed"); // 满
+    let w2 = writer.clone();
+    let h = thread::spawn(move || w2.write_all(&[5]));
+
+    //AI=== 等到写线程持写端锁（try_push 返回 Locked）：此时它正阻塞等待空位。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match writer.try_push(0) {
+            Err(e) if matches!(e.kind, Kind::Locked) => break,
+            _ if Instant::now() > deadline => panic!("write_all never held the write lock"),
+            _ => thread::yield_now(),
+        }
+    }
+    //AI_END===
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        writer.truncate_back(2);
+        let _ = tx.send(());
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("truncate_back must not wait for the blocked write_all");
+
+    // 截断保留前 2 个元素，被阻塞的写端随后追加 5。
+    let mut buf = [0u8; 3];
+    reader.read_exact(&mut buf).expect("read_exact should succeed");
+    assert_eq!(buf, [1, 2, 5]);
+    h.join()
+        .expect("writer thread should not panic")
+        .expect("write_all should succeed");
 }
