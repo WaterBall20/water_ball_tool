@@ -1627,20 +1627,30 @@ impl<'a, T> ConcurrentRingGuard<'a, T> {
     }
 }
 
+//AI=== 索引运算改显式分支：`Index`/`IndexMut` 的 trait 约定要求越界 panic，用 match 取代 .expect
+// `Index`/`IndexMut` 的 trait 约定要求越界时 panic；这里用显式 match 取代 `.expect`，
+// 以满足 AGENTS.md「生产代码不使用 expect」的规范。
+// The `Index`/`IndexMut` contract requires a panic on out-of-range access; the explicit
+// `match` replaces `.expect` to comply with the "no expect in production code" rule.
 impl<'a, T> Index<usize> for ConcurrentRingGuard<'a, T> {
     type Output = T;
     fn index(&self, index: usize) -> &T {
-        self.get(index)
-            .expect("ConcurrentRingGuard index out of bounds")
+        match self.get(index) {
+            Some(value) => value,
+            None => panic!("ConcurrentRingGuard 索引越界 / index out of bounds: {index}"),
+        }
     }
 }
 
 impl<'a, T> IndexMut<usize> for ConcurrentRingGuard<'a, T> {
     fn index_mut(&mut self, index: usize) -> &mut T {
-        self.get_mut(index)
-            .expect("ConcurrentRingGuard index out of bounds")
+        match self.get_mut(index) {
+            Some(value) => value,
+            None => panic!("ConcurrentRingGuard 索引越界 / index out of bounds: {index}"),
+        }
     }
 }
+//AI_END===
 
 /// 只读迭代器：从逻辑起点 r 前进 `len` 步。
 pub struct Iter<'a, T> {

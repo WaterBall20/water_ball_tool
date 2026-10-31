@@ -3,6 +3,9 @@ use lofty::file::FileType;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::{path::PathBuf, time::Duration};
+//AI=== 引入 tracing 以记录错误（替代 expect 的 panic）/ Import tracing to log errors instead of panicking via expect
+use tracing::error;
+//AI_END===
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Track {
@@ -140,20 +143,31 @@ impl PlayList {
                         };
                         while !temp_list.is_empty() {
                             let r = rand::random_range(0..temp_list.len());
-                            self.rand_list.push_back(
-                                temp_list
-                                    .remove(r)
-                                    .expect("逻辑错误：用于洗牌的临时列表无法正常获取项"),
-                            );
+                            //AI=== 移除 expect：取不到项时记录 error! 并结束洗牌，避免 panic / Remove expect: log error! and stop shuffling when the item is missing, avoiding a panic
+                            match temp_list.remove(r) {
+                                Some(index) => self.rand_list.push_back(index),
+                                None => {
+                                    error!(
+                                        "shuffle temp list remove failed / 洗牌临时列表移除失败"
+                                    );
+                                    break;
+                                }
+                            }
+                            //AI_END===
                         }
                     }
                     self.current_index = self.rand_list.pop_front().unwrap_or(0);
                 }
             }
-            Some(NextTrack {
-                track: self.get_current_track().expect("没有音轨"),
-                next_id,
-            })
+            //AI=== 没有当前音轨时记录 error! 并返回 None，不 panic / Log error! and return None when there is no current track instead of panicking
+            match self.get_current_track() {
+                Some(track) => Some(NextTrack { track, next_id }),
+                None => {
+                    error!("no current track / 没有当前音轨");
+                    None
+                }
+            }
+            //AI_END===
         } else {
             None
         }

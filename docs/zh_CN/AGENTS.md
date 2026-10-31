@@ -2,28 +2,42 @@
 
 > **语言**: [English](../AGENTS.md) | 简体中文
 
-Rust 2024 CLI 工具箱。两个命令：`ff`（并行文件搜索器）和 `wbfp`（自定义二进制打包格式）。
+Rust 2024 workspace CLI 工具箱。三个命令：`ff`（并行文件搜索器，可选哈希）、`wbfp`（自定义二进制打包格式）和
+`mp`（终端音乐播放器）。
 
 ## 命令
 
 ```bash
-cargo build --release           # 发布构建
-cargo check                     # 仅编译检查（快速）
-cargo clippy                    # 代码检查
-cargo test                      # 跳过长时间测试（#[ignore] 自动处理）
+cargo build --release          # 发布构建
+cargo build --features debug-no-audio # 跳过音频处理的调试构建（见「构建选项」）
+cargo --config .cargo/native-config.toml build --release # 本机优化构建 → target/native
+cargo check                    # 仅编译检查（快速）
+cargo clippy                   # 代码检查
+cargo test                     # 跳过长时间测试（#[ignore] 自动处理）
 cargo test -- --include-ignored # 包含长时间测试（主分支推送时全量 CI）
 ./target/release/water_ball_tool -h
 ```
 
+## 构建选项
+
+- 仓库是一个 **workspace**：根 `Cargo.toml` 定义 `water_ball_tool` 二进制包，并把 `water_ball_tool_lib` 列为成员。
+  在仓库根执行 `cargo build` 会同时构建两者。
+- `.cargo/native-config.toml` **不会**自动生效（cargo 只自动加载名为 `config.toml` 的文件）。需要显式传入：
+  `cargo --config .cargo/native-config.toml build --release`。它使用 `-C target-cpu=native` 编译，并把产物重定向到
+  `target/native/`（二进制位于 `target/native/release/water_ball_tool`）。不要把 native 构建当作可分发版本。
+- `debug-no-audio` feature 是 `mp` 命令的调试辅助：cpal 回调会跳过环形缓冲区读取、后置效果器处理和音量缩放，便于在没有真实
+  音频的情况下快速调试播放控制。它不产生可用的音频输出。
+
 ## 测试规范
 
 - 慢速测试标记为 `#[ignore = "longtime"]`。`cargo test` 默认跳过它们。主分支 CI 推送时使用 `--include-ignored` 运行全量套件。
-- 使用 `indicatif::MultiProgress` 的测试必须首先调用 `crate::init_global_logging(&mp)`——否则因 tracing subscriber
-  未初始化而日志 panic。
+- 子命令处理函数通过 `crate::multi_progress_init(module)` 自行初始化日志；调用处理函数的测试（`ff::args`、
+  `wbfp::commands`、`music_play::args`）因此无需额外设置即可获得可用的 `MultiProgress`。重复注册 subscriber 会被
+  `try_init` 拒绝并仅记录日志。
 - 测试临时目录位于 `./temp/test/`（gitignore）。
-- 测试开始用 `TestTool::prepare_test_dir(dir)`、测试结束用 `TestTool::cleanup_test_dir(dir)`（均来自 `tools.rs`；两者容忍
-  `NotFound`；清理遇到非预期错误会 panic）。`TestTool::remove_test_pack_files(path)` 在打包测试后删除 `.pack`/`.wbm`/
-  `.lock` 文件。
+- 测试开始用 `TestTool::prepare_test_dir(dir)`、测试结束用 `TestTool::cleanup_test_dir(dir)`（均来自
+  `water_ball_tool_lib/src/tools.rs`；两者容忍 `NotFound`；清理遇到非预期错误会 panic）。
+  `TestTool::remove_test_pack_files(path)` 在打包测试后删除 `.pack`/`.wbm`/`.lock` 文件。
 - 跨平台测试使用 `#[cfg(unix)]` / `#[cfg(windows)]` 创建符号链接及平台相关路径。
 
 ### 测试目录与资源生命周期
@@ -76,8 +90,11 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 
 ## 错误处理规范
 
-- `src/lib.rs` 全局 deny `clippy::unwrap_used`。绝不抑制它。绝不在库或应用代码中使用 `.unwrap()`、`.expect()` 或任何 panic
-  式 unwrap。
+- `water_ball_tool_lib/src/lib.rs` 全局 deny `clippy::unwrap_used`，且生产（非 test）构建额外 deny
+  `clippy::expect_used`（`#![cfg_attr(not(test), deny(clippy::expect_used))]`——测试目标仍保留 warn，直到既有测试中的
+  expect
+  完成迁移）。二进制 crate `src/main.rs` 同样 deny `clippy::unwrap_used`。绝不抑制这些 lint。绝不在库或应用代码中使用
+  `.unwrap()`、`.expect()` 或任何 panic 式 unwrap。
 - **可恢复错误必须通过 `?` 操作符传播**给调用方，使用模块的错误类型（`wb_files_pack` 中为 `PackFileError`，`file_finder` 中为
   `io::Error` 或 `SearchResult`/`SearchWarning`）。
 - **不应中止执行的非致命错误（警告）**：
@@ -85,42 +102,66 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
     - 流式 API（`FileFinder::search_stream`）：通过接收通道发出 `SearchEvent::Warning(SearchWarning)`。
 - **Mutex 毒化**：使用 `.lock().unwrap_or_else(std::sync::PoisonError::into_inner)` 恢复锁——避免毒化时 panic。
 - **线程 join**：使用 `handle.join().map_err(|_| ...)?` 将 panic 作为错误传播，而不是调用 `.unwrap()`。
+- **创建线程失败必须返回错误**：用 `thread::Builder::new()...spawn(...)` 创建线程，并用 `?` 传播失败（必要时映射为模块错误类型）。
+  `std::thread::spawn` 在操作系统无法创建线程时会 panic， **禁止使用**。绝不允许只记录 spawn 失败后继续当作线程已存在。
+- **逻辑错误必须使用 `unreachable!`**：在正常逻辑下永远无法到达的代码属于逻辑错误——一旦到达意味着不变量被破坏。此类分支必须用
+  `unreachable!("<原因>")` 中止；不要用 `panic!`，也不要记录日志后继续。反之，运行期确实可能发生的失败（I/O 错误、锁毒化、非法用户
+  输入、spawn 失败） **不是**逻辑错误：必须返回或报告，绝不能改写成 `unreachable!`。
+- **非 panic 辅助函数**：`crate::command::progress_style(template)` 构造 `ProgressStyle`；模板非法时记录错误并返回默认样式，不会
+  panic。
 - **禁止忽略警告的属性（FORBIDDEN）**：`#[allow(...)]`、`#![allow(...)]`、`#[expect(...)]` 及任何其他 lint
   抑制属性不得添加到生产或测试代码中。不要掩盖警告——而是修复根本原因（重构代码、传播错误，或在测试中使用不 panic 的辅助函数如
   `TestTool::expect_ok`）。
 
 ## 架构说明（从文件布局不易看出）
 
-### 模块图
+### workspace 与 crate 布局
 
-- `src/main.rs` 声明 `mod command;` —— **而非** `lib.rs`。`command.rs` 对二进制 crate 私有。
-- `src/lib.rs` 导出库 crate：`file_finder`、`wb_files_pack`、`tools`、`gakumasu`（`#[cfg(debug_assertions)]` 门控——仅 debug
-  构建编译）。
-- `command.rs` 使用 `water_ball_tool::file_finder` 和 `water_ball_tool::wb_files_pack`（crate 名限定路径），而非 `crate::`
-  ——因为 command 在二进制 crate 中。
-- `command/ff.rs` — `ff` 子命令处理：参数解析、进度条设置、文件搜索编排。调用库中的 `FileFinder::search()`。
+- 根 `Cargo.toml` 是 **workspace**（`resolver = "3"`），成员为 `water_ball_tool_lib`；同一文件还声明了源码位于 `src/` 的
+  `water_ball_tool` 二进制包。
+- `water_ball_tool_lib/src/lib.rs` 导出库模块：`file_finder`、`wb_files_pack`、`tools`、`concurrent_ring`、
+  `split_ring_buffer`，以及 `gakumasu`（`#[cfg(debug_assertions)]` 门控——仅 debug 构建编译）。
+- `src/main.rs` 声明 `mod command;` —— `command.rs` 对二进制 crate 私有， **不是**库的一部分。
+- 二进制代码通过 crate 名限定路径引用库——`water_ball_tool_lib::file_finder`、`water_ball_tool_lib::wb_files_pack`、
+  `water_ball_tool_lib::tools`、`water_ball_tool_lib::concurrent_ring`、`water_ball_tool_lib::split_ring_buffer`——而非
+  `crate::`。
+- `command/ff.rs` — `ff` 子命令处理：参数解析、进度条设置、文件搜索编排与可选哈希。调用库中的
+  `FileFinder::search_stream()`。命令层工作/哈希线程用 `thread::Builder` 创建，spawn 失败作为错误传播。
+    - `[OUT_PATH]` 之后的可选多值 **位置参数** `[HASH]...`：`all`、`md5`、`sha256`、`sha512`、`sha1`、`blake3`、
+      `blake2b`、`crc32`（别名 `*`、`m5`、`s256`、`s512`、`s1`、`b3`、`b2b`、`crc`）。哈希会附加到每个文件条目，并出现在
+      JSON 输出中。
+    - 开启哈希时文件发现被强制为单线程（`ff_thread_count = 1`），同时由独立的哈希工作线程池（数量为 `thread_count`，取自
+      `-t/--thread-count`，缺省为可用并行度）消费共享环形缓冲区。
 - `command/wbfp.rs` — `wbfp` 子命令处理：打包/解包/哈希校验，多线程文件 I/O，每工作线程独立进度条，通过
-  `FileFinder::search_stream()` 流式发现文件。
+  `FileFinder::search_stream()` 流式发现文件。打包/解包/校验工作线程均用 `thread::Builder` 创建，spawn 失败作为错误传播。
+- `command/music_play.rs` + `command/music_play/` — `mp` 子命令处理（模块 `music_play`，枚举变体 `MP`），终端音乐播放器，见下文。
 - `command/test.rs` — `ff` 和 `wbfp` 命令的集成测试，含跨平台符号链接循环检测测试。
     - 长时间测试（`#[ignore = "longtime"]`）使用 `create_large_fixture()` 生成 1,000 个随机文件（25 目录 × 40 文件，经
       `rand` crate 随机内容/大小）做压力测试。这些取代了旧的系统目录扫描测试。
 
-### 文件搜索器 API（`src/file_finder.rs`）
+### 文件搜索器 API（`water_ball_tool_lib/src/file_finder.rs`）
 
 - `FileFinder::search(path, skip_symlinks, pb_tx, max_threads)` — 阻塞式多线程搜索，返回 `FilesList` 树。
 - `FileFinder::search_stream(path, skip_symlinks, pb_tx, max_threads)` — 非阻塞流式搜索；返回
   `(JoinHandle<io::Result<()>>, Receiver<(PathBuf, FileInfo)>)`。工作线程传 `None` 结果以跳过 HashMap 收集开销。供 `wbfp`
-  打包命令的生产者-消费者模式使用。
+  打包与 `ff` 哈希的生产者-消费者模式使用。
 - 符号链接循环检测使用每线程 inode 链：每个工作线程维护一个经由符号链接进入的目录的 `Vec<InodeKey>`。遇到 symlink→dir 时，目标
   inode 与链比对。
 - Inode 键：Unix 上 `(dev << 64) | ino`；Windows 上 `canonicalize()`。
 - 限频进度：每 50 个文件或 10 个目录更新一次。
 - 树重建使用 **迭代式基于栈的后序遍历**（Pre/Post 状态机）而非递归——避免深层嵌套目录栈溢出。父节点查找用 `rposition()`
   向后搜索以正确匹配路径。
-- 测试文件：`src/file_finder/test.rs` — 覆盖符号链接发现、祖先循环检测、多层符号链接、跳过标志、断链、混合场景、链传播、
-  `search_stream` 正确性。
+- 测试文件：`water_ball_tool_lib/src/file_finder/test.rs` — 覆盖符号链接发现、祖先循环检测、多层符号链接、跳过标志、断链、混合
+  场景、链传播、`search_stream` 正确性。
 
-### 工具 API（`src/tools.rs`）
+### 环形缓冲区 API
+
+- `concurrent_ring`（`water_ball_tool_lib/src/concurrent_ring.rs`）— 可并发初始化的环形缓冲区（`ConcurrentRing<T>`），用作搜索/解码
+  线程与工作线程之间的生产者-消费者队列。
+- `split_ring_buffer`（`water_ball_tool_lib/src/split_ring_buffer.rs`）— 读写分离环形缓冲区，读端与写端可各自独立选择有锁或无锁
+  （`locked_ring_buffer`、`unlocked_read_locked_write_ring_buffer` 等）；音频回调用的是无锁读端。
+
+### 工具 API（`water_ball_tool_lib/src/tools.rs`）
 
 - `PathTool::path_to_string_vec(path)` — 将路径拆分为字符串片段。
 - `PathTool::path_remove_head(path, head)` — 去除 head 前缀，返回相对路径。
@@ -132,7 +173,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 
 ### WBFP 公共 API
 
-- 公共入口点是 `ManagerSync`（`src/wb_files_pack/manager_sync.rs`），而非 `WBFPManager`。
+- 公共入口点是 `ManagerSync`（`water_ball_tool_lib/src/wb_files_pack/manager_sync.rs`），而非 `WBFPManager`。
 - `ManagerSync` 在 `Arc<Mutex<>>` 后包装 `WBFPManager` + `PackIO` 以实现线程安全访问。
 - `ManagerSync::open(path)` — 以只读模式打开已有包文件。
 - `ManagerSync::create_new(path)` — 以默认配置（分离清单、无 COW）创建新包文件。文件已存在则失败。
@@ -148,21 +189,57 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 - 删除/擦除 API：`delete_file`、`delete_dir_all`、`erase_file(strategy)`、`erase_dir_all(strategy)`。
     - 删除：移除元数据 + 结构，数据块提交 GC（不覆写）。
     - 擦除：先向存储覆写数据块 + 清单块，然后 GC + 移除。
-    - `OverwriteStrategy` 枚举：`Zero`、`Random`（rand crate）、`Dod5220`（3 遍：0x00→0xFF→随机——每遍写入磁盘）。
+  - `OverwriteStrategy` 枚举：`Zero`、`Random`（rand crate）、`Dod5220`（3 遍：0x00→0xFF→随机——每遍写入磁盘）。数据块按块
+    逐段覆写，每种策略/每一遍的写偏移都会随已写长度推进。
     - 根保护：空路径列表拒绝。`PackStruct` 上的 `child_locked_count` 阻止删除有锁定子项的目录。
+
+### 音乐播放器（`mp`）
+
+- `command/music_play.rs` — `mp` 子命令（模块 `music_play`，枚举变体 `MP`）：从文件/目录收集曲目（用 `lofty` 读取元数据），
+  构建 `PlayList`，并通过 stdin 命令循环（`next`/`n`、`Play`/`P`、`pause`/`p`、`exit`）驱动 `Runtime`。
+- 参数：位置参数 `files...`；`-v/--volume <f32>` 初始音量（0.0–1.0 小数，默认 `0.75`；超出范围时在开始播放前以参数错误返回失败）；
+  `--verbose`（仅长选项）；`-m/--mode`，取值 `sequential-loop`（默认）、`sequential`、`repeat-one`、`shuffle`、
+  `periodic-shuffle`。
+- `command/music_play/` 下的模块：
+    - `player.rs` — cpal 输出流、transport 命令（`PlayCmd`）、音量/位置原子量、`PlayerEvent` sink、`Player::try_stop()`。
+    - `decoder_runtime.rs` — symphonia 解码线程，向前效果器环形缓冲区喂数据。格式读取器/解码器与轨道元数据合并保存在同一个
+      `DecoderSession` 中，由单个 `Arc<Mutex<Option<...>>>` 保护，成对替换/取出。`run()` 在线程无法创建时返回错误；解码循环
+      上报真实运行期错误并停止，单帧 `DecodeError` 跳过继续，停止/切曲时的 `WriteRejected` 属于正常控制流。
+    - `effect.rs` + `effect/runtime.rs` — 效果器 trait 与带锁的前效果器运行时线程；具体效果器为 `effect/resampler.rs`、
+      `effect/cross_bridge.rs`、`effect/fade.rs`。
+    - `play_list.rs` — 曲目列表与循环/洗牌逻辑（`sequential-loop`、`sequential`、`repeat-one`、`shuffle`、
+      `periodic-shuffle`）。
+    - `runtime.rs` — 播放编排：UI 刷新线程、自动换曲、事件消费。
+    - `event_dispatch.rs` — 面向实时音频回调的专用事件/日志分发线程。
+    - `tools.rs` — `TimeMetrics` / `DurationAccumulator` 性能统计辅助。
+    - `tui/`（`app.rs`、`ui.rs`、`channel_writer.rs`）— **开发中**，尚未接入命令。
+- **实时线程规则**：cpal 回调绝不能加锁、调用 sink 或写日志。它只用非阻塞 `try_send` 把事件和日志记录投递到有界通道（容量
+  1024；通道满
+  则丢弃并计数）。`player-event-dispatch` 线程负责加锁、调用 `PlayerEventSink::emit` 以及真正输出 `tracing` 日志。
+- 曲目结束通过原子 EOF 标志检测；回调只投递 `TrackEnded` 事件，不直接调用 sink。
+- **退出顺序（`Player::try_stop`，幂等）**：暂停音频流 → 停止前效果器运行时（唤醒阻塞在 `push_wait` 的生产者）→ 停止解码线程 →
+  停止事件分发线程 → join `rx_cmd` 线程。
 
 ### 日志 + 进度条
 
-- `main.rs` 创建 `MultiProgress` 并传给 `init_global_logging()`，后者通过 `MultiProgressWriter` 适配器路由 `tracing`
-  输出，使日志不覆盖进度条。
-- Debug 模式：日志级别 `debug`。Release 模式：`info`。由 `#[cfg(debug_assertions)]` 控制。
+- 每个子命令处理函数调用 `crate::multi_progress_init(module)`（`module` 为 `"ff"`、`"wbfp"` 或 `"music_play"`）。它创建该命令的
+  `MultiProgress`，并通过 `init_global_logging(&mp, module) -> Option<PathBuf>` 安装全局 tracing subscriber（若创建了日志文件则
+  返回其路径）。
+- 终端层包装 `MultiProgress`（每行输出周围调用 `suspend()`），日志不会撕裂进度条。
+- Debug 构建（`#[cfg(debug_assertions)]`）：仅终端输出，级别 `debug`。Release 构建：终端级别 `info`，另外写级别 `debug` 的日志
+  文件，采用方括号格式 `[时间戳] [级别] [线程] [文件:行] 消息`。
+- 日志文件路径：`<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`。若无法创建文件，回退为
+  仅终端的 `debug` 级别输出。
+- `main.rs` 本身只负责解析 `Cli` 并分发；进度/日志初始化在每个子命令内完成。
 
 ### 进度条辅助函数（`command.rs`）
 
-- `create_pb(mp)` — 在 `MultiProgress` 中创建并注册 spinner。无进度模式返回 `None`。
-- `set_pb_style2(pb, data_len)` — 切换到确定性条模式（`=>-` 字符），用于已知总长度操作。
-- `update_pb(cb, path1, path2, last_written, current_written)` — 限频进度回调（每 10×BUF_LEN 字节触发一次）。
-- 模板：`PROGRESS_STYLE_TEMPLATE`（搜索）和 `PACK_PROGRESS_STYLE_TEMPLATE`（打包/解包，带前缀、百分比、字节）。
+- `create_pb(mp)` — 在 `MultiProgress` 中创建并注册自动旋转的 spinner，返回 `ProgressBar`。
+- `progress_style(template) -> ProgressStyle` — 根据模板字符串构造样式；模板非法时记录错误并回退默认进度条样式（不
+  panic）。应使用它
+  替代 `ProgressStyle::tem*().expect(...)`。
+- 常量：`BUF_LEN` = 10 MiB（读写缓冲区）、`PACK_PROGRESS_STYLE_TEMPLATE`（打包/解包/哈希：前缀、进度条、耗时/ETA、百分比、
+  字节）、`SPINNER_TEMPLATE`（空闲/挂起的工作线程 spinner）。
 
 ### 代码变更标记
 
@@ -172,7 +249,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 
 ### gakumasu
 
-- `src/gakumasu/` 下的开发中游戏模拟器。尚未接入 CLI。数据类型使用中文命名。
+- `water_ball_tool_lib/src/gakumasu/` 下的开发中游戏模拟器。尚未接入 CLI。数据类型使用中文命名。
 
 ## WBFP 二进制格式速查
 

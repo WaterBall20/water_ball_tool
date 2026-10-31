@@ -11,8 +11,9 @@ use crate::command::ff::FileFinderArgs;
 use crate::command::wbfp::WaterBallFilePackCommand;
 use clap::error::Result;
 use clap::{Parser, Subcommand};
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::time::Duration;
+use tracing::error;
 
 mod ff;
 pub mod music_play;
@@ -68,6 +69,27 @@ fn create_pb(mp: &MultiProgress) -> ProgressBar {
     pb.enable_steady_tick(Duration::from_millis(100)); // 让转标自己动起来
     pb
 }
+
+//AI=== 新增进度条样式构造辅助：模板非法时记录错误并回退默认样式，替代各处 .expect
+/// 根据模板构造进度条样式。
+///
+/// 模板非法（占位符写错等）时不会 panic：记录一条错误日志并退回默认进度条样式，
+/// 保证进度条功能降级而不中断任务。
+///
+/// Build a progress style from a template.
+///
+/// An invalid template (for example a malformed placeholder) never panics: an error is
+/// logged and the default bar style is returned, so the task degrades instead of aborting.
+pub(crate) fn progress_style(template: &str) -> ProgressStyle {
+    match ProgressStyle::default_bar().template(template) {
+        Ok(style) => style,
+        Err(e) => {
+            error!("进度条模板非法，回退到默认样式 / invalid progress template: {e}");
+            ProgressStyle::default_bar()
+        }
+    }
+}
+//AI_END===
 
 pub(crate) fn cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {

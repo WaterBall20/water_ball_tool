@@ -2,12 +2,15 @@
 
 > **Language**: English | [简体中文](docs/zh_CN/AGENTS.md)
 
-Rust 2024 CLI toolkit. Two commands: `ff` (parallel file finder) and `wbfp` (custom binary pack format).
+Rust 2024 workspace CLI toolkit. Three commands: `ff` (parallel file finder with optional hashing), `wbfp` (custom
+binary pack format), and `mp` (terminal music player).
 
 ## Commands
 
 ```bash
 cargo build --release          # release build
+cargo build --features debug-no-audio # debug build that skips audio processing (see Build options)
+cargo --config .cargo/native-config.toml build --release # native-optimized build → target/native
 cargo check                    # compile check only (fast)
 cargo clippy                   # lint
 cargo test                     # skip long-time tests (#[ignore] handled automatically)
@@ -15,16 +18,29 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 ./target/release/water_ball_tool -h
 ```
 
+## Build options
+
+- The repository is a **workspace**: the root `Cargo.toml` defines the `water_ball_tool` binary package and lists
+  `water_ball_tool_lib` as a member. `cargo build` from the repository root builds both.
+- `.cargo/native-config.toml` is **not** applied automatically (cargo only auto-loads files named `config.toml`). Pass
+  it explicitly: `cargo --config .cargo/native-config.toml build --release`. It compiles with
+  `-C target-cpu=native` and redirects artifacts to `target/native/` (binary at
+  `target/native/release/water_ball_tool`). Do not use a native build as a portable distribution.
+- The `debug-no-audio` feature is a debugging aid for the `mp` command: the cpal callback skips ring-buffer reads,
+  post-effect processing, and volume scaling, so playback control can be debugged quickly without real audio. It
+  produces no usable audio.
+
 ## Testing conventions
 
 - Slow tests are marked `#[ignore = "longtime"]`. Skip them with `cargo test` (skipped by default). Use
   `--include-ignored` for the full suite on main-branch CI pushes.
-- Tests that use `indicatif::MultiProgress` must call `crate::init_global_logging(&mp)` first — otherwise logging panics
-  because tracing subscriber isn't initialized.
+- Subcommand handlers initialize logging themselves through `crate::multi_progress_init(module)`; tests that call the
+  handler (`ff::args`, `wbfp::commands`, `music_play::args`) therefore get a working `MultiProgress` without extra
+  setup. Re-registering the subscriber is rejected by `try_init` and only logged.
 - Test temp dirs live under `./temp/test/` (gitignored).
-- Use `TestTool::prepare_test_dir(dir)` at test start and `TestTool::cleanup_test_dir(dir)` at test end from `tools.rs`
-  (both tolerate `NotFound`; cleanup panics on unexpected errors). `TestTool::remove_test_pack_files(path)` removes
-  `.pack`/`.wbm`/`.lock` files after pack tests.
+- Use `TestTool::prepare_test_dir(dir)` at test start and `TestTool::cleanup_test_dir(dir)` at test end from
+  `water_ball_tool_lib/src/tools.rs` (both tolerate `NotFound`; cleanup panics on unexpected errors).
+  `TestTool::remove_test_pack_files(path)` removes `.pack`/`.wbm`/`.lock` files after pack tests.
 - Cross-platform tests use `#[cfg(unix)]` / `#[cfg(windows)]` for symlink creation and platform-specific paths.
 
 ### Test directory and resource lifecycle
@@ -98,8 +114,11 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 
 ## Error handling conventions
 
-- `src/lib.rs` globally denies `clippy::unwrap_used`. Never suppress it. Never use `.unwrap()`, `.expect()`, or any
-  panicking-unwrap in library or application code.
+- `water_ball_tool_lib/src/lib.rs` globally denies `clippy::unwrap_used`, and production (non-test) builds additionally
+  deny `clippy::expect_used` (`#![cfg_attr(not(test), deny(clippy::expect_used))]` — the test target keeps the warning
+  until existing test expectations are migrated). The binary crate `src/main.rs` also denies `clippy::unwrap_used`.
+  Never suppress these lints. Never use `.unwrap()`, `.expect()`, or any panicking-unwrap in library or application
+  code.
 - **Recoverable errors MUST be propagated** via the `?` operator to the caller using the module's error type
   (`PackFileError` in `wb_files_pack`, `io::Error` or `SearchResult`/`SearchWarning` in `file_finder`).
 - **Non-fatal errors (warnings)** that should not abort execution:
@@ -109,6 +128,18 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 - **Mutex poisoning**: use `.lock().unwrap_or_else(std::sync::PoisonError::into_inner)` to recover the lock — avoid
   panicking on poison.
 - **Thread join**: use `handle.join().map_err(|_| ...)?` to propagate panics as errors rather than calling `.unwrap()`.
+- **Thread creation failures MUST be returned**: create threads with `thread::Builder::new()...spawn(...)` and propagate
+  the
+  failure with `?` (mapping it into the module's error type when needed). `std::thread::spawn` panics when the OS cannot
+  create the thread and MUST NOT be used. Never log a spawn failure and continue as if the thread existed.
+- **Logic errors MUST use `unreachable!`**: code that can never be reached under correct logic is a logic error —
+  reaching it
+  means an invariant was violated. Such branches MUST abort via `unreachable!("<reason>")`; do not use `panic!` for
+  them, and
+  do not log-and-continue. Conversely, a failure that can genuinely happen at runtime (I/O error, poisoned lock, invalid
+  user input, spawn failure) is NOT a logic error: it must be returned or reported, never converted into `unreachable!`.
+- **Non-panicking helpers**: `crate::command::progress_style(template)` builds a `ProgressStyle`; an invalid template
+  logs an error and returns the default style instead of panicking.
 - **Warning-suppression attributes are FORBIDDEN**: `#[allow(...)]`, `#![allow(...)]`, `#[expect(...)]`, and any other
   lint-suppression attribute MUST NOT be added to production or test code. Do not silence a warning — fix the underlying
   cause instead (refactor the code, propagate the error, or use a non-panicking helper such as `TestTool::expect_ok` in
@@ -116,29 +147,44 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 
 ## Architecture notes (non-obvious from file layout)
 
-### Module graph
+### Workspace and crate layout
 
-- `src/main.rs` declares `mod command;` — **not** `lib.rs`. `command.rs` is private to the binary.
-- `src/lib.rs` exports the library crates: `file_finder`, `wb_files_pack`, `tools`, `gakumasu` (gated under
-  `#[cfg(debug_assertions)]` — only compiled in debug builds).
-- `command.rs` uses `water_ball_tool::file_finder` and `water_ball_tool::wb_files_pack` (crate-name-qualified paths),
-  not `crate::` — because command is in the binary crate.
-- `command/ff.rs` — `ff` subcommand handler: argument parsing, progress bar setup, and file search orchestration. Calls
-  `FileFinder::search()` from the library.
+- Root `Cargo.toml` is a **workspace** (`resolver = "3"`) with member `water_ball_tool_lib`; the same file declares the
+  `water_ball_tool` binary package whose sources live in `src/`.
+- `water_ball_tool_lib/src/lib.rs` exports the library modules: `file_finder`, `wb_files_pack`, `tools`,
+  `concurrent_ring`, `split_ring_buffer`, and `gakumasu` (gated under `#[cfg(debug_assertions)]` — only compiled in
+  debug builds).
+- `src/main.rs` declares `mod command;` — `command.rs` is private to the binary crate and is **not** part of the
+  library.
+- Binary code references the library through crate-name-qualified paths — `water_ball_tool_lib::file_finder`,
+  `water_ball_tool_lib::wb_files_pack`, `water_ball_tool_lib::tools`, `water_ball_tool_lib::concurrent_ring`,
+  `water_ball_tool_lib::split_ring_buffer` — not `crate::`.
+- `command/ff.rs` — `ff` subcommand handler: argument parsing, progress bar setup, file search orchestration, and
+  optional hashing. Calls `FileFinder::search_stream()` from the library. Command-layer worker/hash threads are created
+  with `thread::Builder` and spawn failures propagate as errors.
+    - Optional multi-value **positional** `[HASH]...` argument after `[OUT_PATH]`: `all`, `md5`, `sha256`, `sha512`,
+      `sha1`, `blake3`, `blake2b`, `crc32` (aliases `*`, `m5`, `s256`, `s512`, `s1`, `b3`, `b2b`, `crc`). Computed
+      hashes are attached to each file entry and appear in the JSON output.
+    - When hashing is enabled, file discovery is forced to a single thread (`ff_thread_count = 1`) while a separate hash
+      worker pool of `thread_count` threads (resolved from `-t/--thread-count`, defaulting to available parallelism)
+      consumes the shared ring buffer.
 - `command/wbfp.rs` — `wbfp` subcommand handler: pack/unpack/hash-verify with multi-threaded file I/O, progress bars per
-  worker thread, and streaming file discovery via `FileFinder::search_stream()`.
+  worker thread, and streaming file discovery via `FileFinder::search_stream()`. All pack/unpack/verify workers are
+  created with `thread::Builder`, and spawn failures propagate as errors.
+- `command/music_play.rs` + `command/music_play/` — `mp` subcommand handler (module `music_play`, enum variant `MP`),
+  terminal music player, see below.
 - `command/test.rs` — integration tests for `ff` and `wbfp` commands, including cross-platform symlink cycle detection
   tests.
     - Longtime tests (`#[ignore = "longtime"]`) use `create_large_fixture()` to generate 1,000 random files (25 dirs ×
       40 files, random content/size via `rand` crate) for stress testing. These replace old system-dir-scraping tests.
 
-### File finder API (`src/file_finder.rs`)
+### File finder API (`water_ball_tool_lib/src/file_finder.rs`)
 
 - `FileFinder::search(path, skip_symlinks, pb_tx, max_threads)` — blocking multi-threaded search returning `FilesList`
   tree.
 - `FileFinder::search_stream(path, skip_symlinks, pb_tx, max_threads)` — non-blocking streaming search; returns
   `(JoinHandle<io::Result<()>>, Receiver<(PathBuf, FileInfo)>)`. Workers pass `None` for results to skip HashMap
-  collection overhead. Used by `wbfp` pack command for producer-consumer pattern.
+  collection overhead. Used by `wbfp` pack and `ff` hashing for the producer-consumer pattern.
 - Symlink cycle detection uses per-thread inode chain: each worker maintains a `Vec<InodeKey>` of directories entered
   via symlinks. When encountering a symlink→dir, the target's inode is checked against the chain.
 - Inode key: `(dev << 64) | ino` on Unix; `canonicalize()` on Windows.
@@ -146,10 +192,19 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 - Tree rebuild uses **iterative stack-based post-order traversal** (Pre/Post state machine) instead of recursion —
   avoids stack overflow on deeply nested directories. Parent lookup uses `rposition()` backward search for correct path
   matching.
-- Test file: `src/file_finder/test.rs` — covers symlink discovery, ancestor cycle detection, multi-level symlinks, skip
-  flag, broken symlinks, mixed scenarios, chain propagation, and `search_stream` correctness.
+- Test file: `water_ball_tool_lib/src/file_finder/test.rs` — covers symlink discovery, ancestor cycle detection,
+  multi-level symlinks, skip flag, broken symlinks, mixed scenarios, chain propagation, and `search_stream`
+  correctness.
 
-### Tools API (`src/tools.rs`)
+### Ring buffer APIs
+
+- `concurrent_ring` (`water_ball_tool_lib/src/concurrent_ring.rs`) — concurrent initializable ring buffer
+  (`ConcurrentRing<T>`), used as the producer-consumer queue between search/decoder threads and workers.
+- `split_ring_buffer` (`water_ball_tool_lib/src/split_ring_buffer.rs`) — split read/write ring buffer where each end can
+  independently be locked or lock-free (`locked_ring_buffer`, `unlocked_read_locked_write_ring_buffer`, …); the audio
+  callback uses the lock-free reader.
+
+### Tools API (`water_ball_tool_lib/src/tools.rs`)
 
 - `PathTool::path_to_string_vec(path)` — split path into string segments.
 - `PathTool::path_remove_head(path, head)` — strip head prefix from path returning relative path.
@@ -162,7 +217,8 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 
 ### WBFP public API
 
-- The public entry point is `ManagerSync` (`src/wb_files_pack/manager_sync.rs`), not `WBFPManager`.
+- The public entry point is `ManagerSync` (`water_ball_tool_lib/src/wb_files_pack/manager_sync.rs`), not
+  `WBFPManager`.
 - `ManagerSync` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
 - `ManagerSync::open(path)` — opens an existing pack file in read-only mode.
 - `ManagerSync::create_new(path)` — creates a new pack file with default config (separate manifest, no COW). Fails if
@@ -182,24 +238,64 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
     - Delete: removes metadata + structure, submits data blocks to GC (no overwrite).
     - Erase: overwrites data blocks + manifest blocks to storage, then GC + remove.
     - `OverwriteStrategy` enum: `Zero`, `Random` (rand crate), `Dod5220` (3-pass: 0x00→0xFF→random — each pass written
-      to disk).
+      to disk). Data blocks are overwritten chunk by chunk; the write offset advances by the chunk length in every
+      strategy/pass.
     - Root protection: empty path list rejected. `child_locked_count` on `PackStruct` prevents deleting dirs with locked
       children.
 
+### Music player (`mp`)
+
+- `command/music_play.rs` — `mp` subcommand (module `music_play`, enum variant `MP`): collects tracks from
+  files/directories (metadata read with `lofty`), builds a `PlayList`, and drives `Runtime` from a stdin command loop
+  (`next`/`n`, `Play`/`P`, `pause`/`p`, `exit`).
+- Arguments: positional `files...`; `-v/--volume <f32>` initial volume as a 0.0–1.0 fraction (default `0.75`;
+  out-of-range values are rejected with an argument error before playback starts); `--verbose` (long only);
+  `-m/--mode` with `sequential-loop` (default), `sequential`, `repeat-one`, `shuffle`, `periodic-shuffle`.
+- Modules under `command/music_play/`:
+    - `player.rs` — cpal output stream, transport commands (`PlayCmd`), volume/position atomics, `PlayerEvent` sinks,
+      and `Player::try_stop()`.
+    - `decoder_runtime.rs` — symphonia decode thread feeding the pre-effect ring buffer. The format reader/decoder and
+      the
+      track metadata live together in one `DecoderSession` behind a single `Arc<Mutex<Option<...>>>`, so they are
+      swapped/taken as a pair. `run()` returns an error when the thread cannot be spawned; the decode loop reports real
+      runtime errors and stops, skips frame-level `DecodeError`, and treats stop/track-change `WriteRejected` as normal
+      flow.
+    - `effect.rs` + `effect/runtime.rs` — effect traits and the locked pre-effect runtime thread; concrete effects are
+      `effect/resampler.rs`, `effect/cross_bridge.rs`, `effect/fade.rs`.
+    - `play_list.rs` — track list plus loop/shuffle logic (`sequential-loop`, `sequential`, `repeat-one`, `shuffle`,
+      `periodic-shuffle`).
+    - `runtime.rs` — playback orchestration: UI refresh thread, automatic track advance, event consumers.
+    - `event_dispatch.rs` — dedicated event/log dispatch thread for the realtime audio callback.
+    - `tools.rs` — `TimeMetrics` / `DurationAccumulator` profiling helpers.
+    - `tui/` (`app.rs`, `ui.rs`, `channel_writer.rs`) — **WIP**, not wired into the command yet.
+- **Realtime-thread rule**: the cpal callback MUST NOT lock, invoke sinks, or write logs. It only posts events and log
+  records with non-blocking `try_send` into a bounded channel (capacity 1024; full channel drops and counts). The
+  `player-event-dispatch` thread performs the locking, `PlayerEventSink::emit` calls, and real `tracing` output.
+- Track end is detected through an atomic EOF flag; the callback posts a `TrackEnded` event instead of invoking sinks
+  directly.
+- **Exit order (`Player::try_stop`, idempotent)**: pause the audio stream → stop the pre-effect runtime (wakes producers
+  blocked in `push_wait`) → stop the decoder thread → stop the event dispatch thread → join the `rx_cmd` thread.
+
 ### Logging + progress bars
 
-- `main.rs` creates a `MultiProgress` and passes it to `init_global_logging()`, which routes `tracing` output through a
-  `MultiProgressWriter` adapter so logs don't overwrite the progress bar.
-- Debug mode: log level `debug`. Release mode: `info`. Controlled by `#[cfg(debug_assertions)]`.
+- Each subcommand handler calls `crate::multi_progress_init(module)` (`module` = `"ff"`, `"wbfp"`, or
+  `"music_play"`). It creates that command's `MultiProgress` and installs the global tracing subscriber via
+  `init_global_logging(&mp, module) -> Option<PathBuf>`, which returns the created log-file path if any.
+- The terminal layer wraps `MultiProgress` (`suspend()` around each line) so logs never tear the progress bars.
+- Debug builds (`#[cfg(debug_assertions)]`): terminal-only output at `debug` level. Release builds: terminal at `info`
+  level plus a log file at `debug` level with the bracketed format
+  `[timestamp] [level] [thread] [file:line] message`.
+- Log file path: `<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`. If the file
+  cannot be created, logging falls back to terminal-only `debug` output.
+- `main.rs` itself only parses `Cli` and dispatches; progress/log initialization is per subcommand.
 
 ### Progress bar helpers (`command.rs`)
 
-- `create_pb(mp)` — create and register a spinner in the `MultiProgress`. Returns `None` in no-progress mode.
-- `set_pb_style2(pb, data_len)` — switch to determinate bar mode (`=>-` chars), for known-total-length operations.
-- `update_pb(cb, path1, path2, last_written, current_written)` — rate-limited progress callback (fires every 10×BUF_LEN
-  bytes).
-- Templates: `PROGRESS_STYLE_TEMPLATE` (search) and `PACK_PROGRESS_STYLE_TEMPLATE` (pack/unpack with prefix, percent,
-  bytes).
+- `create_pb(mp)` — create and register an auto-ticking spinner in the `MultiProgress`; returns a `ProgressBar`.
+- `progress_style(template) -> ProgressStyle` — build a style from a template string; an invalid template logs an
+  error and falls back to the default bar style (no panic). Use this instead of `ProgressStyle::tem*().expect(...)`.
+- Constants: `BUF_LEN` = 10 MiB (read/write buffer), `PACK_PROGRESS_STYLE_TEMPLATE` (pack/unpack/hash: prefix, bar,
+  elapsed/ETA, percent, bytes), `SPINNER_TEMPLATE` (idle/suspended worker spinner).
 
 ### Code change markers
 
@@ -209,7 +305,7 @@ cargo test -- --include-ignored # include long-time tests (full CI suite on main
 
 ### gakumasu
 
-- WIP game simulator under `src/gakumasu/`. Not wired into CLI yet. Data types use Chinese naming.
+- WIP game simulator under `water_ball_tool_lib/src/gakumasu/`. Not wired into CLI yet. Data types use Chinese naming.
 
 ## WBFP binary format quick reference
 

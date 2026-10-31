@@ -2,6 +2,121 @@
 
 > **Language**: English | [简体中文](docs/zh_CN/CHANGELOG.md)
 
+## [Unreleased] — 2026-10-31 (Round 2)
+
+### Thread Creation & Error Propagation
+
+- All worker threads in the `ff`/`wbfp` command modules and in the music player now use
+  `thread::Builder::new().name(...).spawn(...)`; a spawn failure is propagated as an error (9 call sites in `ff`/
+  `wbfp`).
+  The panicking `std::thread::spawn` is banned by the AGENTS.md conventions because it panics when the OS cannot create
+  a
+  thread
+- `DecoderRuntime::run()` and `PreEffectRuntime::run()` return `Result`; a failed spawn aborts `Player::new()` instead
+  of
+  logging and continuing
+- Event-channel sink constructors (`PlayerEventChannelSink::new`, `DecoderEventChannelSink::new`,
+  `PreEffectRuntimeEventChannelSink::new`) return `std::io::Result`; `Player::new()` / `Runtime::create()` propagate the
+  error. The `new` constructors were removed from the sink traits; direct sinks construct infallibly
+- `DecoderRuntime::stop()` still joins the decode thread when `send_skip` fails, then returns the first error
+
+### Decoder Session Pairing
+
+- The decoder's engine (format reader + decoder) and data (track metadata) are merged into a single `DecoderSession`
+  stored in one `Arc<Mutex<Option<DecoderSession>>>`; track changes replace/take the session atomically under one lock
+- Removed the old split `engine`/`data` `Option`s and the "data missing while engine present" branch
+- Decode-loop error policy: real runtime failures (next_packet error, real ring-buffer write failure, failed EOF push,
+  fatal non-frame-level decode error) emit a `DecoderEvent` error and stop the decode thread; a single-frame
+  `DecodeError` is reported and skipped; `WriteRejected` during stop/track change/seek is normal control flow
+
+### Logic Errors Use `unreachable!`
+
+- `wb_files_pack` (`manager/file_ops.rs`, `manager/metadata.rs`, `pack_io/file_handle.rs`): all logic-error `panic!`
+  branches were converted to `unreachable!`
+- `metadata.rs`: `open_virtual_file`/`create_virtual_file` receiving a directory path is a runtime error and now returns
+  `PackFileError` instead of aborting
+- `ff`/`wbfp`: exhausting the per-worker progress-bar pool is an invariant violation and now aborts via `unreachable!`
+- AGENTS.md adds two error-handling conventions: thread-creation failures MUST be returned, and logic errors MUST use
+  `unreachable!` (runtime failures must never be turned into `unreachable!`)
+
+### Music Player (`mp`)
+
+- `-v/--volume` out of the 0.0–1.0 range is now an argument error returned before playback starts (previously panicked);
+  the help text documents 0.0–1.0
+
+## [Unreleased] — 2026-10-31
+
+### Workspace Split
+
+- Root `Cargo.toml` is now a cargo workspace (`resolver = "3"`, member `water_ball_tool_lib`); the root package keeps
+  the `water_ball_tool` binary crate under `src/`
+- Library code moved to `water_ball_tool_lib/src/`: `file_finder`, `wb_files_pack`, `tools`, `gakumasu` (debug-only)
+- New library modules: `concurrent_ring` (concurrent initializable ring buffer) and `split_ring_buffer` (split
+  lock/lock-free read-write ring buffer) — both used by the music player's decode/effect/audio pipelines
+- Binary code now imports the library as `water_ball_tool_lib::*` (`command.rs`, `command/ff.rs`, `command/wbfp.rs`)
+
+### Music Player (`mp`)
+
+- New terminal music player subcommand `mp` (module `music_play`, enum variant `MP`, `src/command/music_play.rs`): plays
+  audio files/directories, reads tags with `lofty`, builds a `PlayList`, and accepts stdin commands `next`/`n`,
+  `Play`/`P`, `pause`/`p`, `exit`
+- Arguments: positional `files...`, `-v/--volume` (0.0–1.0, default 0.75), `--verbose` (long only), `-m/--mode`
+  (`sequential-loop`, `sequential`, `repeat-one`, `shuffle`, `periodic-shuffle`)
+- Modules: `player`, `decoder_runtime`, `effect` (`resampler`, `cross_bridge`, `fade`), `play_list`, `runtime`,
+  `event_dispatch`, `tools`; `tui/` is WIP and not wired into the command yet
+
+### Audio Realtime Thread
+
+- The cpal callback no longer takes locks, invokes event sinks, or writes logs; it only `try_send`s events and log
+  records into a bounded channel (capacity 1024, dropped messages counted)
+- The new `player-event-dispatch` thread (`command/music_play/event_dispatch.rs`) performs the locking, sink emission,
+  and actual `tracing` output; stream errors are logged there too
+- Track end is posted as a `TrackEnded` event instead of invoking sinks from the callback
+- `Player::try_stop` now reclaims all threads in order: pause audio stream → stop pre-effect runtime (wakes producers
+  blocked in `push_wait`) → stop decoder thread → stop event dispatch thread → join the `rx_cmd` thread (idempotent)
+
+### Logging
+
+- Replaced the old progress-bar `Write` adapter with `TerminalWriter`/`FileWriter` wrappers; `init_global_logging` now
+  takes `(&mp, module)` and returns `Option<PathBuf>`, while `multi_progress_init(module)` creates the per-command
+  `MultiProgress` and installs the subscriber
+- Debug builds: terminal-only output at `debug` level. Release builds: terminal at `info` level + log file at `debug`
+  level (`<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<timestamp>.log`); if the file cannot be created,
+  logging falls back to terminal `debug` output
+
+### File Finder Hashing (`ff`)
+
+- New optional multi-value positional `[HASH]...` argument after `[OUT_PATH]`: `all`, `md5`, `sha256`, `sha512`,
+  `sha1`, `blake3`, `blake2b`, `crc32` (aliases `*`, `m5`, `s256`, `s512`, `s1`, `b3`, `b2b`, `crc`)
+- Per-file hashes are attached to `FileInfo` and included in the JSON output
+- Hashing forces single-threaded file discovery; the hash work itself runs on `thread_count` worker threads
+- Selecting MD5/SHA-1 logs an insecurity warning
+
+### Code Standards
+
+- `water_ball_tool_lib/src/lib.rs`: `#![cfg_attr(not(test), deny(clippy::expect_used))]` — `expect` is now denied in
+  production builds (the test target keeps the warning)
+- `command.rs`: new `progress_style(template)` helper — invalid templates log an error and fall back to the default
+  style instead of `expect`-panicking
+
+### Bug Fixes
+
+- WBFP erase (`OverwriteStrategy::Random` / `Dod5220`): the write offset did not advance with each chunk, so data blocks
+  larger than `DATA_DATA_BLOCK_LEN` only overwrote their first chunk; all passes now seek to `pos + write_len`
+- `ff` hashing: a failed progress-channel send skipped `hash_type.reset()`, polluting the next file's hash; hashing now
+  always finalizes/resets on every path
+- Music player exit path completed: audio stream, pre-effect runtime, decoder thread, event dispatch thread, and the
+  `rx_cmd` thread are all stopped/joined on `try_stop` instead of leaking until process exit
+- Music player audio callback: event sink calls and logging moved to the dispatch thread (realtime jitter / priority
+  inversion fix)
+
+### Build
+
+- `.cargo/native-config.toml` must be passed manually (`cargo --config .cargo/native-config.toml build --release`) to
+  enable `target-cpu=native` and produce artifacts under `target/native/`
+- New `debug-no-audio` feature: the audio callback skips ring-buffer reads, post effects, and volume scaling for fast
+  playback-control debugging without audio
+
 ## [Unreleased] — 2026-07-30
 
 ### Doc Comment Normalization
@@ -54,7 +169,7 @@
 
 - `gakumasu` module (WIP game simulator) gated behind `#[cfg(debug_assertions)]`; no longer compiled in release builds
 - `net_server` module (WIP network server) likewise gated behind `#[cfg(debug_assertions)]`
-- `src/lib.rs` public API more lean in release
+- Library crate (`water_ball_tool_lib`) public API more lean in release
 
 ### Error Handling Unification
 

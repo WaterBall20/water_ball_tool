@@ -8,7 +8,12 @@
 //! Supports multi-threaded writing (producer-consumer pattern via `FileFinder::search_stream`
 //! for streaming file discovery), per-worker-thread progress bars, and large file (>512MiB) log notices.
 
-use crate::command::{BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb};
+//AI=== 引入非 panic 的进度条样式构造辅助，替换各处进度条模板的强制取值
+// Import the non-panicking progress-style helper, replacing panicking template unwraps.
+use crate::command::{
+    BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb, progress_style,
+};
+//AI_END===
 use crate::multi_progress_init;
 use clap::error::Result;
 use clap::{Args, Subcommand};
@@ -30,6 +35,17 @@ use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 use water_ball_tool_lib::wb_files_pack::{PackFileError, PackStructItemType};
 
 type ArcMutex<T> = Arc<Mutex<T>>;
+
+//AI=== 线程数兜底常量：用 const match 取 8 的非零值，替代对 NonZero::new(8) 的强制取值
+/// 线程数兜底值 / Fallback thread count.
+///
+/// 8 恒为合法非零值；`match` 在编译期求值，绝不 panic。
+/// 8 is always a valid non-zero value; the `match` is evaluated at compile time and never panics.
+const DEFAULT_THREAD_COUNT: usize = match NonZero::new(8) {
+    Some(v) => v.get(),
+    None => 8,
+};
+//AI_END===
 
 /// 水球包文件操作
 #[derive(Args, Debug)]
@@ -244,19 +260,23 @@ impl WaterBallFilePackArgsRuning {
                 if write_optimization {
                     info!("已启用写入优化，未更改的文件将跳过");
                 }
+                //AI=== 打开包文件失败向上传播错误，不再 panic
+                // Propagate the open error instead of panicking.
                 ManagerSync::options()
                     .read(true)
                     .write(true)
-                    .open(&pack_path)
-                    .expect("打开包文件错误")
+                    .open(&pack_path)?
+                //AI_END===
             } else {
                 info!("创建新包文件并初始化");
+                //AI=== 创建包文件失败向上传播错误，不再 panic
+                // Propagate the create error instead of panicking.
                 ManagerSync::options()
                     .write(true)
                     .create_new(true)
                     .separate_manifest(separate_manifest)
-                    .open(&pack_path)
-                    .expect("创建包文件错误")
+                    .open(&pack_path)?
+                //AI_END===
             }
         };
         //复制操作===
@@ -357,9 +377,12 @@ impl WaterBallFilePackArgsRuning {
             let thread_count = if let Some(v) = args.thread_count {
                 v
             } else {
+                //AI=== 可用并行度获取失败时回退常量，移除非零线程数的强制取值 panic 路径
+                // Fall back to the constant when available_parallelism() fails; no panic.
                 let thread_count = thread::available_parallelism()
-                    .unwrap_or(NonZero::new(8).expect("valid thread count"))
-                    .get();
+                    .map(|v| v.get())
+                    .unwrap_or(DEFAULT_THREAD_COUNT);
+                //AI_END===
                 info!("未指定线程数量，将最多使用{thread_count}个线程");
                 thread_count
             };
@@ -375,6 +398,7 @@ impl WaterBallFilePackArgsRuning {
             let file_count = Arc::new(AtomicU64::new(0));
 
             //创建专门的线程搜索
+            //AI=== 搜索线程创建失败向上传播（原 thread::spawn 会 panic）/ propagate search-thread spawn failure (thread::spawn would panic)
             let ff_thread = Self::wbfp_p_search(
                 in_path,
                 results.clone(),
@@ -382,9 +406,11 @@ impl WaterBallFilePackArgsRuning {
                 &file_count,
                 &data_len,
                 ff_pb,
-            );
+            )?;
+            //AI_END===
 
             //复制线程
+            //AI=== 复制线程创建失败向上传播（原 thread::spawn 会 panic）/ propagate copy-thread spawn failure (thread::spawn would panic)
             let wp_thread = Self::wbfp_p_copy(
                 &pack,
                 results,
@@ -396,19 +422,31 @@ impl WaterBallFilePackArgsRuning {
                 wb_pb,
                 data_len,
                 file_count,
-            );
+            )?;
+            //AI_END===
             //等待线程结束
-            if let Err(e) = ff_thread.join().expect("ff_thread join failed") {
+            //AI=== 线程 join 失败（线程 panic）转为错误传播，不再 expect panic
+            // Convert a failed join (thread panicked) into an error instead of panicking.
+            if let Err(e) = ff_thread
+                .join()
+                .map_err(|_| Error::other("文件搜索线程异常退出 / file search thread panicked"))?
+            {
                 error!("文件搜索线程错误：{e}");
             }
             ff_end.store(true, Ordering::Release);
-            wp_thread.join().expect("wp_thread join failed");
+            wp_thread
+                .join()
+                .map_err(|_| Error::other("复制线程异常退出 / copy thread panicked"))??;
+            //AI_END===
         }
         info!("操作已完成,文件保存到{}", pack_path.display());
         Ok(())
     }
 
     ///打包搜索线程
+    //AI=== 线程创建失败必须返回错误：返回 io::Result<JoinHandle<...>>，创建失败由调用方用 ? 传播
+    // Thread creation failure MUST be returned: return io::Result<JoinHandle<...>> so the caller
+    // propagates it with `?`.
     fn wbfp_p_search(
         in_path: &Path,
         results: ConcurrentRing<(PathBuf, FileInfo)>,
@@ -416,7 +454,8 @@ impl WaterBallFilePackArgsRuning {
         file_count: &Arc<AtomicU64>,
         data_len: &Arc<AtomicU64>,
         ff_pb: ProgressBar,
-    ) -> JoinHandle<Result<(), Error>> {
+    ) -> io::Result<JoinHandle<io::Result<()>>> {
+        //AI_END===
         use std::thread;
 
         //创建专门的线程搜索
@@ -427,7 +466,10 @@ impl WaterBallFilePackArgsRuning {
             let file_count = file_count.clone();
             let data_len = data_len.clone();
 
-            thread::spawn(move || -> io::Result<()> {
+            //AI=== 线程创建失败必须返回错误：Builder::new().name(...).spawn(...)，禁止会 panic 的 thread::spawn
+            // Thread creation failure MUST be returned: Builder::new().name(...).spawn(...); the
+            // panicking thread::spawn is forbidden.
+            let worker = move || -> io::Result<()> {
                 let ff = FileFinder;
                 let dir_count = Arc::new(AtomicU64::new(0));
                 //搜索进度
@@ -438,7 +480,9 @@ impl WaterBallFilePackArgsRuning {
                 {
                     let file_count = file_count.clone();
                     let dir_count = dir_count.clone();
-                    thread::spawn(move || {
+                    //AI=== 线程创建失败必须返回错误：用 ? 传播（所在闭包返回 io::Result）
+                    // Thread creation failure MUST be returned: propagate with `?` (the enclosing closure returns io::Result).
+                    let progress_worker = move || {
                         for (add_file, add_dir) in rx {
                             file_count.fetch_add(add_file, Ordering::Release);
                             dir_count.fetch_add(add_dir, Ordering::Release);
@@ -455,7 +499,11 @@ impl WaterBallFilePackArgsRuning {
                                 ));
                             }
                         }
-                    });
+                    };
+                    thread::Builder::new()
+                        .name("wbfp-pack-search-progress".to_string())
+                        .spawn(progress_worker)?;
+                    //AI_END===
                 }
 
                 for event in stream_results {
@@ -476,9 +524,11 @@ impl WaterBallFilePackArgsRuning {
                     }
                 }
 
-                search_stream_handle
-                    .join()
-                    .expect("search_stream_handle join failed")?;
+                //AI=== 搜索子线程 join 失败转为 io 错误传播 / propagate join failure as io error
+                search_stream_handle.join().map_err(|_| {
+                    Error::other("文件搜索子线程异常退出 / search stream thread panicked")
+                })??;
+                //AI_END===
                 info!(
                     "文件搜索已完成: {}个文件，{}个目录, 大小:{}",
                     file_count.load(Ordering::Acquire),
@@ -487,10 +537,17 @@ impl WaterBallFilePackArgsRuning {
                 );
                 ff_end.store(true, Ordering::Release);
                 Ok(())
-            })
+            };
+            thread::Builder::new()
+                .name("wbfp-pack-search".to_string())
+                .spawn(worker)
+            //AI_END===
         }
     }
 
+    //AI=== 线程创建失败必须返回错误：返回 io::Result<JoinHandle<...>>，创建失败由调用方用 ? 传播
+    // Thread creation failure MUST be returned: return io::Result<JoinHandle<...>> so the caller
+    // propagates it with `?`.
     fn wbfp_p_copy(
         pack: &ManagerSync,
         results: ConcurrentRing<(PathBuf, FileInfo)>,
@@ -502,7 +559,8 @@ impl WaterBallFilePackArgsRuning {
         wb_pb: ArcMutex<ProgressBar>,
         data_len: Arc<AtomicU64>,
         file_count: Arc<AtomicU64>,
-    ) -> JoinHandle<()> {
+    ) -> io::Result<JoinHandle<io::Result<()>>> {
+        //AI_END===
         use std::thread;
         let pack = pack.clone();
         let results = results.clone();
@@ -514,41 +572,65 @@ impl WaterBallFilePackArgsRuning {
         for _ in 0..thread_count {
             let pb = create_pb(mp);
 
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .expect("设置进度条模板失败")
-                    .progress_chars("=>-"),
-            );
+            //AI=== 使用非 panic 的样式构造辅助，模板非法时降级为默认样式
+            // Use the non-panicking style helper; fall back to the default style on bad templates.
+            pb.set_style(progress_style(PACK_PROGRESS_STYLE_TEMPLATE).progress_chars("=>-"));
+            //AI_END===
 
             wb_pbs.push(pb);
         }
 
-        thread::spawn(move || {
+        //AI=== 线程创建失败必须返回错误：Builder::new().name(...).spawn(...)，禁止会 panic 的 thread::spawn
+        // Thread creation failure MUST be returned: Builder::new().name(...).spawn(...); the
+        // panicking thread::spawn is forbidden.
+        let worker = move || -> io::Result<()> {
             let (tx, rx) = mpsc::channel();
             let mut thread_handle = Vec::with_capacity(thread_count);
+            //工作线程创建失败暂存，待已派发线程 join 完成后再向上返回 / stash the spawn failure, returned after joining dispatched workers
+            let mut spawn_error: Option<Error> = None;
             //
             for index in 0..thread_count {
                 let main_pb_tx = tx.clone();
                 let pack_man = pack.clone();
                 let files_list = results.clone();
                 let in_dir_path = in_dir_path.clone();
-                let pb = wb_pbs
-                    .pop()
-                    .expect("逻辑错误：线程获取线程进度条，进度条不存在");
+                //AI=== 逻辑错误：派发循环次数与进度条数量一致，pop 失败说明不变量被破坏
+                // 逻辑错误：每个工作线程在派发前都已创建对应进度条，`pop` 必然成功。
+                // Logic error: one progress bar is created per dispatched worker, so `pop` must succeed.
+                let Some(pb) = wb_pbs.pop() else {
+                    unreachable!(
+                        "逻辑错误：打包工作线程缺少进度条 / logic error: pack worker has no progress bar"
+                    );
+                };
+                //AI_END===
                 let ff_end = ff_end.clone();
                 pb.set_prefix(format!("线程{index}"));
-                thread_handle.push(thread::spawn(move || {
-                    Self::wbfp_p_work(
-                        pack_man,
-                        pb,
-                        files_list.clone(),
-                        &in_dir_path,
-                        &ff_end,
-                        &main_pb_tx,
-                        write_optimization,
-                    );
-                }));
+                //AI=== 工作线程创建失败必须返回错误：Builder + 暂存错误，禁止会 panic 的 thread::spawn
+                // Worker-creation failure MUST be returned: Builder + stashed error; the panicking
+                // thread::spawn is forbidden.
+                match thread::Builder::new()
+                    .name(format!("wbfp-pack-worker-{index}"))
+                    .spawn(move || {
+                        Self::wbfp_p_work(
+                            pack_man,
+                            pb,
+                            files_list.clone(),
+                            &in_dir_path,
+                            &ff_end,
+                            &main_pb_tx,
+                            write_optimization,
+                        );
+                    }) {
+                    Ok(handle) => thread_handle.push(handle),
+                    Err(e) => {
+                        error!(
+                            "创建工作线程失败，停止派发剩余工作线程 / failed to spawn a worker, stopping dispatch: {e}"
+                        );
+                        spawn_error = Some(e);
+                        break;
+                    }
+                }
+                //AI_END===
             }
 
             drop(tx); //释放用不到的发送器，否则死锁。
@@ -581,10 +663,27 @@ impl WaterBallFilePackArgsRuning {
             }
 
             //等待所有工作线程结束
+            //AI=== 工作线程 join 失败仅记录错误，主聚合线程不 panic
+            // A failed worker join only logs an error; the aggregation thread does not panic.
             for item in thread_handle {
-                item.join().expect("thread join failed");
+                if item.join().is_err() {
+                    error!("工作线程异常退出（panic），已忽略其余结果");
+                }
             }
-        })
+            //AI_END===
+            //AI=== 工作线程创建失败在所有已派发线程 join 完成后向上传播
+            // Propagate the worker-creation failure after all dispatched workers have been joined.
+            if let Some(e) = spawn_error {
+                return Err(e);
+            }
+            Ok(())
+            //AI_END===
+        };
+        // 汇总线程创建失败同样向上传播 / the aggregator thread also propagates creation failures
+        thread::Builder::new()
+            .name("wbfp-pack-copy".to_string())
+            .spawn(worker)
+        //AI_END===
     }
 
     /// 工作线程的核心循环：从共享文件队列中取文件并写入包文件。
@@ -639,11 +738,9 @@ impl WaterBallFilePackArgsRuning {
                     break 'write_pack;
                 }
                 //设置进度条样式
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(SPINNER_TEMPLATE)
-                        .expect("设置进度条模板失败"),
-                );
+                //AI=== 非 panic 样式构造 / non-panicking style construction
+                pb.set_style(progress_style(SPINNER_TEMPLATE));
+                //AI_END===
                 pb.set_message("已挂起");
                 let r = match files_list.pop_wait() {
                     Ok(v) => v,
@@ -657,18 +754,26 @@ impl WaterBallFilePackArgsRuning {
                     }
                 };
                 //恢复进度条样式
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                        .expect("设置进度条模板失败")
-                        .progress_chars("=>-"),
-                );
+                //AI=== 非 panic 样式构造 / non-panicking style construction
+                pb.set_style(progress_style(PACK_PROGRESS_STYLE_TEMPLATE).progress_chars("=>-"));
+                //AI_END===
                 r
             };
             //写入文件前处理
             //路径处理
-            let pack_path = PathTool::path_remove_head(file_path.as_path(), in_dir_path)
-                .expect("路径去除头部失败");
+            //AI=== 去除输入目录前缀失败时记录错误并跳过该文件，不再 panic
+            // Log and skip the file when stripping the input-dir prefix fails (no panic).
+            let Some(pack_path) = PathTool::path_remove_head(file_path.as_path(), in_dir_path)
+            else {
+                error!(
+                    r#"无法从路径"{}"中去除输入目录前缀"{}"，将跳过该文件"#,
+                    file_path.display(),
+                    in_dir_path.display()
+                );
+                let _ = main_pb_tx.send((1, 0)); //仍然计入文件数量 / still count the file
+                continue 'write_pack;
+            };
+            //AI_END===
             Self::copy_file_into_pack(
                 &mut pack_man,
                 &mut run_buf,
@@ -919,9 +1024,13 @@ impl WaterBallFilePackArgsRuning {
 
         info!("开始准备解包");
         info!("打开包文件");
-        let mut pack = ManagerSync::open(pack_path).expect("打开包文件错误");
+        //AI=== 打开包文件/创建输出目录失败向上传播错误，不再 panic
+        // Propagate open / create-dir errors instead of panicking.
+        let mut pack = ManagerSync::open(pack_path)
+            .map_err(|e| Error::other(format!("打开包文件错误 / failed to open pack file: {e}")))?;
         info!("开始复制数据");
-        fs::create_dir_all(&out_dir_path).expect("无法创建数据路径");
+        fs::create_dir_all(&out_dir_path)?;
+        //AI_END===
 
         let out_dir_path: Arc<PathBuf> = Arc::new(out_dir_path);
         let root_name_list = pack.get_root_struct_item_name_list()?;
@@ -965,6 +1074,8 @@ impl WaterBallFilePackArgsRuning {
             }
 
             for _ in 0..thread_count {
+                //AI=== 解包工作线程创建失败向上传播（原 thread::spawn 会 panic）
+                // Propagate unpack-worker spawn failures (thread::spawn would panic).
                 Self::wpfp_u_work(
                     &pack,
                     queue.clone(),
@@ -975,7 +1086,8 @@ impl WaterBallFilePackArgsRuning {
                     &out_dir_path,
                     &mut handles,
                     args.hash_verify,
-                );
+                )?;
+                //AI_END===
             }
             (handles, rx)
         };
@@ -996,14 +1108,19 @@ impl WaterBallFilePackArgsRuning {
             }
         }
 
+        //AI=== 解包线程 join 失败转为 io 错误传播 / propagate unpack-thread join failure
         for h in handles {
-            h.join().expect("等待线程错误")?;
+            h.join()
+                .map_err(|_| Error::other("解包线程异常退出 / unpack thread panicked"))??;
         }
+        //AI_END===
 
         info!("操作已完成,文件保存到目录{}", out_dir_path.display());
         Ok(())
     }
 
+    //AI=== 线程创建失败必须返回错误：返回 io::Result<()> 并由调用方用 ? 传播
+    // Thread creation failure MUST be returned: return io::Result<()> and let the caller propagate with `?`.
     fn wpfp_u_work(
         pack: &ManagerSync,
         queue: ConcurrentRing<PathBuf>,
@@ -1014,17 +1131,28 @@ impl WaterBallFilePackArgsRuning {
         out_dir_path: &Arc<PathBuf>,
         handles: &mut Vec<JoinHandle<Result<(), Error>>>,
         hash_verify: bool,
-    ) {
+    ) -> io::Result<()> {
+        //AI_END===
         use std::thread;
         let mut pack = pack.clone();
         let queue = queue.clone();
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
+        //AI=== 逻辑错误：解包工作线程数量与进度条数量一致，pop 失败说明不变量被破坏
+        // 逻辑错误：每个解包工作线程在派发前都已创建对应进度条，`pop` 必然成功。
+        // Logic error: one progress bar is created per unpack worker, so `pop` must succeed.
+        let Some(pb) = worker_pbs.pop() else {
+            unreachable!(
+                "逻辑错误：解包工作线程缺少进度条 / logic error: unpack worker has no progress bar"
+            );
+        };
+        //AI_END===
         let out_dir_path = out_dir_path.to_path_buf();
 
-        handles.push(thread::spawn(move || -> io::Result<()> {
+        //AI=== 线程创建失败必须返回错误：Builder + ? 传播，禁止会 panic 的 thread::spawn
+        // Thread creation failure MUST be returned: Builder + `?`; the panicking thread::spawn is forbidden.
+        let worker = move || -> io::Result<()> {
             let mut run_buf = vec![0u8; BUF_LEN];
 
             loop {
@@ -1151,7 +1279,16 @@ impl WaterBallFilePackArgsRuning {
                     }
                 }
             }
-        }));
+        };
+        //工作线程编号取自已派发句柄数，避免新增参数 / worker index comes from the dispatched handle count, avoiding a new argument
+        let worker_index = handles.len();
+        handles.push(
+            thread::Builder::new()
+                .name(format!("wbfp-unpack-worker-{worker_index}"))
+                .spawn(worker)?,
+        );
+        Ok(())
+        //AI_END===
     }
 
     fn get_queue_path(
@@ -1165,11 +1302,9 @@ impl WaterBallFilePackArgsRuning {
             if all_done.load(Ordering::Acquire) {
                 return None;
             }
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(SPINNER_TEMPLATE)
-                    .expect("设置进度条模板失败"),
-            );
+            //AI=== 非 panic 样式构造 / non-panicking style construction
+            pb.set_style(progress_style(SPINNER_TEMPLATE));
+            //AI_END===
             pb.set_message("已挂起");
             let r = match queue.pop_wait() {
                 Ok(p) => p,
@@ -1182,12 +1317,9 @@ impl WaterBallFilePackArgsRuning {
                     return None;
                 }
             };
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .expect("设置进度条模板失败")
-                    .progress_chars("=>-"),
-            );
+            //AI=== 非 panic 样式构造 / non-panicking style construction
+            pb.set_style(progress_style(PACK_PROGRESS_STYLE_TEMPLATE).progress_chars("=>-"));
+            //AI_END===
             r
         })
     }
@@ -1307,16 +1439,11 @@ impl WaterBallFilePackArgsRuning {
         args: &WaterBallFilePackCommandsHashVerify,
         mp: MultiProgress,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use std::thread;
-
+        //AI=== 复用统一的线程数解析，移除此处线程数强制取值的 panic 路径
+        // Reuse the shared thread-count resolution; removes the panicking fallback here.
         let pack_path = &args.pack_path;
-        let thread_count = args.thread_count.unwrap_or_else(|| {
-            let r = thread::available_parallelism()
-                .unwrap_or(NonZero::new(8).expect("valid parallelism"))
-                .get();
-            info!("未指定线程数量，将最多使用{r}个线程");
-            r
-        });
+        let thread_count = Self::get_thread_count(args.thread_count);
+        //AI_END===
 
         info!("开始准备哈希校验");
         info!("打开包文件");
@@ -1373,12 +1500,9 @@ impl WaterBallFilePackArgsRuning {
         let main_pb = create_pb(mp);
 
         main_pb.set_length(data_len);
-        main_pb.set_style(
-            ProgressStyle::default_bar()
-                .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                .expect("设置进度条模板失败")
-                .progress_chars("=>-"),
-        );
+        //AI=== 非 panic 样式构造 / non-panicking style construction
+        main_pb.set_style(progress_style(PACK_PROGRESS_STYLE_TEMPLATE).progress_chars("=>-"));
+        //AI_END===
         main_pb.set_prefix("总进度");
 
         let pending = Arc::new(AtomicUsize::new(root_name_list.len()));
@@ -1388,12 +1512,9 @@ impl WaterBallFilePackArgsRuning {
         let mut worker_pbs = Vec::with_capacity(thread_count);
         for i in 0..thread_count {
             let pb = create_pb(mp);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template(PACK_PROGRESS_STYLE_TEMPLATE)
-                    .expect("设置进度条模板失败")
-                    .progress_chars("=>-"),
-            );
+            //AI=== 非 panic 样式构造 / non-panicking style construction
+            pb.set_style(progress_style(PACK_PROGRESS_STYLE_TEMPLATE).progress_chars("=>-"));
+            //AI_END===
             pb.set_prefix(format!("线程{i} "));
             worker_pbs.push(pb);
         }
@@ -1407,6 +1528,8 @@ impl WaterBallFilePackArgsRuning {
                 let _ = queue.push(PathBuf::from(name));
             }
             for _ in 0..thread_count {
+                //AI=== 哈希校验工作线程创建失败向上传播（原 thread::spawn 会 panic）
+                // Propagate verify-worker spawn failures (thread::spawn would panic).
                 Self::wpfp_h_work(
                     pack,
                     queue.clone(),
@@ -1415,7 +1538,8 @@ impl WaterBallFilePackArgsRuning {
                     &tx,
                     &mut worker_pbs,
                     &mut handles,
-                );
+                )?;
+                //AI_END===
             }
             (handles, rx)
         };
@@ -1446,13 +1570,18 @@ impl WaterBallFilePackArgsRuning {
             }
         }
 
+        //AI=== 哈希校验线程 join 失败转为 io 错误传播 / propagate verify-thread join failure
         for h in handles {
-            h.join().expect("等待线程发生错误")?;
+            h.join()
+                .map_err(|_| Error::other("哈希校验线程异常退出 / verify thread panicked"))??;
         }
+        //AI_END===
 
         Ok(())
     }
 
+    //AI=== 线程创建失败必须返回错误：返回 io::Result<()> 并由调用方用 ? 传播
+    // Thread creation failure MUST be returned: return io::Result<()> and let the caller propagate with `?`.
     fn wpfp_h_work(
         pack: &ManagerSync,
         queue: ConcurrentRing<PathBuf>,
@@ -1461,15 +1590,26 @@ impl WaterBallFilePackArgsRuning {
         tx: &Sender<(String, u64, Option<bool>)>,
         worker_pbs: &mut Vec<ProgressBar>,
         handles: &mut Vec<JoinHandle<Result<(), Error>>>,
-    ) {
+    ) -> io::Result<()> {
+        //AI_END===
         use std::thread;
         let mut pack = pack.clone();
         let pending = pending.clone();
         let all_done = all_done.clone();
         let tx = tx.clone();
-        let pb = worker_pbs.pop().expect("逻辑错误：线程无法获得线程进度条");
+        //AI=== 逻辑错误：哈希校验工作线程数量与进度条数量一致，pop 失败说明不变量被破坏
+        // 逻辑错误：每个哈希校验工作线程在派发前都已创建对应进度条，`pop` 必然成功。
+        // Logic error: one progress bar is created per verify worker, so `pop` must succeed.
+        let Some(pb) = worker_pbs.pop() else {
+            unreachable!(
+                "逻辑错误：哈希校验工作线程缺少进度条 / logic error: verify worker has no progress bar"
+            );
+        };
+        //AI_END===
 
-        handles.push(thread::spawn(move || -> io::Result<()> {
+        //AI=== 线程创建失败必须返回错误：Builder + ? 传播，禁止会 panic 的 thread::spawn
+        // Thread creation failure MUST be returned: Builder + `?`; the panicking thread::spawn is forbidden.
+        let worker = move || -> io::Result<()> {
             loop {
                 // 1. 从队列取路径（空队列时 Condvar 挂起）
                 //    Pop path from queue (Condvar suspend when empty)
@@ -1562,14 +1702,26 @@ impl WaterBallFilePackArgsRuning {
                     }
                 }
             }
-        }));
+        };
+        //工作线程编号取自已派发句柄数，避免新增参数 / worker index comes from the dispatched handle count, avoiding a new argument
+        let worker_index = handles.len();
+        handles.push(
+            thread::Builder::new()
+                .name(format!("wbfp-hash-verify-worker-{worker_index}"))
+                .spawn(worker)?,
+        );
+        Ok(())
+        //AI_END===
     }
 
     fn get_thread_count(thread_count: Option<usize>) -> usize {
         thread_count.unwrap_or_else(|| {
+            //AI=== 可用并行度获取失败时回退常量，移除非零线程数的强制取值 panic 路径
+            // Fall back to the constant when available_parallelism() fails; no panic.
             let r = thread::available_parallelism()
-                .unwrap_or(NonZero::new(8).expect("逻辑错误"))
-                .get();
+                .map(|v| v.get())
+                .unwrap_or(DEFAULT_THREAD_COUNT);
+            //AI_END===
             info!("未指定线程数量，将最多使用{r}个线程");
             r
         })

@@ -168,7 +168,11 @@ impl WBFPManager {
                             two_item.set_metadata_file_pos(pos);
                         }
                     } else {
-                        panic!("逻辑错误， 元数据运行应为已加载");
+                        //AI=== 逻辑错误：load_metadata_to_item 成功后目录元数据必为 Loaded / logic error: dir metadata must be Loaded after load
+                        unreachable!(
+                            "逻辑错误， 元数据运行应为已加载 / logic error: metadata run must be Loaded"
+                        );
+                        //AI_END===
                     }
                     self.manifest
                         .root_struct_mut()
@@ -264,8 +268,14 @@ impl WBFPManager {
                         PackFileMetadataRun::Locked => {
                             Err(PackFileError::State("元数据被锁定".into()))?;
                         }
-                        PackFileMetadataRun::NoLoad => panic!("元数据没有被加载"),
-                        PackFileMetadataRun::None => panic!("逻辑错误：目录的元数据为空"),
+                        //AI=== 逻辑错误：上面 load_metadata_to_item 成功后元数据必为 Loaded / logic error: metadata must be Loaded after load
+                        PackFileMetadataRun::NoLoad => unreachable!(
+                            "逻辑错误，元数据没有被加载 / logic error: metadata is not loaded"
+                        ),
+                        PackFileMetadataRun::None => unreachable!(
+                            "逻辑错误：目录的元数据为空 / logic error: dir metadata is absent"
+                        ),
+                        //AI_END===
                     }
                 }
                 Ok(DirFileAddReturn {
@@ -293,11 +303,19 @@ impl WBFPManager {
                         let (_, pos) = self.save_metadata_write(metadata)?;
                         item.set_metadata_file_pos(pos);
                     } else {
-                        panic!("逻辑错误");
+                        //AI=== 逻辑错误：new_empty_dir 新建项的元数据必为 Loaded / logic error: new_empty_dir always builds Loaded metadata
+                        unreachable!(
+                            "逻辑错误，新建目录项的元数据必为已加载 / logic error: new dir item metadata must be Loaded"
+                        );
+                        //AI_END===
                     }
                     r
                 } else {
-                    panic!("逻辑错误")
+                    //AI=== 逻辑错误：new_empty_dir 新建项必为带结构的 Dir / logic error: new_empty_dir always yields a Dir holding a struct
+                    unreachable!(
+                        "逻辑错误，新建目录项必须持有目录结构 / logic error: new dir item must hold a dir struct"
+                    );
+                    //AI_END===
                 };
                 s_pack_struct.add_item(name.clone(), item);
                 Ok(DirFileAddReturn {

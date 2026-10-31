@@ -1,13 +1,15 @@
-use crate::command::music_play::decoder_runtime::{DecoderResult, DecoderRuntime};
+use crate::command::music_play::decoder_runtime::{DecoderError, DecoderResult, DecoderRuntime};
 use crate::command::music_play::effect::cross_bridge::CrossBridgeEffect;
 use crate::command::music_play::effect::resampler::ResamplerEffect;
 use crate::command::music_play::effect::runtime::{
-    PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventSink,
-    PreEffectRuntimeEventType,
+    PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventType,
 };
 use crate::command::music_play::effect::{
     AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
 };
+//AI=== 引入事件分发线程：实时回调只投递事件/日志，加锁与 sink 调用移到分发线程
+use crate::command::music_play::event_dispatch::{EventDispatcher, LogLevel};
+//AI_END===
 use crate::command::music_play::tools;
 use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -29,7 +31,21 @@ pub(super) struct Player {
     sound_engine: SoundEngine,
     control: Control,
     event_content: EventContent,
-    rx_cmd_thread: Arc<JoinHandle<()>>,
+    //AI=== rx_cmd 线程句柄改为 Option，停止时可取出并 join（不再依赖进程退出回收线程）
+    /// rx_cmd 线程句柄：`try_stop` 通过取出并 join 来回收该线程。
+    ///
+    /// Handle of the `rx_cmd` thread: `try_stop` takes and joins it so the thread is
+    /// reclaimed instead of leaking until process exit.
+    rx_cmd_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// rx_cmd 线程退出标志 / Stop flag for the rx_cmd thread
+    rx_cmd_stop: Arc<AtomicBool>,
+    //AI=== 关闭标志：保证 try_stop 只执行一次完整回收 / ensures the shutdown sequence runs once
+    /// 关闭标志：`try_stop` 首次调用置位，重复调用直接返回（幂等）。
+    ///
+    /// Shutdown flag: set by the first `try_stop` call; later calls return immediately (idempotent).
+    shutdown: Arc<AtomicBool>,
+    //AI_END===
+    //AI_END===
 }
 
 #[derive(Clone)]
@@ -57,6 +73,12 @@ struct EventContent {
     pre_effect_item_eof: Arc<AtomicBool>,
     pre_effect_item_eof_pos: Arc<AtomicUsize>,
     list: Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>,
+    //AI=== 音频回调事件走独立分发线程，回调内不再加锁 / callback events go through the dispatch thread
+    /// 事件分发器：音频回调只投递，sink 调用在分发线程执行。
+    ///
+    /// Event dispatcher: the audio callback only posts, sink invocation runs on the dispatch thread.
+    dispatcher: EventDispatcher,
+    //AI_END===
 }
 
 impl Player {
@@ -78,6 +100,11 @@ impl Player {
         let mut copy_acc = DurationAccumulator::new();
         let mut post_effect_acc = DurationAccumulator::new();
         let mut blocks = 0;
+        //AI=== 错误回调的日志也移到分发线程，避免在音频线程里走日志 writer 的锁与分配
+        // 错误回调可能由音频线程调用，日志统一交给分发线程输出。
+        // The error callback may run on the audio thread; logs are routed to the dispatch thread.
+        let error_dispatcher = event_content.dispatcher.clone();
+        //AI_END===
 
         device.build_output_stream(
             config,
@@ -159,12 +186,14 @@ impl Player {
                     if this_pos == 0 {
                         pre_effect_item_eof.store(false, Ordering::Release);
                         pos.store(0, Ordering::Release);
-                        Self::emit(
-                            PlayerEvent {
-                                result: Ok(PlayerEventType::TrackEnded),
-                            },
-                            &event_content.list,
-                        );
+                        //AI=== 实时回调不再直接调用 sink：只把事件投递给分发线程
+                        // 音频回调里不做加锁/回调调用，事件由分发线程处理。
+                        // The realtime callback no longer invokes sinks directly; it only posts
+                        // the event, and the dispatch thread performs the locking and callbacks.
+                        event_content
+                            .dispatcher
+                            .try_emit_event(PlayerEvent::track_ended());
+                        //AI_END===
                     }
                 }
 
@@ -177,20 +206,17 @@ impl Player {
                     post_effect_acc.flush_into(&time_metrics.callback_post_effect);
                 }
             },
-            |err| error!("流错误: {err}"),
+            //AI=== 流错误日志改由分发线程输出 / stream errors are logged on the dispatch thread
+            move |err| {
+                error_dispatcher.try_log(LogLevel::Error, format!("流错误 / stream error: {err}"))
+            },
+            //AI_END===
             None,
         )
     }
 
-    fn emit(event: PlayerEvent, list: &Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>) {
-        let event = Arc::new(event);
-        let mut list = list
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for sink in list.iter_mut() {
-            sink.emit(event.clone());
-        }
-    }
+    //AI=== 旧的直接 emit 已移除：sink 调用统一由 EventDispatcher 线程执行 / removed in favor of EventDispatcher
+    //AI_END===
 }
 impl Player {
     pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -235,7 +261,13 @@ impl Player {
             pre_effect_runtime.clone(),
             time_metrics.clone(),
         );
-        decoder_runtime.run();
+        //AI=== 解码线程创建失败必须中止播放器初始化 / abort player init when the decoder thread cannot start
+        // `DecoderError` 不满足 `Sync`，因此把启动失败转成可读错误信息传播。
+        // `DecoderError` is not `Sync`, so the startup failure is propagated as a readable message.
+        decoder_runtime
+            .run()
+            .map_err(|e| format!("启动解码器线程失败 / failed to start decoder runtime: {e:?}"))?;
+        //AI_END===
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let pos = Arc::new(AtomicU64::new(0));
         let is_playing = Arc::new(AtomicBool::new(false));
@@ -243,6 +275,9 @@ impl Player {
         let pre_effect_item_eof = Arc::new(AtomicBool::new(false));
         let pre_effect_item_eof_pos = Arc::new(AtomicUsize::new(0));
         let list = Arc::new(Mutex::new(Vec::new()));
+        //AI=== 事件分发线程创建失败必须中止播放器初始化 / abort player init when the dispatch thread cannot start
+        let dispatcher = EventDispatcher::new(list.clone())?;
+        //AI_END===
 
         {
             let pre_effect_item_eof = pre_effect_item_eof.clone();
@@ -260,13 +295,16 @@ impl Player {
                     }
                 },
             )));
-            pre_effect_runtime.run();
+            //AI=== 前效果器线程创建失败必须中止播放器初始化 / abort player init when the pre-effect thread cannot start
+            pre_effect_runtime.run()?;
+            //AI_END===
         }
 
         let event_content = EventContent {
             pre_effect_item_eof,
             pre_effect_item_eof_pos,
             list,
+            dispatcher,
         };
 
         let effect_chain = Arc::new(Mutex::new(PostEffectChain::new(AudioFormat::new(
@@ -298,37 +336,49 @@ impl Player {
             time_metrics.clone(),
         )?);
 
+        //AI=== rx_cmd 线程改为可停止：带退出标志与可取出 join 的句柄
+        // rx_cmd 线程通过退出标志结束阻塞等待；句柄存入 Mutex，`try_stop` 可取出并 join。
+        // The rx_cmd thread exits through a stop flag; its handle is kept in a Mutex so that
+        // `try_stop` can take and join it.
+        let rx_cmd_stop = Arc::new(AtomicBool::new(false));
         let rx_cmd_thread = {
             let stream = stream.clone();
-            Arc::new(
-                thread::Builder::new()
-                    .name("rx_cmd".to_string())
-                    .spawn(move || {
-                        for cmd in rx_done {
-                            match cmd {
-                                PlayCmd::Play => {
-                                    is_playing.store(true, Ordering::Relaxed);
-                                    if let Err(e) = stream.play() {
-                                        error!("播放发生错误： {e}");
-                                    }
+            let rx_cmd_stop = rx_cmd_stop.clone();
+            let join_handle = thread::Builder::new()
+                .name("rx_cmd".to_string())
+                .spawn(move || {
+                    while !rx_cmd_stop.load(Ordering::Acquire) {
+                        let cmd = match rx_done.recv_timeout(Duration::from_millis(50)) {
+                            Ok(cmd) => cmd,
+                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                        };
+                        match cmd {
+                            PlayCmd::Play => {
+                                is_playing.store(true, Ordering::Relaxed);
+                                if let Err(e) = stream.play() {
+                                    error!("播放发生错误： {e}");
                                 }
-                                PlayCmd::Pause => {
-                                    is_playing.store(false, Ordering::Relaxed);
-                                    if let Err(e) = stream.pause() {
-                                        error!("暂停发生错误{e}");
-                                    }
-                                }
-                                PlayCmd::Seek(_) => {
-                                    // C3: 不 panic
-                                    error!("Seek is not implemented");
-                                }
-                                PlayCmd::ClearEofBuf => {}
                             }
+                            PlayCmd::Pause => {
+                                is_playing.store(false, Ordering::Relaxed);
+                                if let Err(e) = stream.pause() {
+                                    error!("暂停发生错误{e}");
+                                }
+                            }
+                            PlayCmd::Seek(_) => {
+                                // C3: 不 panic
+                                error!("Seek is not implemented");
+                            }
+                            PlayCmd::ClearEofBuf => {}
                         }
-                    })
-                    .map_err(|e| format!("无法创建 rx_cmd 线程: {e}"))?,
-            )
+                    }
+                    debug!("rx_cmd 线程退出 / rx_cmd thread exited");
+                })
+                .map_err(|e| format!("无法创建 rx_cmd 线程: {e}"))?;
+            Arc::new(Mutex::new(Some(join_handle)))
         };
+        //AI_END===
 
         Ok(Self {
             sound_engine: SoundEngine {
@@ -345,6 +395,10 @@ impl Player {
             pos,
             event_content,
             rx_cmd_thread,
+            rx_cmd_stop,
+            //AI=== 关闭标志初始为 false，首次 try_stop 置位 / shutdown starts false, set by the first try_stop
+            shutdown: Arc::new(AtomicBool::new(false)),
+            //AI_END===
         })
     }
 
@@ -447,19 +501,81 @@ impl Player {
         self.try_stop()
     }
 
+    //AI=== 退出路径：按「暂停回调 → 停前效果器 → 停解码器 → 停事件线程 → join rx_cmd」顺序回收资源
+    /// 完整停止播放器：暂停音频回调，依次停止前效果器线程、解码线程、事件分发线程，
+    /// 最后 join rx_cmd 线程。可从任意克隆重复调用（幂等）。
+    ///
+    /// 顺序说明：先停前效果器，其 `reject_waiting_writers` 会唤醒阻塞在 `push_wait` 上的
+    /// 解码线程，避免 join 时互相等待。
+    ///
+    /// Fully stop the player: pause the audio callbacks, then stop the pre-effect thread, the
+    /// decoder thread and the event dispatch thread in order, and finally join the rx_cmd
+    /// thread. Safe to call repeatedly from any clone (idempotent).
+    ///
+    /// Ordering: the pre-effect runtime is stopped first because its
+    /// `reject_waiting_writers` wakes producers blocked in `push_wait`, preventing a join
+    /// deadlock.
     pub fn try_stop(&self) -> DecoderResult<()> {
-        if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
-            error!("stop pre_effect runtime error: {e:?}");
+        //AI=== 幂等：只有第一次调用执行完整回收 / idempotent: only the first call runs the shutdown
+        if self.shutdown.swap(true, Ordering::AcqRel) {
+            // 已停止：不重复暂停、停线程或记录错误日志 / already stopped: avoid duplicate work and logs
+            return Ok(());
         }
+        //AI_END===
+        // 1. 暂停音频回调，避免回调继续产生事件 / pause callbacks so no new events appear
+        self.control.is_playing.store(false, Ordering::Release);
+        if let Err(e) = self.sound_engine.stream.pause() {
+            error!("停止播放时暂停音频流失败 / failed to pause the stream: {e}");
+        }
+        self.rx_cmd_stop.store(true, Ordering::Release);
+        // 2. 先停前效果器：拒绝写入会唤醒阻塞的生产者 / stop the pre-effect runtime first
+        if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
+            error!("停止前效果器运行时失败 / failed to stop the pre-effect runtime: {e:?}");
+        }
+        // 3. 停解码线程 / stop the decoder thread
+        let mut decoder_runtime = self.sound_engine.decoder_runtime.clone();
+        if let Err(e) = decoder_runtime.stop() {
+            error!("停止解码器运行时失败 / failed to stop the decoder runtime: {e:?}");
+        }
+        // 4. 停事件分发线程（回调已暂停，不会再有新事件）/ stop the dispatch thread
+        self.event_content.dispatcher.stop();
+        //AI=== 停止后报告分发通道的丢包数量 / report dropped dispatch messages after stopping
+        let dropped = self.event_content.dispatcher.dropped();
+        if dropped > 0 {
+            debug!(
+                "事件分发线程丢弃了 {dropped} 条消息 / dispatch thread dropped {dropped} messages"
+            );
+        }
+        //AI_END===
+        // 5. 等待 rx_cmd 线程退出 / join the rx_cmd thread
+        Self::join_rx_cmd_thread(&self.rx_cmd_thread);
         Ok(())
     }
 
+    /// 取出并 join rx_cmd 线程；线程 panic 只记录错误，不向上传播。
+    ///
+    /// Take and join the rx_cmd thread; a thread panic is logged instead of propagated.
+    fn join_rx_cmd_thread(handle: &Arc<Mutex<Option<JoinHandle<()>>>>) {
+        let join_handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(join_handle) = join_handle
+            && let Err(e) = join_handle.join()
+        {
+            error!("rx_cmd 线程异常退出 / rx_cmd thread panicked: {e:?}");
+        }
+    }
+    //AI_END===
+
     pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
         self.sound_engine.decoder_runtime.set_resetting();
+        //AI=== 用 `?` 传播 skip 失败（`From<PreEffectError> for DecoderError` 已实现）/ propagate via `?`
         self.sound_engine
             .pre_effect_runtime
             .send_skip()
-            .expect("skip failed");
+            .map_err(DecoderError::from)?;
+        //AI_END===
         self.sound_engine.audio_ring_buffer.reject_pending_writers();
         self.sound_engine.decoder_runtime.set_decoder_path(path)?;
         // A5: 作废旧自动 Eof 状态
@@ -512,10 +628,11 @@ impl Player {
                 != 0
         {
             self.pre_effect_ring_buffer().reject_waiting_writers();
-            self.sound_engine
-                .pre_effect_runtime
-                .send_skip()
-                .expect("send skip failed");
+            //AI=== skip 发送失败只记录日志并继续清理 / log a failed skip and keep cleaning up
+            if let Err(e) = self.sound_engine.pre_effect_runtime.send_skip() {
+                error!("清理 Eof 缓冲区时发送 skip 失败 / failed to send skip: {e}");
+            }
+            //AI_END===
             if let Err(e) = self.control.tx_cmd.send(PlayCmd::ClearEofBuf) {
                 error!("clear_pre_effect_item_eof send PlayCmd::ClearEofBuf failed: {e:?}");
             }
@@ -542,23 +659,25 @@ impl Player {
     }
 }
 
+//AI=== 事件 sink 构造移出 trait：线程创建失败必须返回错误，而不是记录日志后返回失效 sink
+/// 播放器事件 sink。`new` 不再是 trait 方法：需要启动线程的 sink 通过 inherent `new` 返回错误。
+///
+/// Player event sink. `new` is no longer a trait method: sinks that spawn a thread expose an
+/// inherent `new` returning `io::Result` so spawn failures can be propagated.
 pub trait PlayerEventSink: Send + 'static {
     fn emit(&mut self, event: Arc<PlayerEvent>);
-    fn new<F>(f: F) -> Self
-    where
-        F: Fn(&PlayerEvent) + Send + 'static,
-        Self: Sized;
     fn type_of(&self) -> &'static str;
 }
+//AI_END===
 
 pub struct PlayerEventChannelSink(mpsc::Sender<Arc<PlayerEvent>>);
 
-impl PlayerEventSink for PlayerEventChannelSink {
-    fn emit(&mut self, event: Arc<PlayerEvent>) {
-        let _ = self.0.send(event);
-    }
-
-    fn new<F>(f: F) -> Self
+impl PlayerEventChannelSink {
+    //AI=== 线程创建失败返回错误 / return an error when the thread cannot be created
+    /// 创建基于通道的 sink：内部事件转发线程创建失败时返回错误。
+    ///
+    /// Create a channel-backed sink; returns an error if the forwarding thread cannot be spawned.
+    pub fn new<F>(f: F) -> std::io::Result<Self>
     where
         F: Fn(&PlayerEvent) + Send + 'static,
     {
@@ -569,10 +688,17 @@ impl PlayerEventSink for PlayerEventChannelSink {
                 for event in receiver {
                     f(&event);
                 }
-            })
-            .expect("创建线程失败");
-        Self(sender)
+            })?;
+        Ok(Self(sender))
     }
+    //AI_END===
+}
+
+impl PlayerEventSink for PlayerEventChannelSink {
+    fn emit(&mut self, event: Arc<PlayerEvent>) {
+        let _ = self.0.send(event);
+    }
+
     fn type_of(&self) -> &'static str {
         "PlayerEventChannelSink"
     }
@@ -584,6 +710,15 @@ pub(super) struct PlayerEvent {
 }
 
 impl PlayerEvent {
+    //AI=== 新增 TrackEnded 构造器：供音频回调与测试使用 / constructor shared by the callback and tests
+    /// 构造「一首曲目播放结束」事件 / Build a "track ended" event.
+    pub(super) fn track_ended() -> Self {
+        Self {
+            result: Ok(PlayerEventType::TrackEnded),
+        }
+    }
+    //AI_END===
+
     pub fn result(&self) -> &Result<PlayerEventType, PlayerEventError> {
         &self.result
     }

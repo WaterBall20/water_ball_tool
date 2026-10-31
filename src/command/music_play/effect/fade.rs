@@ -23,7 +23,11 @@ fn lut_cache() -> &'static Mutex<HashMap<u32, Arc<[f32]>>> {
 }
 
 fn get_lut(sample_rate: u32) -> Arc<[f32]> {
-    let mut map = lut_cache().lock().expect("LUT cache poisoned");
+    //AI=== 锁中毒时恢复内部数据而非 panic / Recover from mutex poisoning instead of panicking
+    let mut map = lut_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    //AI_END===
     if let Some(l) = map.get(&sample_rate) {
         return l.clone();
     }

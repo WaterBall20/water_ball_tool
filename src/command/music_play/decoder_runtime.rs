@@ -21,9 +21,9 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 use tracing::{debug, error};
-use water_ball_tool_lib::concurrent_ring::{
-    ConcurrentRing, ConcurrentRingError, ConcurrentRingErrorKind,
-};
+//AI=== 只保留实际使用的类型（不再直接引用 `ConcurrentRingError`）/ keep only the types actually used (no direct `ConcurrentRingError` reference)
+use water_ball_tool_lib::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
+//AI_END===
 
 #[derive(Clone)]
 pub(super) struct DecoderRuntime {
@@ -31,8 +31,9 @@ pub(super) struct DecoderRuntime {
     ring_buf: ConcurrentRing<AudioData>,
     stop: Arc<AtomicBool>,
     resetting: Arc<AtomicBool>,
-    engine: Arc<Mutex<Option<DecoderEngine>>>,
-    data: Arc<Mutex<Option<DecoderData>>>,
+    //AI=== engine 与 data 合并为单一 session，二者必然成对存在 / merge engine and data into a single session so they always exist as a pair
+    session: Arc<Mutex<Option<DecoderSession>>>,
+    //AI_END===
     event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
     effect_runtime: PreEffectRuntime,
     time_metrics: Arc<TimeMetrics>,
@@ -53,45 +54,83 @@ struct DecoderData {
     ring_buf_write_len: usize,
 }
 
+//AI=== 解码器会话：engine 与 data 必须成对出现，避免“一个有、一个没有”的不配对状态 / decoder session: engine and data must exist as a pair, preventing an unpaired "one present, one missing" state
+struct DecoderSession {
+    engine: DecoderEngine,
+    data: DecoderData,
+}
+//AI_END===
+
+//AI=== 环形缓冲区写入结果：主动拒绝（停止/切曲/寻道）属于正常控制流，必须与真实错误区分 / ring-write outcome: an intentional rejection (stop/track change/seek) is normal control flow and must be distinguished from a real error
+enum RingWriteOutcome {
+    /// 写入成功 / write succeeded
+    Written,
+    /// 写入被环主动拒绝（停止/切曲/寻道中），不是错误 / write rejected by the ring (stop/track change/seek), not an error
+    Rejected,
+    /// 已上报停止事件，调用方应停止解码 / stop event already emitted, the caller should stop decoding
+    Stopped,
+    /// 真实写入错误 / real write error
+    Failed(DecoderEventError),
+}
+//AI_END===
+
+//AI=== EOF 写入结果 / EOF-push outcome
+enum EofPushOutcome {
+    /// EOF 已写入环形缓冲区 / EOF pushed into the ring buffer
+    Pushed,
+    /// 写入被环主动拒绝（停止/切曲中），不是错误 / rejected by the ring (stop/track change), not an error
+    Rejected,
+    /// 真实错误 / real error
+    Failed(DecoderEventError),
+}
+//AI_END===
+
 impl DecoderRuntime {
     fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>) {
         let event = Arc::new(event);
-        let mut list = list.lock().expect("list is poisoned");
+        //AI=== 锁中毒时恢复内部数据而非 panic / Recover from mutex poisoning instead of panicking
+        let mut list = list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        //AI_END===
         for sink in list.iter_mut() {
             sink.emit(event.clone());
         }
     }
+    //AI=== 写入失败一律返回结果（真实错误不再 panic），并区分主动拒绝与真实错误 / write failures always return an outcome (no panic on real errors), distinguishing intentional rejection from real errors
     fn write_all_to_ring_buf(
         ring_buf: &ConcurrentRing<AudioData>,
         stop: &Arc<AtomicBool>,
         event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
         write_buf: &[f32],
         write_wait_acc: &mut DurationAccumulator,
-    ) -> Result<(), DecoderEventError> {
-        // 检查停止信号
+    ) -> RingWriteOutcome {
+        // 检查停止信号 / check the stop signal
         if stop.load(Ordering::Acquire) {
-            let e = DecoderEventError {
-                message: "Decoder stop".to_string(),
-                kind: DecoderEventErrorKind::DecoderStop,
-            };
             Self::emit(
                 DecoderEvent {
                     result: Ok(DecoderEventType::Stop),
                 },
                 event_list,
             );
-            return Err(e);
+            return RingWriteOutcome::Stopped;
         }
         let t1 = Instant::now();
-        if let Err(e) = ring_buf.push_wait(AudioData::Block(write_buf.to_vec())) {
-            if let ConcurrentRingErrorKind::WriteRejected(_) = e.kind {
-            } else {
-                panic!("ring_buf push failed, err: {e:?}");
-            }
-        }
+        let push_result = ring_buf.push_wait(AudioData::Block(write_buf.to_vec()));
         write_wait_acc.record(t1.elapsed());
-        Ok(())
+        match push_result {
+            Ok(()) => RingWriteOutcome::Written,
+            // WriteRejected/WriteRejectedPartial 是 reject_waiting_writers 主动拒绝的正常控制流（停止/切曲/寻道），不是运行期错误 / an intentional rejection by reject_waiting_writers during stop/track change/seek, not a runtime error
+            Err(e) if matches!(&e.kind, ConcurrentRingErrorKind::WriteRejected(_)) => {
+                RingWriteOutcome::Rejected
+            }
+            Err(e) => RingWriteOutcome::Failed(DecoderEventError::new(
+                format!("ring_buf push failed: {e}"),
+                DecoderEventErrorKind::RingBufferError(e.to_string()),
+            )),
+        }
     }
+    //AI_END===
 }
 
 impl DecoderRuntime {
@@ -104,8 +143,9 @@ impl DecoderRuntime {
             thread_handle: Arc::new(Mutex::new(None)),
             ring_buf,
             stop: Arc::new(AtomicBool::new(false)),
-            engine: Arc::new(Mutex::new(None)),
-            data: Arc::new(Mutex::new(None)),
+            //AI=== engine/data 两个 Option 合并为单一 session / merge the two engine/data Options into a single session
+            session: Arc::new(Mutex::new(None)),
+            //AI_END===
             resetting: Arc::new(AtomicBool::new(false)),
             event_list: Arc::new(Mutex::new(Vec::new())),
             effect_runtime,
@@ -114,70 +154,100 @@ impl DecoderRuntime {
         }
     }
 
-    pub fn run(&mut self) {
+    //AI=== run 返回 Result：线程创建失败向上传播；解码循环中的真实运行期错误上报后停止解码 / `run` returns Result: spawn failures propagate upward, and real runtime errors are reported then stop the decode loop
+    pub fn run(&mut self) -> DecoderResult<()> {
         let mut thread_handle_lock = self
             .thread_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if thread_handle_lock.is_none() {
-            let thread_handle = {
+            let spawn_result = {
                 let ring_buf = self.ring_buf.clone();
                 let stop = self.stop.clone();
                 let resetting = self.resetting.clone();
-                let engine = self.engine.clone();
-                let data = self.data.clone();
+                let session = self.session.clone();
                 let event_list = self.event_list.clone();
                 let time_metrics = self.time_metrics.clone();
                 let condvar = self.condvar.clone();
-                // 4. 解码循环
+                // 4. 解码循环 / decode loop
                 std::thread::Builder::new()
                     .name("decoder-runtime".into())
                     .spawn(move || -> () {
                         debug!("decoder run thread loop start");
                         let mut buf = Vec::new();
                         let mut out_buf = Vec::new();
-                        //统计数据
+                        //统计数据 / statistics
                         let mut decode_acc = DurationAccumulator::new();
                         let mut write_wait_acc = DurationAccumulator::new();
                         let mut blocks = 0;
 
                         loop {
-                            // 检查停止信号
+                            // 检查停止信号 / check the stop signal
                             if stop.load(Ordering::Acquire) {
                                 break;
                             }
-                            // 获取锁
-                            let mut engine_lock = engine.lock().expect("engine is poisoned");
+                            // 获取会话锁 / acquire the session lock
+                            //AI=== 锁中毒时恢复内部数据而非 panic / recover from mutex poisoning instead of panicking
+                            let mut session_lock = session
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            //AI_END===
+                            //AI=== resetting 时在同一把锁内 take()，engine 与 data 必然成对移除 / take() under the same lock while resetting so engine and data are always removed as a pair
                             if resetting.load(Ordering::Acquire) {
-                                engine_lock.take();
+                                session_lock.take();
                                 resetting.store(false, Ordering::Release);
                             }
-                            if let Some(engine) = &mut *engine_lock {
-                                let data_lock = data
-                                    .lock()
+                            //AI_END===
+                            //AI=== 没有会话时等待 condvar；原先“engine 有、data 无”的不配对状态已不可能出现 / wait on the condvar when there is no session; the previous unpaired "engine present, data missing" state is now impossible
+                            let Some(session_ref) = session_lock.as_mut() else {
+                                debug!("decoder runtime thread wait start");
+                                let _unused = condvar
+                                    .wait(session_lock)
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                let data = data_lock.as_ref().expect("data is none");
-                                //提前重分配
-                                if buf.capacity() < data.ring_buf_write_len {
-                                    buf.reserve_exact(data.ring_buf_write_len);
-                                    out_buf.reserve_exact(data.ring_buf_write_len);
+                                debug!("decoder runtime thread wait end");
+                                continue;
+                            };
+                            //AI_END===
+                            //提前重分配 / pre-reserve
+                            if buf.capacity() < session_ref.data.ring_buf_write_len {
+                                buf.reserve_exact(session_ref.data.ring_buf_write_len);
+                                out_buf.reserve_exact(session_ref.data.ring_buf_write_len);
+                            }
+                            //解码 / decode one packet
+                            let t0 = Instant::now();
+                            let packet = match session_ref.engine.format.next_packet() {
+                                Ok(Some(p)) => {
+                                    decode_acc.record(t0.elapsed());
+                                    p
                                 }
-                                //解码
-                                let t0 = Instant::now();
-                                let packet = match engine.format.next_packet() {
-                                    Ok(e) => {
-                                        decode_acc.record(t0.elapsed());
-                                        if let Some(p) = e {
-                                            p
-                                        } else {
-                                            debug!("decoder next_packet none");
-                                            ring_buf.push_wait(AudioData::Eof).expect(
-                                                "push Eof \
-                                        failed",
-                                            );
-                                            engine_lock.take();
-                                            drop(engine_lock);
-                                            drop(data_lock);
+                                Ok(None) => {
+                                    //AI=== EOF 写入失败必须上报错误并停止，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and stop, and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
+                                    let eof_outcome = match ring_buf.push_wait(AudioData::Eof) {
+                                        Ok(()) => EofPushOutcome::Pushed,
+                                        Err(e)
+                                        if matches!(
+                                                &e.kind,
+                                                ConcurrentRingErrorKind::WriteRejected(_)
+                                            ) =>
+                                            {
+                                                EofPushOutcome::Rejected
+                                            }
+                                        Err(e) => EofPushOutcome::Failed(
+                                            DecoderEventError::new(
+                                                format!("push Eof failed: {e}"),
+                                                DecoderEventErrorKind::RingBufferError(
+                                                    e.to_string(),
+                                                ),
+                                            ),
+                                        ),
+                                    };
+                                    if matches!(eof_outcome, EofPushOutcome::Pushed) {
+                                        // 取出会话，下轮回到等待 / take the session; the next iteration waits
+                                        session_lock.take();
+                                    }
+                                    drop(session_lock);
+                                    match eof_outcome {
+                                        EofPushOutcome::Pushed => {
                                             Self::emit(
                                                 DecoderEvent {
                                                     result: Ok(DecoderEventType::Eof),
@@ -186,103 +256,145 @@ impl DecoderRuntime {
                                             );
                                             continue;
                                         }
+                                        EofPushOutcome::Rejected => {
+                                            // 停止/切曲中的主动拒绝：不发送 Eof 成功事件，交由循环顶部处理 stop/resetting / intentional rejection during stop/track change: no Eof success event; the loop top handles stop/resetting
+                                            debug!("push Eof rejected by ring (stop/reset in progress) / 写入 EOF 被环拒绝（正在停止/重置）");
+                                            continue;
+                                        }
+                                        EofPushOutcome::Failed(e) => {
+                                            error!("push Eof failed: {e:?} / 写入 EOF 失败: {e:?}");
+                                            Self::emit(
+                                                DecoderEvent { result: Err(e) },
+                                                &event_list,
+                                            );
+                                            break;
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!("Error reading packet: {e}");
-                                        Self::emit(
-                                            DecoderEvent {
-                                                result: Err(DecoderEventError {
-                                                    message: format!("Error reading packet: {e}"),
-                                                    kind: DecoderEventErrorKind::NextPacketError(
-                                                        e.to_string(),
-                                                    ),
-                                                }),
-                                            },
-                                            &event_list,
-                                        );
+                                    //AI_END===
+                                }
+                                Err(e) => {
+                                    //AI=== next_packet 失败属于真实运行期错误：上报后停止解码 / a next_packet failure is a real runtime error: report then stop decoding
+                                    let event_error = DecoderEventError::new(
+                                        format!("Error reading packet: {e}"),
+                                        DecoderEventErrorKind::NextPacketError(e.to_string()),
+                                    );
+                                    drop(session_lock);
+                                    error!("Error reading packet: {e}");
+                                    Self::emit(
+                                        DecoderEvent {
+                                            result: Err(event_error),
+                                        },
+                                        &event_list,
+                                    );
+                                    break;
+                                    //AI_END===
+                                }
+                            };
+
+                            // 只处理当前音轨的帧 / process packets of the current track only
+                            if packet.track_id != session_ref.data.track_id {
+                                continue;
+                            }
+
+                            match session_ref.engine.decoder.decode(&packet) {
+                                Ok(decoded) => {
+                                    // 使用新方法进行交错转换 / interleave the decoded samples
+                                    decoded.copy_to_vec_interleaved(&mut buf);
+                                    out_buf.extend_from_slice(&buf);
+                                    if out_buf.len() < session_ref.data.ring_buf_write_len {
                                         continue;
                                     }
-                                };
-
-                                if packet.track_id != data.track_id {
+                                    // 阻塞写入前释放会话锁（保持原先写入前释放 engine/data 锁的行为）/ release the session lock before the blocking write (same as releasing the engine/data locks before)
+                                    drop(session_lock);
+                                    //AI=== 写入结果需区分成功/主动拒绝/停止/真实错误；失败时清空 out_buf，不带着旧数据继续 / distinguish written/rejected/stopped/failed; clear out_buf on failure so stale data is not reused
+                                    match Self::write_all_to_ring_buf(
+                                        &ring_buf,
+                                        &stop,
+                                        &event_list,
+                                        &out_buf,
+                                        &mut write_wait_acc,
+                                    ) {
+                                        RingWriteOutcome::Written => {
+                                            out_buf.clear();
+                                        }
+                                        RingWriteOutcome::Rejected => {
+                                            // 停止/切曲/寻道中的主动拒绝：丢弃旧数据，由循环顶部处理 stop/resetting / intentional rejection during stop/track change/seek: discard stale data; the loop top handles stop/resetting
+                                            out_buf.clear();
+                                            continue;
+                                        }
+                                        RingWriteOutcome::Stopped => {
+                                            // 停止事件已由 write_all_to_ring_buf 上报 / the stop event was already emitted by write_all_to_ring_buf
+                                            out_buf.clear();
+                                            break;
+                                        }
+                                        RingWriteOutcome::Failed(e) => {
+                                            out_buf.clear();
+                                            error!("write to ring buf failed: {e:?} / 写入环形缓冲区失败: {e:?}");
+                                            Self::emit(
+                                                DecoderEvent { result: Err(e) },
+                                                &event_list,
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    //AI_END===
+                                    //统计 / statistics
+                                    blocks += 1;
+                                    if blocks % tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0 {
+                                        decode_acc.flush_into(&time_metrics.decode);
+                                        write_wait_acc
+                                            .flush_into(&time_metrics.decode_write_wait);
+                                    }
+                                }
+                                Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                                    //AI=== 单帧 DecodeError 可恢复：上报后跳过该帧继续，保持原行为 / a single-frame DecodeError is recoverable: report then skip the frame, preserving the old behavior
+                                    let event_error = DecoderEventError::new(
+                                        format!("Decode error (skipping frame): {e}"),
+                                        DecoderEventErrorKind::DecodeError(e),
+                                    );
+                                    drop(session_lock);
+                                    error!("Decode error (skipping frame): {e}");
+                                    Self::emit(
+                                        DecoderEvent {
+                                            result: Err(event_error),
+                                        },
+                                        &event_list,
+                                    );
                                     continue;
+                                    //AI_END===
                                 }
-
-                                match engine.decoder.decode(&packet) {
-                                    Ok(decoded) => {
-                                        // 使用新方法进行交错转换
-                                        decoded.copy_to_vec_interleaved(&mut buf);
-                                        out_buf.extend_from_slice(&buf);
-                                        if out_buf.len() < data.ring_buf_write_len {
-                                            continue;
-                                        }
-
-                                        // 写入环形缓冲区
-                                        drop(engine_lock);
-                                        drop(data_lock);
-                                        if Self::write_all_to_ring_buf(
-                                            &ring_buf,
-                                            &stop,
-                                            &event_list,
-                                            &out_buf,
-                                            &mut write_wait_acc,
-                                        )
-                                        .is_err()
-                                        {
-                                            continue;
-                                        }
-                                        out_buf.clear();
-                                        //统计
-                                        blocks += 1;
-                                        if blocks % tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0
-                                        {
-                                            decode_acc.flush_into(&time_metrics.decode);
-                                            write_wait_acc
-                                                .flush_into(&time_metrics.decode_write_wait);
-                                        }
-                                    }
-                                    Err(symphonia::core::errors::Error::DecodeError(e)) => {
-                                        error!("Decode error (skipping frame): {e}");
-                                        Self::emit(
-                                            DecoderEvent {
-                                                result: Err(DecoderEventError {
-                                                    message: format!(
-                                                        "Decode error (skipping frame): {e}"
-                                                    ),
-                                                    kind: DecoderEventErrorKind::DecodeError(e),
-                                                }),
-                                            },
-                                            &event_list,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!("Fatal decode error: {e}");
-                                        Self::emit(
-                                            DecoderEvent {
-                                                result: Err(DecoderEventError {
-                                                    message: format!("Fatal decode error, err:{e}"),
-                                                    kind: DecoderEventErrorKind::from(e),
-                                                }),
-                                            },
-                                            &event_list,
-                                        );
-                                    }
+                                Err(e) => {
+                                    //AI=== 致命解码错误（非帧级 DecodeError）：上报后停止解码线程 / fatal decode error (not a frame-level DecodeError): report then stop the decode thread
+                                    let message = format!("Fatal decode error, err:{e}");
+                                    error!("Fatal decode error: {e}");
+                                    let event_error =
+                                        DecoderEventError::new(message, DecoderEventErrorKind::from(e));
+                                    drop(session_lock);
+                                    Self::emit(
+                                        DecoderEvent {
+                                            result: Err(event_error),
+                                        },
+                                        &event_list,
+                                    );
+                                    break;
+                                    //AI_END===
                                 }
-                            } else {
-                                debug!("decoder runtime thread wait start");
-                                let _unused = condvar
-                                    .wait(engine_lock)
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                debug!("decoder runtime thread wait end");
                             }
                         }
                         debug!("decoder run thread loop end");
                     })
-            }
-            .expect("创建线程错误");
+            };
+            //AI=== 线程创建失败必须返回错误，不能记录后继续 / a spawn failure must be returned instead of logged and ignored
+            let thread_handle = spawn_result.map_err(|e| DecoderError {
+                message: format!("create decoder thread failed: {e}"),
+                kind: DecoderErrorKind::ThreadSpawnError(e),
+            })?;
+            //AI_END===
             thread_handle_lock.replace(thread_handle);
         }
+        Ok(())
     }
+    //AI_END===
 
     pub fn set_resetting(&self) {
         self.resetting.store(true, Ordering::Release);
@@ -360,16 +472,14 @@ impl DecoderRuntime {
 
         let engine = DecoderEngine { format, decoder };
 
-        //更改解码器
-        let mut engine_lock = self
-            .engine
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        engine_lock.replace(engine);
-        self.data
+        //更改解码器 / replace the decoder
+        //AI=== 在同一把锁内成对替换 engine 与 data，避免再出现不配对状态 / replace engine and data as a pair under a single lock, so no unpaired state can occur
+        let session = DecoderSession { engine, data };
+        self.session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace(data);
+            .replace(session);
+        //AI_END===
         self.effect_runtime.reset(decoder_format)?;
         self.resetting.store(false, Ordering::Release);
         self.condvar.notify_one(); //唤醒
@@ -377,11 +487,13 @@ impl DecoderRuntime {
     }
 
     pub fn decoder_format(&self) -> Option<AudioFormat> {
-        let data = self
-            .data
+        //AI=== 从合并后的 session 读取 / read from the merged session
+        let session = self
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (*data).as_ref().map(|data| data.decoder_format)
+        session.as_ref().map(|session| session.data.decoder_format)
+        //AI_END===
     }
 
     pub fn add_event(&mut self, event: Box<dyn DecoderEventSink>) {
@@ -401,8 +513,12 @@ impl DecoderRuntime {
     pub fn stop(&mut self) -> DecoderResult<()> {
         self.stop.store(true, Ordering::Release);
         self.condvar.notify_one();
-        self.effect_runtime.send_skip().expect("send skip failed");
-        self.join()
+        //AI=== send_skip 失败也必须返回错误：先尝试发送 skip，始终执行 join，最后返回第一个错误 / a send_skip failure must be returned too: try skipping first, always join, then return the first error
+        let skip_result = self.effect_runtime.send_skip().map_err(DecoderError::from);
+        let join_result = self.join();
+        skip_result?;
+        join_result
+        //AI_END===
     }
 
     pub fn join(&mut self) -> DecoderResult<()> {
@@ -423,68 +539,59 @@ impl DecoderRuntime {
 
     pub fn try_seek(&mut self, d: Duration) -> DecoderResult<symphonia::core::formats::SeekedTo> {
         self.ring_buf.reject_waiting_writers();
-        let mut engine = self
-            .engine
+        //AI=== 从合并后的 session 同时取 engine/data / take engine and data from the merged session together
+        let mut session = self
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let data = self
-            .data
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(engine) = &mut *engine
-            && let Some(data) = &*data
-        {
-            let track_id = data.track_id;
-            let r = engine.format.seek(
-                SeekMode::Accurate,
-                SeekTo::Time {
-                    time: Time::from_millis(i64::try_from(d.as_millis()).unwrap_or(0)),
-                    track_id: Some(track_id),
-                },
-            )?;
-            engine.decoder.reset();
-            self.effect_runtime.reset(data.decoder_format)?;
-            Ok(r)
-        } else {
-            Err(DecoderError::new("no decoder", DecoderErrorKind::NoDecoder))
-        }
+        let Some(session) = session.as_mut() else {
+            return Err(DecoderError::new("no decoder", DecoderErrorKind::NoDecoder));
+        };
+        let track_id = session.data.track_id;
+        let r = session.engine.format.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time: Time::from_millis(i64::try_from(d.as_millis()).unwrap_or(0)),
+                track_id: Some(track_id),
+            },
+        )?;
+        session.engine.decoder.reset();
+        self.effect_runtime.reset(session.data.decoder_format)?;
+        Ok(r)
+        //AI_END===
     }
 
     pub fn format_info(&self) -> Option<FormatInfo> {
-        let data = self
-            .data
+        //AI=== 从合并后的 session 读取 / read from the merged session
+        let session = self
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (*data).as_ref().map(|data| data.format_info)
+        session.as_ref().map(|session| session.data.format_info)
+        //AI_END===
     }
 
     pub fn media_info(&self) -> Option<MediaInfo> {
-        let data = self
-            .data
+        //AI=== 从合并后的 session 读取 / read from the merged session
+        let session = self
+            .session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        (*data).as_ref().map(|data| data.media_info)
+        session.as_ref().map(|session| session.data.media_info)
+        //AI_END===
     }
 }
 
 pub trait DecoderEventSink: Send + 'static {
     fn emit(&mut self, event: Arc<DecoderEvent>);
-    fn new<F>(f: F) -> Self
-    where
-        F: Fn(&DecoderEvent) + Send + 'static,
-        Self: Sized;
     fn type_of(&self) -> &'static str;
 }
 
 pub struct DecoderEventChannelSink(Sender<Arc<DecoderEvent>>);
 
-impl DecoderEventSink for DecoderEventChannelSink {
-    fn emit(&mut self, event: Arc<DecoderEvent>) {
-        // send 非阻塞；满了就丢弃（或 try_send + 计数）
-        let _ = self.0.send(event);
-    }
-
-    fn new<F>(f: F) -> Self
+//AI=== 构造函数从 trait 移出为固有方法；线程创建失败必须返回 io::Error / constructors moved out of the trait into inherent methods; a spawn failure must return io::Error
+impl DecoderEventChannelSink {
+    pub fn new<F>(f: F) -> std::io::Result<Self>
     where
         F: Fn(&DecoderEvent) + Send + 'static,
     {
@@ -495,9 +602,16 @@ impl DecoderEventSink for DecoderEventChannelSink {
                 for event in receiver {
                     f(&event);
                 }
-            })
-            .expect("创建线程失败");
-        Self(sender)
+            })?;
+        Ok(Self(sender))
+    }
+}
+//AI_END===
+
+impl DecoderEventSink for DecoderEventChannelSink {
+    fn emit(&mut self, event: Arc<DecoderEvent>) {
+        // send 非阻塞；满了就丢弃（或 try_send + 计数）/ non-blocking send; the event is dropped when the channel is full
+        let _ = self.0.send(event);
     }
 
     fn type_of(&self) -> &'static str {
@@ -507,16 +621,20 @@ impl DecoderEventSink for DecoderEventChannelSink {
 
 pub struct DecoderEventDirectSink(Box<dyn Fn(&DecoderEvent) + Send + 'static>);
 
-impl DecoderEventSink for DecoderEventDirectSink {
-    fn emit(&mut self, event: Arc<DecoderEvent>) {
-        self.0(&event); // 就在解码线程里跑
-    }
-
-    fn new<F>(f: F) -> Self
+//AI=== 直接由解码线程调用的 sink 构造函数 / constructor for the sink invoked directly from the decode thread
+impl DecoderEventDirectSink {
+    pub fn new<F>(f: F) -> Self
     where
         F: Fn(&DecoderEvent) + Send + 'static,
     {
         Self(Box::new(f))
+    }
+}
+//AI_END===
+
+impl DecoderEventSink for DecoderEventDirectSink {
+    fn emit(&mut self, event: Arc<DecoderEvent>) {
+        self.0(&event); // 就在解码线程里跑 / runs on the decode thread
     }
 
     fn type_of(&self) -> &'static str {
@@ -550,9 +668,22 @@ pub(super) struct DecoderEventError {
     kind: DecoderEventErrorKind,
 }
 
+//AI=== 统一的错误事件构造入口 / single construction entry for error events
+impl DecoderEventError {
+    fn new(message: impl Into<String>, kind: DecoderEventErrorKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+}
+//AI_END===
+
 #[derive(Debug)]
 pub(super) enum DecoderEventErrorKind {
-    RingBufferError(ConcurrentRingError<f32>),
+    //AI=== 改为保存错误描述：原先的 `ConcurrentRingError<f32>` 与 `ConcurrentRing<AudioData>` 的推送错误类型不匹配且从未被构造 / store the error description: the old `ConcurrentRingError<f32>` did not match the AudioData push error type and was never constructed
+    RingBufferError(String),
+    //AI_END===
     /// An IO error occured while reading, writing, or seeking the stream.
     IoError(std::io::Error),
     /// The stream contained malformed data and could not be decoded or demuxed.
@@ -567,10 +698,14 @@ pub(super) enum DecoderEventErrorKind {
     /// The demuxer or decoder needs to be reset before continuing.
     ResetRequired,
 
-    /// 获取下一帧错误
+    /// 获取下一帧错误 / error while reading the next packet
     NextPacketError(String),
-    /// 解码停止
+    /// 解码停止 / decode stopped
     DecoderStop,
+    //AI=== 外部非穷尽枚举的未知错误兜底，避免 panic / fallback for unknown variants of external non-exhaustive enums, avoiding panic
+    /// 其他未定义错误 / other undefined error
+    Other(String),
+    //AI_END===
 }
 impl Clone for DecoderEventErrorKind {
     fn clone(&self) -> Self {
@@ -578,18 +713,25 @@ impl Clone for DecoderEventErrorKind {
             Self::RingBufferError(e) => Self::RingBufferError(e.clone()),
             Self::IoError(e) => Self::IoError(std::io::Error::new(e.kind(), e.to_string())),
             Self::DecodeError(e) => Self::DecodeError(e),
+            //AI=== `SeekErrorKind` 是非穷尽外部枚举：已知变体逐个重建，未知变体退化为 Other 而不是 panic / `SeekErrorKind` is a non-exhaustive external enum: rebuild known variants, degrade unknown ones to Other instead of panicking
             Self::SeekError(e) => Self::SeekError(match e {
                 SeekErrorKind::Unseekable => SeekErrorKind::Unseekable,
                 SeekErrorKind::ForwardOnly => SeekErrorKind::ForwardOnly,
                 SeekErrorKind::OutOfRange => SeekErrorKind::OutOfRange,
                 SeekErrorKind::InvalidTrack => SeekErrorKind::InvalidTrack,
-                _ => panic!("未定义错误, kind: {e:?}"),
+                other => {
+                    return Self::Other(format!("unknown symphonia SeekErrorKind: {other:?}"));
+                }
             }),
+            //AI_END===
             Self::Unsupported(e) => Self::Unsupported(e),
             Self::LimitError(e) => Self::LimitError(e),
             Self::ResetRequired => Self::ResetRequired,
             Self::NextPacketError(e) => Self::NextPacketError(e.clone()),
             Self::DecoderStop => Self::DecoderStop,
+            //AI=== 未知错误兜底 / fallback for undefined errors
+            Self::Other(e) => Self::Other(e.clone()),
+            //AI_END===
         }
     }
 }
@@ -603,7 +745,9 @@ impl From<symphonia::core::errors::Error> for DecoderEventErrorKind {
             symphonia::core::errors::Error::Unsupported(e) => Self::Unsupported(e),
             symphonia::core::errors::Error::LimitError(e) => Self::LimitError(e),
             symphonia::core::errors::Error::ResetRequired => Self::ResetRequired,
-            _ => panic!("未定义错误, kind: {value:?}"),
+            //AI=== 非穷尽外部枚举的未知变体是可能发生的运行期错误，映射为 Other 而不是 panic / unknown variants of a non-exhaustive external enum are possible runtime errors; map them to Other instead of panicking
+            other => Self::Other(format!("unknown symphonia error: {other:?}")),
+            //AI_END===
         }
     }
 }
@@ -621,6 +765,9 @@ impl Display for DecoderError {
         let kind = match &self.kind {
             DecoderErrorKind::IoError(e) => &format!("IOError({e})"),
             DecoderErrorKind::ThreadJoinError(e) => &format!("ThreadJoinError({e:?})"),
+            //AI=== 解码线程创建失败 / decode thread creation failure
+            DecoderErrorKind::ThreadSpawnError(e) => &format!("ThreadSpawnError({e})"),
+            //AI_END===
             DecoderErrorKind::NoAudioTrack => "NoAudioTrack",
             DecoderErrorKind::NoAudioCodecParams => "NoAudioCodecParams",
             DecoderErrorKind::MakeAudioDecoderError(e) => &format!("MakeAudioDecoderError({e})"),
@@ -684,9 +831,13 @@ impl DecoderError {
 #[derive(Debug)]
 pub enum DecoderErrorKind {
     IoError(std::io::Error),
-    /// 线程等待发生错误
+    /// 线程等待发生错误 / error while waiting on the thread
     ThreadJoinError(Box<dyn Any + Send + 'static>),
-    /// 没有音轨
+    //AI=== 解码线程创建失败 / decode thread creation failure
+    /// 解码线程创建失败 / decode thread creation failure
+    ThreadSpawnError(std::io::Error),
+    //AI_END===
+    /// 没有音轨 / no audio track
     NoAudioTrack,
     /// 没有声音编码参数
     NoAudioCodecParams,
@@ -746,7 +897,9 @@ impl From<symphonia::core::errors::Error> for DecoderErrorKind {
             symphonia::core::errors::Error::Unsupported(e) => Self::Unsupported(e),
             symphonia::core::errors::Error::LimitError(e) => Self::LimitError(e),
             symphonia::core::errors::Error::ResetRequired => Self::ResetRequired,
-            _ => panic!("未定义错误, kind: {value:?}"),
+            //AI=== 非穷尽外部枚举的未知变体映射为 Other，避免 panic / map unknown variants of the non-exhaustive external enum to Other instead of panicking
+            other => Self::Other(Box::new(other)),
+            //AI_END===
         }
     }
 }

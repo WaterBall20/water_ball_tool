@@ -340,7 +340,11 @@ impl PackFileHandle {
         //缓冲区
         let old_pos = self.pos;
         let Some(metadata) = &self.metadata else {
-            panic!("逻辑错误，实例未释放时元数据实例不存在")
+            //AI=== 逻辑错误：句柄存活期间必须持有元数据 / logic error: a live handle must hold metadata
+            unreachable!(
+                "逻辑错误，实例未释放时元数据实例不存在 / logic error: metadata must exist while the handle is alive"
+            )
+            //AI_END===
         };
         //
         if let PackFileMetadataType::File {
@@ -355,7 +359,9 @@ impl PackFileHandle {
             self.set_pos(old_pos)?;
             Ok(read_hash.eq(&in_hash)?)
         } else {
-            panic!("逻辑错误，元数据不是文件类型")
+            //AI=== 逻辑错误：PackFileHandle 只为文件项创建，元数据必为 File 类型 / logic error: PackFileHandle is only created for file items
+            unreachable!("逻辑错误，元数据不是文件类型 / logic error: metadata is not a file type");
+            //AI_END===
         }
     }
 
@@ -381,7 +387,9 @@ impl PackFileHandle {
             }
             Ok(read_hash)
         } else {
-            panic!("逻辑错误")
+            //AI=== 逻辑错误：PackFileHandle 只为文件项创建，元数据必为 File 类型 / logic error: PackFileHandle is only created for file items
+            unreachable!("逻辑错误，元数据不是文件类型 / logic error: metadata is not a file type")
+            //AI_END===
         }
     }
 

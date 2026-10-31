@@ -1012,6 +1012,10 @@ impl FileFinder {
         let condver = Arc::new(Condvar::new());
         //线程池
         let mut handles = Vec::with_capacity(num_threads);
+        //AI=== 线程创建失败必须返回错误（禁止会 panic 的 thread::spawn）/ spawn failures must be returned (no panicking thread::spawn)
+        // 线程创建失败时：已创建的 worker 会因工作队列耗尽而退出，先 join 它们再返回错误。
+        // On spawn failure, already-spawned workers exit once the queue drains; join them, then return the error.
+        let mut spawn_error: Option<io::Error> = None;
         //线程接收器
         for _ in 0..num_threads {
             let dir_queue = Arc::clone(&dir_queue);
@@ -1022,21 +1026,37 @@ impl FileFinder {
 
             let pb = pb.clone();
 
-            let handle = thread::spawn(move || {
-                Self::run_worker(
-                    dir_queue,
-                    Some(results),
-                    pb,
-                    None,
-                    Some(warnings),
-                    skip_symlink,
-                    running_count,
-                    condver,
-                );
-            });
-
-            handles.push(handle);
+            match thread::Builder::new()
+                .name("file-finder-worker".to_string())
+                .spawn(move || {
+                    Self::run_worker(
+                        dir_queue,
+                        Some(results),
+                        pb,
+                        None,
+                        Some(warnings),
+                        skip_symlink,
+                        running_count,
+                        condver,
+                    );
+                }) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    spawn_error = Some(e);
+                    break;
+                }
+            }
         }
+
+        if let Some(e) = spawn_error {
+            for handle in handles {
+                if handle.join().is_err() {
+                    return Err(Error::other("worker thread panicked"));
+                }
+            }
+            return Err(e);
+        }
+        //AI_END===
 
         for handle in handles {
             match handle.join() {
@@ -1148,7 +1168,10 @@ impl FileFinder {
         let (stream_tx, stream_rx) = mpsc::channel();
 
         // 后台线程执行搜索 / Background thread executes the search
-        let handle = thread::spawn(move || -> io::Result<()> {
+        //AI=== 外层线程创建失败返回错误（禁止会 panic 的 thread::spawn）/ return spawn failure instead of using thread::spawn
+        // 任务体先定义为闭包，再用 Builder 启动；spawn 失败通过 `?` 返回给调用方。
+        // The task body is defined first and started with Builder so spawn failures propagate via `?`.
+        let stream_task = move || -> io::Result<()> {
             let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
             dir_queue
                 .lock()
@@ -1162,6 +1185,8 @@ impl FileFinder {
             let condver = Arc::new(Condvar::new());
 
             let mut handles = Vec::with_capacity(num_threads);
+            //AI=== 工作线程创建失败返回错误；已派发线程先 join / return worker spawn failures after joining dispatched workers
+            let mut spawn_error: Option<io::Error> = None;
             for _ in 0..num_threads {
                 let dir_queue = Arc::clone(&dir_queue);
                 let condver = condver.clone();
@@ -1169,21 +1194,37 @@ impl FileFinder {
                 let pb = pb_tx.clone();
                 let stream_tx = stream_tx.clone();
 
-                let handle = thread::spawn(move || {
-                    Self::run_worker(
-                        dir_queue,
-                        None, // 不收集 HashMap 结果 / Don't collect HashMap results
-                        pb,
-                        Some(stream_tx),
-                        None, // 流式模式不用 Vec 收集警告
-                        skip_symlink,
-                        running_count,
-                        condver,
-                    );
-                });
-
-                handles.push(handle);
+                match thread::Builder::new()
+                    .name("file-finder-worker".to_string())
+                    .spawn(move || {
+                        Self::run_worker(
+                            dir_queue,
+                            None, // 不收集 HashMap 结果 / Don't collect HashMap results
+                            pb,
+                            Some(stream_tx),
+                            None, // 流式模式不用 Vec 收集警告
+                            skip_symlink,
+                            running_count,
+                            condver,
+                        );
+                    }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(e) => {
+                        spawn_error = Some(e);
+                        break;
+                    }
+                }
             }
+
+            if let Some(e) = spawn_error {
+                for handle in handles {
+                    if handle.join().is_err() {
+                        return Err(Error::other("worker thread panicked"));
+                    }
+                }
+                return Err(e);
+            }
+            //AI_END===
 
             for handle in handles {
                 match handle.join() {
@@ -1198,7 +1239,11 @@ impl FileFinder {
             drop(stream_tx);
 
             Ok(())
-        });
+        };
+        let handle = thread::Builder::new()
+            .name("file-finder-stream".to_string())
+            .spawn(stream_task)?;
+        //AI_END===
 
         Ok((handle, stream_rx))
     }

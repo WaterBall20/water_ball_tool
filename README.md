@@ -10,12 +10,14 @@
 
 ## Overview
 
-An all-in-one command-line toolkit written in **Rust**. Currently provides two core features:
+An all-in-one command-line toolkit written in **Rust**. Currently provides three core features:
 
 - **File Finder** (`ff`) — Multi-threaded parallel directory-tree scanner that emits a JSON file manifest. Supports
-  symlink cycle detection.
+  symlink cycle detection and optional per-file hashing (MD5/SHA-1/SHA-2/BLAKE2b/BLAKE3/CRC32).
 - **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, and BLAKE3 hash
   verification.
+- **Music Player** (`mp`) — Terminal music player for audio files and directories: playlist modes, volume control, and
+  an interactive stdin command loop. The `tui` interface is still WIP (not wired into the command).
 
 ---
 
@@ -36,6 +38,9 @@ cargo build --release
 ./target/release/water_ball_tool -h
 ```
 
+The repository is a cargo workspace: the root package is the `water_ball_tool` binary, and `water_ball_tool_lib` is the
+library crate. Building from the repository root builds both.
+
 ---
 
 ## Usage
@@ -51,7 +56,17 @@ water_ball_tool ff ./src result.json
 
 # Skip symlinks
 water_ball_tool ff /path/to/dir output.json -s
+
+# Compute hashes and include them in the JSON output (positional, after the output path)
+water_ball_tool ff ./src result.json sha256 blake3
+
+# All supported hash algorithms at once
+water_ball_tool ff ./src result.json all
 ```
+
+`HASH` is an optional multi-value positional argument (path, output path, then hashes). Accepted values:
+`all`, `md5`, `sha256`, `sha512`, `sha1`, `blake3`, `blake2b`, `crc32` (aliases: `*`, `m5`, `s256`, `s512`, `s1`, `b3`,
+`b2b`, `crc`). Hashing forces single-threaded file discovery; hashing itself runs on a separate worker pool.
 
 ### Pack `wbfp p`
 
@@ -77,6 +92,26 @@ water_ball_tool wbfp u -H my.pack ./output_dir
 water_ball_tool wbfp h my.pack
 ```
 
+### Music player `mp`
+
+```bash
+# Play files and/or directories (default mode: sequential-loop)
+water_ball_tool mp ./music
+
+# Initial volume (0.0–1.0, default 0.75) and shuffle mode
+water_ball_tool mp ./music -v 0.5 -m shuffle
+
+# Play modes: sequential-loop (default), sequential, repeat-one, shuffle, periodic-shuffle
+water_ball_tool mp ./music --mode repeat-one
+
+# Verbose output (long option only)
+water_ball_tool mp ./music --verbose
+```
+
+After playback starts, the command reads commands from stdin: `next`/`n` (next track), `Play`/`P` (play),
+`pause`/`p` (pause), `exit` (stop and quit). Volume values outside 0.0–1.0 are rejected with an argument error before
+playback starts.
+
 ---
 
 ## WBFP Format
@@ -101,34 +136,63 @@ Full specification: [`docs/en_US/wb_files_pack/manifest-data.md`](docs/en_US/wb_
 ## Architecture
 
 ```
-src/
-├── main.rs             # Entry point, help, log init
-├── lib.rs              # Module exports
-├── command.rs          # CLI command routing + progress bar helpers
-├── command/
-│   ├── ff.rs           # ff subcommand implementation
-│   ├── wbfp.rs         # wbfp subcommand (pack/unpack/hash-verify)
-│   └── test.rs         # Command-level integration tests (incl. symlink cycle detection)
-├── tools.rs            # Utility functions (path conversion, byte formatting)
-├── file_finder.rs      # Multi-threaded file finder + inode chain cycle detection
+water_ball_tool_lib/src/          # library crate
+├── lib.rs                        # Module exports (file_finder / wb_files_pack / tools / concurrent_ring / split_ring_buffer / gakumasu)
+├── file_finder.rs                # Multi-threaded file finder + inode chain cycle detection
 ├── file_finder/
-│   └── test.rs         # File finder unit tests (symlink scenarios)
-├── wb_files_pack.rs    # Water Ball Files Pack module entry
+│   └── test.rs                   # File finder unit tests (symlink scenarios)
+├── wb_files_pack.rs              # Water Ball Files Pack module entry
 ├── wb_files_pack/
-│   ├── data.rs         # Core data structures (Attribute/PackStruct/ManifestDataBlock, etc.)
-│   ├── manager.rs      # Pack file manager (create/open/save/GC/lock/delete/erase)
+│   ├── data.rs                   # Core data structures (Attribute/PackStruct/ManifestDataBlock, etc.)
+│   ├── error.rs                  # Error types
+│   ├── manager.rs                # Pack file manager (create/open/save/GC/lock/delete/erase)
 │   ├── manager/
-│   │   ├── delete.rs   # Virtual file/dir delete & erase implementation
-│   │   └── test.rs     # Internal API tests
-│   ├── manager_sync.rs # Thread-safe sync manager (Arc<Mutex<>>)
-│   ├── manager_sync/test.rs # External API tests
-│   ├── pack_io.rs      # Low-level file I/O + space allocation + GC
-│   ├── pack_io/file.rs # Virtual file reader/writer (PackVirtualFile, access mode enforcement)
-│   └── net_server.rs   # Network server (WIP)
-└── gakumasu/           # Gakumasu game simulator (WIP)
+│   │   ├── delete.rs             # Virtual file/dir delete & erase implementation
+│   │   └── test.rs               # Internal API tests
+│   ├── manager_sync.rs           # Thread-safe sync manager (Arc<Mutex<>>)
+│   ├── manager_sync/test.rs      # External API tests
+│   ├── pack_io.rs                # Low-level file I/O + space allocation + GC
+│   ├── pack_io/
+│   │   ├── file.rs               # Virtual file reader/writer (PackVirtualFile, access mode enforcement)
+│   │   ├── file_handle.rs        # Core virtual file logic
+│   │   └── file_hash.rs          # BLAKE3 state machine
+│   └── net_server.rs             # Network server (WIP)
+├── tools.rs                      # Utility functions (path conversion, byte formatting, test helpers)
+├── concurrent_ring.rs            # Concurrent initializable ring buffer
+├── split_ring_buffer.rs          # Split lock/lock-free ring buffer (+ reader/writer/error/mode submodules)
+└── gakumasu/                     # Gakumasu game simulator (WIP)
     ├── data.rs
     └── simulator.rs
+
+src/                              # binary crate (water_ball_tool)
+├── main.rs                       # Entry point, CLI dispatch, logging init
+├── command.rs                    # CLI command routing + progress bar helpers
+└── command/
+    ├── ff.rs                     # ff subcommand implementation (search + optional hashing)
+    ├── wbfp.rs                   # wbfp subcommand (pack/unpack/hash-verify)
+    ├── test.rs                   # Command-level integration tests (incl. symlink cycle detection)
+    └── music_play.rs             # mp subcommand (terminal music player)
+        └── music_play/
+            ├── player.rs         # cpal stream + PlayCmd transport + Player::try_stop
+            ├── decoder_runtime.rs # symphonia decoder thread
+            ├── effect.rs         # Effect traits / audio format types
+            ├── effect/           # resampler.rs, cross_bridge.rs, fade.rs, runtime.rs (pre-effect thread)
+            ├── play_list.rs      # Track list + loop/shuffle modes
+            ├── runtime.rs        # Playback orchestration + UI refresh
+            ├── event_dispatch.rs # Dedicated event/log dispatch thread for the realtime callback
+            ├── tools.rs          # Time metrics / duration accumulators
+            └── tui/              # Terminal UI (WIP: app.rs, ui.rs, channel_writer.rs)
 ```
+
+**Implementation notes**
+
+- `mp` keeps the decoder's symphonia format reader/decoder and its track metadata together in a single `DecoderSession`
+  under one lock; track changes replace or take the whole session, so an "engine present but metadata missing" state
+  cannot occur.
+- Command-layer threads (`ff`/`wbfp`/`mp`) are created with `thread::Builder`; a spawn failure is returned as an error
+  (never panics, never silently ignored). `mp --volume` outside 0.0–1.0 is rejected with an argument error.
+- Branches reachable only when an internal invariant is broken abort via `unreachable!` (logic errors); genuine runtime
+  failures (I/O errors, spawn failures, invalid CLI input) are returned or reported instead.
 
 See also: [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
@@ -148,7 +212,15 @@ cargo check
 
 # Lint
 cargo clippy
+
+# Native-optimized release build (target-cpu=native, output in target/native/)
+cargo --config .cargo/native-config.toml build --release
+
+# Debug build that skips audio reading/effects/volume (mp debugging aid)
+cargo build --features debug-no-audio
 ```
+
+`.cargo/native-config.toml` is not applied automatically — pass it with `--config` as shown above.
 
 ---
 
@@ -156,10 +228,13 @@ cargo clippy
 
 - **Language**: Rust (edition 2024)
 - **Serialization**: serde / serde_json
-- **Hashing**: BLAKE3
+- **Hashing**: blake3 / sha1 / sha2 / blake2b_simd / md-5 / crc32fast
 - **Progress bars**: indicatif
 - **Logging**: tracing / tracing-subscriber
 - **Process detection**: sysinfo
+- **Audio**: cpal / symphonia / rubato / lofty
+- **Terminal UI**: ratatui
+- **Channels**: crossbeam-channel
 
 ---
 

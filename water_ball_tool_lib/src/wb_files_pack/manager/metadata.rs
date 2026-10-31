@@ -49,7 +49,11 @@ impl WBFPManager {
                         self.manifest.attribute_mut().add_file_count(r.file_count);
                         self.manifest.attribute_mut().add_data_len(r.length);
                     } else {
-                        panic!("逻辑错误");
+                        //AI=== 逻辑错误：上面若为 None 已 load_pack_struct 置 Some / logic error: the None case above already loads the struct
+                        unreachable!(
+                            "逻辑错误，目录结构在加载后必须存在 / logic error: dir struct must exist after load"
+                        );
+                        //AI_END===
                     }
                 }
                 PackStructItemType::File { .. } => {
@@ -152,7 +156,13 @@ impl WBFPManager {
                                 }
                                 Ok(r)
                             } else {
-                                Err(PackFileError::Other("逻辑错误".into()))
+                                //AI=== 逻辑错误：上面刚确保 sub_ps 为 Some，不可达 / logically unreachable
+                                // 逻辑错误：上一分支已确保 `sub_ps` 被加载为 `Some`，此处不可达。
+                                // Logic error: the branch above guarantees `sub_ps` is `Some`; this arm is unreachable.
+                                unreachable!(
+                                    "逻辑错误: 目录结构未能加载 / logic error: dir struct not loaded"
+                                )
+                                //AI_END===
                             }
                         }
                         PackStructItemType::File { .. } => {
@@ -217,7 +227,11 @@ impl WBFPManager {
                 )))
             }
         } else {
-            panic!("逻辑错误")
+            //AI=== 逻辑错误：元数据更新路径由文件句柄提供，必然非空且指向文件 / logic error: the path comes from a file handle, so it is non-empty and points to a file
+            unreachable!(
+                "逻辑错误，元数据更新路径必须指向文件且不能为空 / logic error: metadata update path must be non-empty and point to a file"
+            )
+            //AI_END===
         }
     }
 
@@ -254,7 +268,11 @@ impl WBFPManager {
                             pack_io,
                         )?
                     } else {
-                        panic!("逻辑错误");
+                        //AI=== 逻辑错误：上面若为 None 已 load_pack_struct 置 Some / logic error: the None case above already loads the struct
+                        unreachable!(
+                            "逻辑错误，目录结构在加载后必须存在 / logic error: dir struct must exist after load"
+                        );
+                        //AI_END===
                     }
                 }
                 PackStructItemType::File { .. } => {
@@ -328,7 +346,11 @@ impl WBFPManager {
                             }
                             Ok((handle, new_lock))
                         } else {
-                            panic!("逻辑错误")
+                            //AI=== 逻辑错误：上面若为 None 已 load_pack_struct 置 Some / logic error: the None case above already loads the struct
+                            unreachable!(
+                                "逻辑错误，目录结构在加载后必须存在 / logic error: dir struct must exist after load"
+                            )
+                            //AI_END===
                         }
                     }
                     PackStructItemType::File { .. } => {
@@ -356,7 +378,12 @@ impl WBFPManager {
                 )))?
             }
         } else {
-            panic!("逻辑错误")
+            //AI=== 运行期错误：路径解析到目录（用户可能把目录路径传给 open/create virtual file），必须返回错误 / runtime error: path resolves to a directory (user may pass a dir path)
+            return Err(PackFileError::Other(format!(
+                r#"虚拟路径"{}"是目录不是文件 / path is a directory, not a file"#,
+                s_path.display()
+            )));
+            //AI_END===
         }
     }
 

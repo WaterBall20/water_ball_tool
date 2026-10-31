@@ -10,6 +10,9 @@ use tracing::{debug, error, info, warn};
 
 mod decoder_runtime;
 pub mod effect;
+//AI=== 事件分发线程模块 / event dispatch thread module
+mod event_dispatch;
+//AI_END===
 mod play_list;
 mod player;
 mod runtime;
@@ -18,15 +21,17 @@ pub mod tui;
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
-    ///播放文件或目录
+    ///播放文件或目录 / Files or directories to play
     files: Vec<PathBuf>,
-    ///初始音量 (0到<1的小数或0-100的数，大于或等于1视为0-100)
+    //AI=== 音量范围收敛为 0.0–1.0，越界返回参数错误 / volume is restricted to 0.0–1.0, out-of-range is rejected
+    /// 初始音量（0.0–1.0）/ Initial volume (0.0–1.0)
     #[arg(short, long, default_value_t = 0.75)]
     volume: f32,
-    ///详细输出
+    //AI_END===
+    ///详细输出 / Verbose output
     #[arg(long)]
     verbose: bool,
-    /// 播放模式
+    /// 播放模式 / Playback mode
     #[arg(short, long, default_value = "sequential-loop")]
     mode: LoopMode,
 }
@@ -48,14 +53,19 @@ pub(crate) enum LoopMode {
 pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     let mp = multi_progress_init("music_play");
     let files = args.files;
-    let volume = {
-        if args.volume < 0.0 {
-            panic!("参数错误：声音参数不能小于0")
-        } else if args.volume > 1.0 {
-            panic!("参数错误：声音参数不能大于1")
-        }
-        args.volume
-    };
+    //AI=== 音量越界属于参数错误：返回错误而不是 panic / out-of-range volume is an argument error, not a panic
+    // -v/--volume 只接受 0.0–1.0；越界在开始播放前返回参数错误。
+    // `-v/--volume` only accepts 0.0–1.0; out-of-range values fail with an argument error before playback.
+    if !(0.0..=1.0).contains(&args.volume) {
+        let value = args.volume;
+        return Err(format!(
+            "参数错误：音量必须在 0.0 到 1.0 之间，实际为 {value} \
+             / argument error: volume must be within 0.0..=1.0, got {value}"
+        )
+        .into());
+    }
+    let volume = args.volume;
+    //AI_END===
     let loop_mode = args.mode;
     info!("开始搜集音频信息");
     let play_list = create_play_list(&files, loop_mode)?;

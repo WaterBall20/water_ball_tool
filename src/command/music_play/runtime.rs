@@ -1,16 +1,13 @@
 use crate::command::music_play::decoder_runtime::{
-    DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventSink, DecoderEventType,
-    DecoderResult,
+    DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventType, DecoderResult,
 };
 use crate::command::music_play::effect::fade::FadeEffect;
 use crate::command::music_play::effect::runtime::PreEffectRuntime;
 use crate::command::music_play::play_list::{PlayList, Track};
-use crate::command::music_play::player::{
-    Player, PlayerEventChannelSink, PlayerEventSink, PlayerEventType,
-};
+use crate::command::music_play::player::{Player, PlayerEventChannelSink, PlayerEventType};
 use crate::command::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
 use colored::Colorize;
-use indicatif::{MultiProgress, ProgressStyle};
+use indicatif::MultiProgress;
 use std::any::Any;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -121,6 +118,7 @@ impl Runtime {
         {
             let decoder_track = decoder_track.clone();
             let ui_content = ui_content.clone();
+            //AI=== sink 线程创建失败返回错误（`Runtime::create` 传播）/ propagate sink spawn errors
             player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
                 debug!("播放事件触发: {e:?}");
                 if let Ok(e) = e.result() {
@@ -138,7 +136,8 @@ impl Runtime {
                         }
                     }
                 }
-            })));
+            })?));
+            //AI_END===
         }
         //添加效果(淡出淡入)
         player.add_audio_post_effect(FadeEffect::new());
@@ -182,12 +181,15 @@ impl Runtime {
             let mut time_callback_copy = DurationStatsWindow::default();
             let mut time_callback = DurationStatsWindow::default();
             let mut time_callback_post_effect = DurationStatsWindow::default();
+            //AI=== 进度条模板不再 expect：非法模板由 progress_style 记录错误并回退默认样式
+            // `progress_style` logs an invalid template and falls back to the default style.
                 pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] {percent:>3.bold.magenta}%  {msg}")
-                        .expect("设置进度条模板失败")
-                        .progress_chars("█▉▊▋▌▍▎▏ ")
+                    crate::command::progress_style(
+                        "{prefix:<8.bold.green} [{wide_bar:.cyan/blue}] {percent:>3.bold.magenta}%  {msg}",
+                    )
+                        .progress_chars("█▉▊▋▌▍▎▏ "),
                 );
+            //AI_END===
                 pb.set_prefix("暂停中");
             loop {
                 let mut ui_content = ui_content.lock().unwrap_or_else
@@ -291,19 +293,29 @@ impl Runtime {
                         label_path = "Path".green(),
                     ));
 
+                    //AI=== Condvar 中毒恢复，不再 expect / recover from condvar poisoning without expect
                     ui_content = condvar
                         .wait_timeout(ui_content, Duration::from_millis(50))
-                        .expect("Condvar won't fail")
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .0;
+                    //AI_END===
                 } else {
                         pb.set_prefix("异常暂停中");
-                    ui_content = condvar.wait(ui_content).expect("Condvar won't fail");
+                    //AI=== Condvar 中毒恢复，不再 expect / recover from condvar poisoning without expect
+                    ui_content = condvar
+                        .wait(ui_content)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    //AI_END===
                     continue;
                 }
                 //暂停时挂起
                 if !play_object.player.is_playing() && !run_stop.load(Ordering::Acquire) {
                     pb.set_prefix("暂停中");
-                    ui_content = condvar.wait(ui_content).expect("Condvar won't fail");
+                    //AI=== Condvar 中毒恢复，不再 expect / recover from condvar poisoning without expect
+                    ui_content = condvar
+                        .wait(ui_content)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    //AI_END===
                     if run_stop.load(Ordering::Acquire) {
                         break; // 如果正在释放就退出线程
                     }
@@ -391,10 +403,11 @@ impl Runtime {
         {
             self.run_stop.store(true, Ordering::Release);
             _ = self.play_object.pause();
-            self.play_object
-                .player
-                .try_stop()
-                .expect("停止播放发生错误");
+            //AI=== 停止失败只记录日志并继续 join UI 线程，不再 panic / log and keep joining
+            if let Err(e) = self.play_object.player.try_stop() {
+                error!("停止播放器失败 / failed to stop the player: {e:?}");
+            }
+            //AI_END===
         }
         self.thread_control.condvar.notify_all();
         self.join_thread()?;
@@ -601,9 +614,11 @@ impl PlayObject {
                 }
                 error!("切换下一曲发生错误，不存在，将暂停");
             }
-            pre_effect_runtime
-                .send_no_next()
-                .expect("next_inner() send_no_next err");
+            //AI=== send_no_next 失败只记录日志，不影响后续错误计数重置 / log a failed send_no_next
+            if let Err(e) = pre_effect_runtime.send_no_next() {
+                error!("发送 NoNext 失败 / failed to send NoNext: {e}");
+            }
+            //AI_END===
             next_content.err_count.store(0, Ordering::Release);
 
             Ok(None)

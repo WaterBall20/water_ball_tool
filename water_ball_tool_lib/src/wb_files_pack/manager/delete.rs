@@ -1320,7 +1320,12 @@ impl WBFPManager {
                     };
                     let buf = &mut buf[..this_write_len];
                     Self::fill_random(buf);
-                    pack_file.set_pos_write(pos)?;
+                    //AI=== 修复：写偏移必须随块推进（pos + write_len），否则大于 DATA_DATA_BLOCK_LEN
+                    //的数据块只会反复覆写首块；Zero 分支原先已正确。
+                    // Fix: the write offset must advance by block (pos + write_len); otherwise blocks
+                    // larger than DATA_DATA_BLOCK_LEN repeatedly overwrite only the first chunk.
+                    pack_file.set_pos_write(pos + write_len as u64)?;
+                    //AI_END===
                     pack_file.write_all(buf)?;
                     write_len += this_write_len;
                 }
@@ -1334,18 +1339,22 @@ impl WBFPManager {
                     };
                     let buf = &mut buf[..this_write_len];
                     // DoD 5220.22-M: 三次独立磁盘覆写 / Three independent disk overwrites
+                    //AI=== 修复：三次 pass 的写偏移都必须随块推进（pos + write_len），否则大块只覆写首块
+                    // Fix: every pass must advance the write offset (pos + write_len), otherwise large
+                    // blocks only overwrite the first chunk.
                     // Pass 1: 全 0x00 → 磁盘 / All zeros → disk
                     Self::fill_zero(buf);
-                    pack_file.set_pos_write(pos)?;
+                    pack_file.set_pos_write(pos + write_len as u64)?;
                     pack_file.write_all(buf)?;
                     // Pass 2: 全 0xFF → 磁盘 / All ones → disk
                     Self::fill_ones(buf);
-                    pack_file.set_pos_write(pos)?;
+                    pack_file.set_pos_write(pos + write_len as u64)?;
                     pack_file.write_all(buf)?;
                     // Pass 3: 随机字节 → 磁盘 / Random bytes → disk
                     Self::fill_random(buf);
-                    pack_file.set_pos_write(pos)?;
+                    pack_file.set_pos_write(pos + write_len as u64)?;
                     pack_file.write_all(buf)?;
+                    //AI_END===
                     write_len += this_write_len;
                 }
             }
@@ -1359,6 +1368,11 @@ impl WBFPManager {
         block_pos: u64,
         strategy: OverwriteStrategy,
     ) -> Result<()> {
+        //AI=== 检查结论：本函数按整块一次性写回（manifest_data_block_write 内部定位到 block_pos 并
+        //写入 block_len 字节），不存在 overwrite_data_block 中"逐块推进偏移"缺失的问题。
+        // Checked: this function rewrites the whole block in a single call (manifest_data_block_write
+        // seeks to block_pos and writes block_len bytes), so the chunk-offset bug does not apply here.
+        //AI_END===
         let block = self.manifest_data_block_read(block_pos)?;
         let block_len = block.get_this_block_len_u64();
         let block_len_us = usize::try_from(block_len).map_err(|e| {
