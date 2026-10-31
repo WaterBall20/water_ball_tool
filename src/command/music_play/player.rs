@@ -15,6 +15,7 @@ use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
+use std::error::Error;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -25,7 +26,6 @@ use tracing::{debug, error};
 use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
 use water_ball_tool_lib::split_ring_buffer::{LockedWriter, UnlockedReader};
 
-#[derive(Clone)]
 pub(super) struct Player {
     pos: Arc<AtomicU64>,
     sound_engine: SoundEngine,
@@ -37,8 +37,6 @@ pub(super) struct Player {
     /// Handle of the `rx_cmd` thread: `try_stop` takes and joins it so the thread is
     /// reclaimed instead of leaking until process exit.
     rx_cmd_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
-    /// rx_cmd 线程退出标志 / Stop flag for the rx_cmd thread
-    rx_cmd_stop: Arc<AtomicBool>,
     //AI=== 关闭标志：保证 try_stop 只执行一次完整回收 / ensures the shutdown sequence runs once
     /// 关闭标志：`try_stop` 首次调用置位，重复调用直接返回（幂等）。
     ///
@@ -46,6 +44,28 @@ pub(super) struct Player {
     shutdown: Arc<AtomicBool>,
     //AI_END===
     //AI_END===
+    strong: Arc<AtomicUsize>,
+}
+impl Clone for Player {
+    fn clone(&self) -> Self {
+        self.strong.fetch_add(1, Ordering::Release);
+        Self {
+            pos: self.pos.clone(),
+            sound_engine: self.sound_engine.clone(),
+            control: self.control.clone(),
+            event_content: self.event_content.clone(),
+            rx_cmd_thread: self.rx_cmd_thread.clone(),
+            shutdown: self.shutdown.clone(),
+            strong: self.strong.clone(),
+        }
+    }
+}
+impl Drop for Player {
+    fn drop(&mut self) {
+        if self.strong.fetch_sub(1, Ordering::Release) == 1 {
+            _ = self.try_stop();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -55,7 +75,7 @@ struct SoundEngine {
     decoder_runtime: DecoderRuntime,
     stream_config: Arc<StreamConfig>,
     stream: Arc<Stream>,
-    effect_chain: Arc<Mutex<PostEffectChain>>,
+    post_effect_chain: Arc<Mutex<PostEffectChain>>,
     pre_effect_runtime: PreEffectRuntime,
     time_metrics: Arc<TimeMetrics>,
 }
@@ -217,9 +237,69 @@ impl Player {
 
     //AI=== 旧的直接 emit 已移除：sink 调用统一由 EventDispatcher 线程执行 / removed in favor of EventDispatcher
     //AI_END===
-}
-impl Player {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+
+    fn add_pre_effect_event_inner(
+        pre_effect_runtime: &mut PreEffectRuntime,
+        pre_effect_item_eof_pos: Arc<AtomicUsize>,
+        audio_ring_buffer: LockedWriter<f32>,
+        pre_effect_item_eof: Arc<AtomicBool>,
+    ) {
+        pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(move |e| {
+            debug!("前效果器事件触发：{e:?}");
+            if let Ok(e) = e.result()
+                && let PreEffectRuntimeEventType::Eof = e
+            {
+                pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Release);
+                pre_effect_item_eof.store(true, Ordering::Release);
+            }
+        })));
+    }
+
+    fn create_rx_cmd_thread(
+        stream: Arc<Stream>,
+        shutdown: Arc<AtomicBool>,
+        rx_done: Receiver<PlayCmd>,
+        is_playing: Arc<AtomicBool>,
+    ) -> Result<Arc<Mutex<Option<JoinHandle<()>>>>, Box<dyn Error + Send + Sync>> {
+        let stream = stream.clone();
+        let shutdown = shutdown.clone();
+        let join_handle = thread::Builder::new()
+            .name("rx_cmd".to_string())
+            .spawn(move || {
+                while !shutdown.load(Ordering::Acquire) {
+                    let cmd = match rx_done.recv_timeout(Duration::from_millis(50)) {
+                        Ok(cmd) => cmd,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    };
+                    match cmd {
+                        PlayCmd::Play => {
+                            is_playing.store(true, Ordering::Relaxed);
+                            if let Err(e) = stream.play() {
+                                error!("播放发生错误： {e}");
+                            }
+                        }
+                        PlayCmd::Pause => {
+                            is_playing.store(false, Ordering::Relaxed);
+                            if let Err(e) = stream.pause() {
+                                error!("暂停发生错误{e}");
+                            }
+                        }
+                        PlayCmd::Seek(_) => {
+                            // C3: 不 panic
+                            error!("Seek is not implemented");
+                        }
+                        PlayCmd::ClearEofBuf => {}
+                    }
+                }
+                debug!("rx_cmd 线程退出 / rx_cmd thread exited");
+            })
+            .map_err(|e| format!("无法创建 rx_cmd 线程: {e}"))?;
+        Ok(Arc::new(Mutex::new(Some(join_handle))))
+    }
+
+    fn get_audio_config()
+    -> Result<(Device, AudioFormat, Arc<StreamConfig>), Box<dyn Error + Send + Sync>> {
         let host = cpal::default_host();
         let Some(device) = host.default_output_device() else {
             return Err("No output device available".into());
@@ -235,14 +315,24 @@ impl Player {
         let channels = config.channels();
         let sample_rate = config.sample_rate();
         let stream_config = Arc::new(config.config());
-
+        Ok((
+            device,
+            AudioFormat::new(channels, sample_rate),
+            stream_config,
+        ))
+    }
+}
+impl Player {
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let (device, audio_format, stream_config) = Self::get_audio_config()?;
         // 在你的播放器初始化阶段
+        //创建缓冲区
         //效果缓冲区
         let pre_effect_ring_buf = ConcurrentRing::new_max_capacity(10)?;
         //声音缓冲区
         let (audio_ring_buffer_reader, audio_ring_buffer) =
             water_ball_tool_lib::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
-                sample_rate as usize * channels as usize / 4,
+                audio_format.sample_rate() as usize * audio_format.channels() as usize / 4,
             );
         //时间统计
         let time_metrics = Arc::new(TimeMetrics::new());
@@ -252,9 +342,8 @@ impl Player {
             audio_ring_buffer.clone(),
             time_metrics.clone(),
         );
-        let output_format = AudioFormat::new(channels, sample_rate);
-        pre_effect_runtime.add_effect(ResamplerEffect::new(output_format))?;
-        pre_effect_runtime.add_effect(CrossBridgeEffect::new(output_format))?;
+        pre_effect_runtime.add_effect(ResamplerEffect::new(audio_format))?;
+        pre_effect_runtime.add_effect(CrossBridgeEffect::new(audio_format))?;
 
         let mut decoder_runtime = DecoderRuntime::new(
             pre_effect_ring_buf.clone(),
@@ -278,27 +367,16 @@ impl Player {
         //AI=== 事件分发线程创建失败必须中止播放器初始化 / abort player init when the dispatch thread cannot start
         let dispatcher = EventDispatcher::new(list.clone())?;
         //AI_END===
-
-        {
-            let pre_effect_item_eof = pre_effect_item_eof.clone();
-            let pre_effect_item_eof_pos = pre_effect_item_eof_pos.clone();
-            let audio_ring_buffer_writer = audio_ring_buffer.clone();
-            pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(
-                move |e| {
-                    debug!("前效果器事件触发：{e:?}");
-                    if let Ok(e) = e.result()
-                        && let PreEffectRuntimeEventType::Eof = e
-                    {
-                        pre_effect_item_eof_pos
-                            .store(audio_ring_buffer_writer.len(), Ordering::Release);
-                        pre_effect_item_eof.store(true, Ordering::Release);
-                    }
-                },
-            )));
-            //AI=== 前效果器线程创建失败必须中止播放器初始化 / abort player init when the pre-effect thread cannot start
-            pre_effect_runtime.run()?;
-            //AI_END===
-        }
+        //注册事件
+        Self::add_pre_effect_event_inner(
+            &mut pre_effect_runtime,
+            pre_effect_item_eof_pos.clone(),
+            audio_ring_buffer.clone(),
+            pre_effect_item_eof.clone(),
+        );
+        //AI=== 前效果器线程创建失败必须中止播放器初始化 / abort player init when the pre-effect thread cannot start
+        pre_effect_runtime.run()?;
+        //AI_END===
 
         let event_content = EventContent {
             pre_effect_item_eof,
@@ -306,11 +384,8 @@ impl Player {
             list,
             dispatcher,
         };
-
-        let effect_chain = Arc::new(Mutex::new(PostEffectChain::new(AudioFormat::new(
-            channels,
-            sample_rate,
-        ))));
+        //创建后效果器控制器
+        let post_effect_chain = Arc::new(Mutex::new(PostEffectChain::new(audio_format)));
 
         // 主线程 → 音频线程：transport 指令
         let (tx_cmd, rx_cmd) = crossbeam_channel::bounded::<PlayCmd>(1);
@@ -332,7 +407,7 @@ impl Player {
             event_content.clone(),
             rx_cmd,
             tx_done,
-            effect_chain.clone(),
+            post_effect_chain.clone(),
             time_metrics.clone(),
         )?);
 
@@ -340,44 +415,9 @@ impl Player {
         // rx_cmd 线程通过退出标志结束阻塞等待；句柄存入 Mutex，`try_stop` 可取出并 join。
         // The rx_cmd thread exits through a stop flag; its handle is kept in a Mutex so that
         // `try_stop` can take and join it.
-        let rx_cmd_stop = Arc::new(AtomicBool::new(false));
-        let rx_cmd_thread = {
-            let stream = stream.clone();
-            let rx_cmd_stop = rx_cmd_stop.clone();
-            let join_handle = thread::Builder::new()
-                .name("rx_cmd".to_string())
-                .spawn(move || {
-                    while !rx_cmd_stop.load(Ordering::Acquire) {
-                        let cmd = match rx_done.recv_timeout(Duration::from_millis(50)) {
-                            Ok(cmd) => cmd,
-                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                        };
-                        match cmd {
-                            PlayCmd::Play => {
-                                is_playing.store(true, Ordering::Relaxed);
-                                if let Err(e) = stream.play() {
-                                    error!("播放发生错误： {e}");
-                                }
-                            }
-                            PlayCmd::Pause => {
-                                is_playing.store(false, Ordering::Relaxed);
-                                if let Err(e) = stream.pause() {
-                                    error!("暂停发生错误{e}");
-                                }
-                            }
-                            PlayCmd::Seek(_) => {
-                                // C3: 不 panic
-                                error!("Seek is not implemented");
-                            }
-                            PlayCmd::ClearEofBuf => {}
-                        }
-                    }
-                    debug!("rx_cmd 线程退出 / rx_cmd thread exited");
-                })
-                .map_err(|e| format!("无法创建 rx_cmd 线程: {e}"))?;
-            Arc::new(Mutex::new(Some(join_handle)))
-        };
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let rx_cmd_thread =
+            Self::create_rx_cmd_thread(stream.clone(), shutdown.clone(), rx_done, is_playing)?;
         //AI_END===
 
         Ok(Self {
@@ -387,7 +427,7 @@ impl Player {
                 decoder_runtime,
                 stream_config,
                 stream,
-                effect_chain,
+                post_effect_chain,
                 pre_effect_runtime,
                 time_metrics,
             },
@@ -395,10 +435,10 @@ impl Player {
             pos,
             event_content,
             rx_cmd_thread,
-            rx_cmd_stop,
             //AI=== 关闭标志初始为 false，首次 try_stop 置位 / shutdown starts false, set by the first try_stop
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
             //AI_END===
+            strong: Arc::new(AtomicUsize::new(1)),
         })
     }
 
@@ -498,7 +538,8 @@ impl Player {
     }
 
     pub fn stop(self) -> DecoderResult<()> {
-        self.try_stop()
+        let mut s = self;
+        s.try_stop()
     }
 
     //AI=== 退出路径：按「暂停回调 → 停前效果器 → 停解码器 → 停事件线程 → join rx_cmd」顺序回收资源
@@ -515,7 +556,7 @@ impl Player {
     /// Ordering: the pre-effect runtime is stopped first because its
     /// `reject_waiting_writers` wakes producers blocked in `push_wait`, preventing a join
     /// deadlock.
-    pub fn try_stop(&self) -> DecoderResult<()> {
+    pub fn try_stop(&mut self) -> DecoderResult<()> {
         //AI=== 幂等：只有第一次调用执行完整回收 / idempotent: only the first call runs the shutdown
         if self.shutdown.swap(true, Ordering::AcqRel) {
             // 已停止：不重复暂停、停线程或记录错误日志 / already stopped: avoid duplicate work and logs
@@ -527,13 +568,12 @@ impl Player {
         if let Err(e) = self.sound_engine.stream.pause() {
             error!("停止播放时暂停音频流失败 / failed to pause the stream: {e}");
         }
-        self.rx_cmd_stop.store(true, Ordering::Release);
         // 2. 先停前效果器：拒绝写入会唤醒阻塞的生产者 / stop the pre-effect runtime first
         if let Err(e) = self.sound_engine.pre_effect_runtime.stop() {
             error!("停止前效果器运行时失败 / failed to stop the pre-effect runtime: {e:?}");
         }
         // 3. 停解码线程 / stop the decoder thread
-        let mut decoder_runtime = self.sound_engine.decoder_runtime.clone();
+        let decoder_runtime = &mut self.sound_engine.decoder_runtime;
         if let Err(e) = decoder_runtime.stop() {
             error!("停止解码器运行时失败 / failed to stop the decoder runtime: {e:?}");
         }
@@ -652,7 +692,7 @@ impl Player {
         E: PostEffect + Send + 'static,
     {
         self.sound_engine
-            .effect_chain
+            .post_effect_chain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(effect);

@@ -39,6 +39,8 @@
       <sourceFolder url="file://$MODULE_DIR$/water_ball_tool_lib/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/water_ball_tool_lib/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/water_ball_tool_lib/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/water_ball_tool_lib/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
@@ -91,6 +93,7 @@
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/temp/test" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
