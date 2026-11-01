@@ -1,17 +1,21 @@
-use crate::command::music_play::decoder_runtime::{DecoderError, DecoderResult, DecoderRuntime};
-use crate::command::music_play::effect::cross_bridge::CrossBridgeEffect;
-use crate::command::music_play::effect::resampler::ResamplerEffect;
-use crate::command::music_play::effect::runtime::{
+use crate::music_play::decoder_runtime::{DecoderError, DecoderResult, DecoderRuntime};
+use crate::music_play::effect::cross_bridge::CrossBridgeEffect;
+use crate::music_play::effect::resampler::ResamplerEffect;
+use crate::music_play::effect::runtime::{
     PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventType,
 };
-use crate::command::music_play::effect::{
-    AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain,
+use crate::music_play::effect::{
+    AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain, PreEffectChain,
+    PreEffectError,
 };
-//AI=== 引入事件分发线程：实时回调只投递事件/日志，加锁与 sink 调用移到分发线程
-use crate::command::music_play::event_dispatch::{EventDispatcher, LogLevel};
+//AI=== 看门狗：线程崩溃后暂停并重启被监视线程 / watchdog: pause and restart watched threads after a crash
+use crate::music_play::watchdog::{SLOT_DECODER, SLOT_PRE_EFFECT, WatchNotify};
 //AI_END===
-use crate::command::music_play::tools;
-use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
+//AI=== 引入事件分发线程：实时回调只投递事件/日志，加锁与 sink 调用移到分发线程
+use crate::music_play::event_dispatch::{EventDispatcher, LogLevel};
+//AI_END===
+use crate::music_play::tools;
+use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
@@ -23,10 +27,10 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
-use water_ball_tool_lib::concurrent_ring::ConcurrentRing;
-use water_ball_tool_lib::split_ring_buffer::{LockedWriter, UnlockedReader};
+use crate::concurrent_ring::ConcurrentRing;
+use crate::split_ring_buffer::{LockedWriter, UnlockedReader};
 
-pub(super) struct Player {
+pub struct Player {
     pos: Arc<AtomicU64>,
     sound_engine: SoundEngine,
     control: Control,
@@ -44,6 +48,12 @@ pub(super) struct Player {
     shutdown: Arc<AtomicBool>,
     //AI_END===
     //AI_END===
+    //AI=== 看门狗：被监视线程退出通知 + 看门狗线程句柄 / watchdog notification and thread handle
+    /// 看门狗共享状态：被监视线程退出时唤醒看门狗。
+    watchdog_notify: Arc<WatchNotify>,
+    /// 看门狗线程句柄：`try_stop` 取出并 join。
+    watchdog_thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    //AI_END===
     strong: Arc<AtomicUsize>,
 }
 impl Clone for Player {
@@ -56,6 +66,10 @@ impl Clone for Player {
             event_content: self.event_content.clone(),
             rx_cmd_thread: self.rx_cmd_thread.clone(),
             shutdown: self.shutdown.clone(),
+            //AI=== 看门狗句柄随句柄共享 / the watchdog handle is shared with clones
+            watchdog_notify: self.watchdog_notify.clone(),
+            watchdog_thread: self.watchdog_thread.clone(),
+            //AI_END===
             strong: self.strong.clone(),
         }
     }
@@ -331,19 +345,34 @@ impl Player {
         let pre_effect_ring_buf = ConcurrentRing::new_max_capacity(10)?;
         //声音缓冲区
         let (audio_ring_buffer_reader, audio_ring_buffer) =
-            water_ball_tool_lib::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
+            crate::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
                 audio_format.sample_rate() as usize * audio_format.channels() as usize / 4,
             );
         //时间统计
         let time_metrics = Arc::new(TimeMetrics::new());
+        //AI=== 看门狗共享状态：线程退出时唤醒 / watchdog shared state, woken when a watched thread exits
+        let watch_notify = WatchNotify::new();
+        //AI_END===
         //效果运行时
         let mut pre_effect_runtime = PreEffectRuntime::create(
             pre_effect_ring_buf.clone(),
             audio_ring_buffer.clone(),
             time_metrics.clone(),
         );
-        pre_effect_runtime.add_effect(ResamplerEffect::new(audio_format))?;
-        pre_effect_runtime.add_effect(CrossBridgeEffect::new(audio_format))?;
+        //AI=== 注册重建工厂并构建初始链：崩溃恢复时整条链重建（旧链可能已毒化）/ register the rebuild factory and build the initial chain
+        let make_effects = move || -> Result<PreEffectChain, PreEffectError> {
+            let mut chain = PreEffectChain::new();
+            chain.push(ResamplerEffect::new(audio_format))?;
+            chain.push(CrossBridgeEffect::new(audio_format))?;
+            Ok(chain)
+        };
+        // 初始链同样由工厂构建，保证首次启动与重建一致 / the initial chain comes from the same factory
+        pre_effect_runtime.set_effects(make_effects()?);
+        pre_effect_runtime.set_chain_factory(make_effects);
+        //AI_END===
+        //AI=== 注入看门狗退出通知（必须在 `run` 之前）/ inject the watchdog notification before `run`
+        pre_effect_runtime.set_exit_notify(watch_notify.clone());
+        //AI_END===
 
         let mut decoder_runtime = DecoderRuntime::new(
             pre_effect_ring_buf.clone(),
@@ -353,6 +382,7 @@ impl Player {
         //AI=== 解码线程创建失败必须中止播放器初始化 / abort player init when the decoder thread cannot start
         // `DecoderError` 不满足 `Sync`，因此把启动失败转成可读错误信息传播。
         // `DecoderError` is not `Sync`, so the startup failure is propagated as a readable message.
+        decoder_runtime.set_exit_notify(watch_notify.clone());
         decoder_runtime
             .run()
             .map_err(|e| format!("启动解码器线程失败 / failed to start decoder runtime: {e:?}"))?;
@@ -420,7 +450,7 @@ impl Player {
             Self::create_rx_cmd_thread(stream.clone(), shutdown.clone(), rx_done, is_playing)?;
         //AI_END===
 
-        Ok(Self {
+        let player = Self {
             sound_engine: SoundEngine {
                 pre_effect_ring_buf,
                 audio_ring_buffer,
@@ -438,8 +468,15 @@ impl Player {
             //AI=== 关闭标志初始为 false，首次 try_stop 置位 / shutdown starts false, set by the first try_stop
             shutdown,
             //AI_END===
+            //AI=== 看门狗（线程崩溃 → 暂停 + 重启被监视线程）/ watchdog (crash → pause + restart the watched thread)
+            watchdog_notify: watch_notify,
+            watchdog_thread: Arc::new(Mutex::new(None)),
+            //AI_END===
             strong: Arc::new(AtomicUsize::new(1)),
-        })
+            //AI=== 构造完成后再启动看门狗：它需要 player 的运行时句柄 / start the watchdog once the player exists; it needs the runtime handles
+        };
+        player.start_watchdog()
+        //AI_END===
     }
 
     pub fn is_playing(&self) -> bool {
@@ -563,6 +600,9 @@ impl Player {
             return Ok(());
         }
         //AI_END===
+        //AI=== 先关停看门狗，避免停止过程中被它重启线程 / stop the watchdog first so it cannot restart threads during shutdown
+        self.watchdog_notify.shutdown();
+        //AI_END===
         // 1. 暂停音频回调，避免回调继续产生事件 / pause callbacks so no new events appear
         self.control.is_playing.store(false, Ordering::Release);
         if let Err(e) = self.sound_engine.stream.pause() {
@@ -589,6 +629,9 @@ impl Player {
         //AI_END===
         // 5. 等待 rx_cmd 线程退出 / join the rx_cmd thread
         Self::join_rx_cmd_thread(&self.rx_cmd_thread);
+        //AI=== 最后 join 看门狗线程 / join the watchdog thread last
+        Self::join_watchdog(&self.watchdog_thread);
+        //AI_END===
         Ok(())
     }
 
@@ -606,6 +649,69 @@ impl Player {
             error!("rx_cmd 线程异常退出 / rx_cmd thread panicked: {e:?}");
         }
     }
+
+    //AI=== 看门狗：线程崩溃 → 暂停（不恢复播放）+ 重启被监视线程 / watchdog: crash → pause (no resume) + restart the watched thread
+    /// 启动看门狗线程：被监视线程退出（含 panic）时经 `ThreadExitGuard` 的 `Drop` 唤醒。
+    /// Spawn the watchdog; a watched thread's exit (panic included) wakes it through `ThreadExitGuard`.
+    fn start_watchdog(self) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let notify = self.watchdog_notify.clone();
+        let shutdown = self.shutdown.clone();
+        let control = self.control.clone();
+        let mut decoder_runtime = self.sound_engine.decoder_runtime.clone();
+        let mut pre_effect_runtime = self.sound_engine.pre_effect_runtime.clone();
+        let handle = thread::Builder::new()
+            .name("player-watchdog".to_string())
+            .spawn(move || {
+                while let Some(exited) = notify.wait_exit() {
+                    if shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    // 崩溃只暂停，不恢复播放 / a crash only pauses; playback is not resumed automatically
+                    if control.is_playing.load(Ordering::Acquire) {
+                        let _ = control.tx_cmd.try_send(PlayCmd::Pause);
+                    }
+                    if exited & SLOT_DECODER != 0 && !decoder_runtime.is_stopped() {
+                        error!("解码线程已退出，暂停并重启 / decoder thread exited; pausing and restarting");
+                        // 置毒化：`Play` 会先换曲再播放 / poisoned so `Play` changes track first
+                        decoder_runtime.set_poisoned();
+                        if let Err(e) = decoder_runtime.run() {
+                            error!("重启解码线程失败 / failed to restart the decoder thread: {e:?}");
+                        }
+                    }
+                    if exited & SLOT_PRE_EFFECT != 0 && !pre_effect_runtime.is_stopped() {
+                        error!(
+                            "前效果器线程已退出，重建效果器并重启 / pre-effect thread exited; rebuilding effects and restarting"
+                        );
+                        // 旧效果器可能已毒化：整条链重建 / the old effects may be poisoned: rebuild the whole chain
+                        if let Err(e) = pre_effect_runtime.rebuild_effects() {
+                            error!("重建效果链失败 / failed to rebuild the effect chain: {e:?}");
+                        }
+                        if let Err(e) = pre_effect_runtime.run() {
+                            error!("重启前效果器线程失败 / failed to restart the pre-effect thread: {e:?}");
+                        }
+                    }
+                }
+            })?;
+        *self
+            .watchdog_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+        Ok(self)
+    }
+
+    /// 取出并 join 看门狗线程；panic 只记录，不向上传播。
+    fn join_watchdog(handle: &Arc<Mutex<Option<JoinHandle<()>>>>) {
+        let join_handle = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(join_handle) = join_handle
+            && let Err(e) = join_handle.join()
+        {
+            error!("看门狗线程异常退出 / watchdog thread panicked: {e:?}");
+        }
+    }
+    //AI_END===
     //AI_END===
 
     pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
@@ -745,14 +851,14 @@ impl PlayerEventSink for PlayerEventChannelSink {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PlayerEvent {
+pub struct PlayerEvent {
     result: Result<PlayerEventType, PlayerEventError>,
 }
 
 impl PlayerEvent {
     //AI=== 新增 TrackEnded 构造器：供音频回调与测试使用 / constructor shared by the callback and tests
     /// 构造「一首曲目播放结束」事件 / Build a "track ended" event.
-    pub(super) fn track_ended() -> Self {
+    pub fn track_ended() -> Self {
         Self {
             result: Ok(PlayerEventType::TrackEnded),
         }
@@ -768,15 +874,15 @@ impl PlayerEvent {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum PlayerEventType {
+pub enum PlayerEventType {
     TrackEnded,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct PlayerEventError {
+pub struct PlayerEventError {
     message: String,
     kind: PlayerEventErrorKind,
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum PlayerEventErrorKind {}
+pub enum PlayerEventErrorKind {}

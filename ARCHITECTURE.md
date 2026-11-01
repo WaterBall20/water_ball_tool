@@ -71,16 +71,9 @@ water_ball_tool (binary crate, root package)
   ├── src/command.rs       ← CLI routing + progress bar helpers
   │   ├── command/ff.rs    ← ff subcommand (search + optional hashing)
   │   ├── command/wbfp.rs  ← wbfp subcommand
-  │   ├── command/music_play.rs
+  │   ├── command/music_play.rs  ← clap args + stdin loop + playlist collection
   │   │   └── command/music_play/
-  │   │       ├── player.rs          ← cpal stream + transport + try_stop
-  │   │       ├── decoder_runtime.rs ← symphonia decode thread
-  │   │       ├── effect.rs          ← effect traits / audio types
-  │   │       │   └── effect/        ← resampler / cross_bridge / fade / runtime
-  │   │       ├── play_list.rs       ← tracks + loop/shuffle modes
-  │   │       ├── runtime.rs         ← playback orchestration + UI thread
-  │   │       ├── event_dispatch.rs  ← realtime event/log dispatch thread
-  │   │       ├── tools.rs           ← time metrics / duration accumulators
+  │   │       ├── runtime.rs         ← playback orchestration + indicatif UI thread
   │   │       └── tui/               ← terminal UI (WIP)
   │   └── command/test.rs  ← integration tests
   └── depends on:
@@ -112,6 +105,14 @@ water_ball_tool (binary crate, root package)
         ├── src/concurrent_ring.rs      ← concurrent initializable ring buffer
         ├── src/split_ring_buffer.rs    ← split lock/lock-free read-write ring buffer
         │   └── inner / reader / writer / mode / error / test
+        ├── src/music_play.rs           ← music player engine root (LoopMode + module tree)
+        │   ├── player.rs               ← cpal stream + transport + try_stop
+        │   ├── decoder_runtime.rs      ← symphonia decode thread
+        │   ├── effect.rs               ← effect traits / audio types
+        │   │   └── effect/             ← resampler / cross_bridge / fade / runtime
+        │   ├── play_list.rs            ← tracks + loop/shuffle modes
+        │   ├── event_dispatch.rs       ← realtime event/log dispatch thread
+        │   └── tools.rs                ← time metrics / duration accumulators
         └── src/gakumasu/               ← game simulator (WIP, debug builds only)
             ├── data.rs
             └── simulator.rs
@@ -132,9 +133,11 @@ water_ball_tool_lib/Cargo.toml   → [package] "water_ball_tool_lib" (library)
 - The root package is the binary crate `water_ball_tool`; `main.rs` declares `mod command;` — `command.rs` is
   **private** to the binary crate.
 - The library crate `water_ball_tool_lib` exports: `file_finder`, `wb_files_pack`, `tools`, `concurrent_ring`,
-  `split_ring_buffer`, and `gakumasu` (gated under `#[cfg(debug_assertions)]` — only compiled in debug builds).
+  `split_ring_buffer`, `music_play`, and `gakumasu` (gated under `#[cfg(debug_assertions)]` — only compiled in debug
+  builds).
 - Binary code references library code via crate-name-qualified paths — `water_ball_tool_lib::file_finder`,
-  `water_ball_tool_lib::wb_files_pack`, `water_ball_tool_lib::tools`, … — **not** `crate::file_finder`.
+  `water_ball_tool_lib::wb_files_pack`, `water_ball_tool_lib::tools`, `water_ball_tool_lib::music_play`, … — **not**
+  `crate::file_finder`.
 - Both packages share metadata and dependencies through `[workspace.package]` / `[workspace.dependencies]`.
 
 **Dependency Flow**
@@ -148,6 +151,7 @@ flowchart TD
     tm["pub mod tools"]
     crm["pub mod concurrent_ring"]
     srm["pub mod split_ring_buffer"]
+    mpm["pub mod music_play (engine)"]
     gm["pub mod gakumasu — cfg(debug_assertions)"]
     bin -->|references by crate name| lib
     lib --> ffm
@@ -155,6 +159,7 @@ flowchart TD
     lib --> tm
     lib --> crm
     lib --> srm
+    lib --> mpm
     lib --> gm
 ```
 
@@ -344,7 +349,8 @@ Parallel scan produces a flat `HashMap<PathBuf, FileInfo>`. `build_tree()` recon
 
 ## 7. Music Player (`mp`)
 
-**Files**: `src/command/music_play.rs` + `src/command/music_play/*.rs` (~4,900 lines total)
+**Files**: engine in `water_ball_tool_lib/src/music_play/` (~3,100 lines); terminal front-end in
+`src/command/music_play.rs` + `src/command/music_play/` (~850 lines)
 
 ### 7.1 Overview
 
@@ -366,20 +372,25 @@ CLI arguments (`MusicPlayArgs`):
 
 ### 7.2 Modules
 
-| Module                   | Responsibility                                                                                                                  |
-|--------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `player.rs`              | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`                               |
-| `decoder_runtime.rs`     | symphonia decode thread: probes/seeks the file, decodes audio into the pre-effect ring buffer; owns the paired `DecoderSession` |
-| `effect.rs`              | `PostEffect`/`PreEffect` traits, `AudioFormat`, `PlayCmd`, effect chain                                                         |
-| `effect/runtime.rs`      | Locked pre-effect runtime thread (event sinks, stop/reject handling)                                                            |
-| `effect/resampler.rs`    | rubato FFT resampler to the output device sample rate                                                                           |
-| `effect/cross_bridge.rs` | Crossfade bridging between tracks                                                                                               |
-| `effect/fade.rs`         | Fade in/out and pause/resume transport handling                                                                                 |
-| `play_list.rs`           | `Track` list, loop modes, shuffle queues, next-track selection                                                                  |
-| `runtime.rs`             | Orchestration: track advance on `TrackEnded`, UI refresh thread, event consumers, stop                                          |
-| `event_dispatch.rs`      | Dedicated dispatch thread for realtime-callback events and logs                                                                 |
-| `tools.rs`               | `TimeMetrics` / `DurationAccumulator` profiling counters                                                                        |
-| `tui/`                   | Terminal UI (`app.rs`, `ui.rs`, `channel_writer.rs`) — **WIP, not wired into the command**                                      |
+The playback engine lives in the library crate and has no dependency on the terminal UI; only `runtime.rs`, the clap
+handler and `tui/` stay in the binary.
+
+| Module (crate)                   | Responsibility                                                                                                                  |
+|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `music_play.rs` (lib)            | Engine module root; owns `LoopMode` (with `FromStr`) and declares the submodules                                                 |
+| `player.rs` (lib)                | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`                               |
+| `decoder_runtime.rs` (lib)       | symphonia decode thread: probes/seeks the file, decodes audio into the pre-effect ring buffer; owns the paired `DecoderSession` |
+| `effect.rs` (lib)                | `PostEffect`/`PreEffect` traits, `AudioFormat`, `PlayCmd`, effect chain                                                         |
+| `effect/runtime.rs` (lib)        | Locked pre-effect runtime thread (event sinks, stop/reject handling)                                                            |
+| `watchdog.rs` (lib)              | Crash watchdog: `ThreadExitGuard` (Drop → notify on a `Condvar`) + single watchdog thread owned by `Player`                     |
+| `effect/resampler.rs` (lib)      | rubato FFT resampler to the output device sample rate                                                                           |
+| `effect/cross_bridge.rs` (lib)   | Crossfade bridging between tracks                                                                                               |
+| `effect/fade.rs` (lib)           | Fade in/out and pause/resume transport handling                                                                                 |
+| `play_list.rs` (lib)             | `Track` list, loop modes, shuffle queues, next-track selection, navigation history for the previous track, add/insert |
+| `event_dispatch.rs` (lib)        | Dedicated dispatch thread for realtime-callback events and logs                                                                 |
+| `tools.rs` (lib)                 | `TimeMetrics` / `DurationAccumulator` profiling counters                                                                        |
+| `runtime.rs` (bin)               | Orchestration: track advance on `TrackEnded`, `indicatif` UI refresh thread, event consumers, stop                              |
+| `tui/` (bin)                     | Terminal UI (`app.rs`, `ui.rs`, `channel_writer.rs`) — **WIP, not wired into the command**                                      |
 
 ### 7.3 Realtime Audio Thread
 
@@ -391,6 +402,11 @@ The cpal callback runs in a realtime context and therefore:
 - never takes a blocking lock (it uses `try_lock` on the effect chain and the split ring buffer's lock-free reader),
 - never invokes `PlayerEventSink` directly,
 - never writes logs.
+
+The split ring buffer's lock-free read path publishes `read.pos` and then checks for waiting writers. That check is
+bracketed by a `SeqCst` fence on both sides (publisher in `notify_*_after_*`, waiter in `enter_wait`), so "publisher
+skipped the wakeup" and "waiter read a stale position" cannot happen together — a missed wakeup would park the peer
+forever. Only a fence is used, never a lock, so the callback path stays realtime-safe.
 
 Instead it posts events (`TrackEnded`) and log records with non-blocking `try_send` into the `EventDispatcher`'s
 bounded channel (`DISPATCH_CHANNEL_CAPACITY = 1024`). A full channel drops the message and increments the dropped
@@ -412,12 +428,28 @@ drives `stream.play()` / `stream.pause()`.
 - `DecoderRuntime::run()` and `PreEffectRuntime::run()` return `Result`; a failed thread spawn aborts `Player::new()`
   with an error instead of being logged and ignored.
 - Decode-loop error policy:
-    - real runtime failures — `next_packet` error, a genuine ring-buffer write failure, a failed EOF push, or a fatal
-      (non-frame-level) decode error — emit a `DecoderEvent` error and stop the decode thread;
+    - transient IO errors (see `DecoderRuntime::is_retryable_io_error`, e.g. Windows 1450 `ERROR_NO_SYSTEM_RESOURCES`)
+      are retried up to 5 times with a 200 ms delay before being treated as failures;
+    - real runtime failures that cannot be retried, or whose retries are exhausted — `next_packet` error, a genuine
+      ring-buffer write failure, a failed EOF push, or a fatal (non-frame-level) decode error — emit a `DecoderEvent`
+      error, then take the session, clear the pending output buffer and return to the condvar wait; the decode thread
+      stays alive, so a later track change plays;
+    - the same failures set the atomic `poisoned` flag (`DecoderRuntime::is_poisoned`). A successful
+      `DecoderRuntime::set_decoder_path` clears it automatically, so the front-end cannot forget the cleanup and turn a
+      later play command into a premature track change;
     - a single-frame `DecodeError` is recoverable: it is reported and the frame is skipped;
     - `WriteRejected` during stop, track change, or seek is normal control flow, not an error.
+- The binary front-end consumes decoder error events through a `DecoderEventChannelSink` (channel thread, never inline
+  on the decode thread): it pauses playback and wakes the UI thread. While poisoned, the `mp` progress bar shows the
+  `异常暂停中` prefix and a red `Error` line between the song info and the time-metrics block, and `Play`/`P` changes
+  track first while poisoned, then always resumes playback.
 - `DecoderRuntime::stop()` records a `send_skip` failure, always joins the decode thread, then returns the first error;
   `Player::try_stop` logs stop failures and continues the remaining shutdown steps.
+- The pre-effect runtime thread never exits on a runtime error: a ring error resets the effect chain with the `Skip`
+  discontinuity, emits `PreEffectRuntimeEventErrorKind::Runtime`, backs off 10 ms and keeps consuming (a closed write
+  side therefore parks instead of spinning); a hard output-write error is reported the same way and the block is
+  dropped. Only the `stop` flag ends the loop. The binary logs these events through a
+  `PreEffectRuntimeEventChannelSink` (informational — playback may continue).
 - Event-channel sink constructors (`PlayerEventChannelSink::new`, `DecoderEventChannelSink::new`,
   `PreEffectRuntimeEventChannelSink::new`) return `std::io::Result`; direct sinks construct infallibly. `Player::new()`
   and `Runtime::create()` propagate sink and thread spawn failures.
@@ -426,14 +458,29 @@ drives `stream.play()` / `stream.pause()`.
 
 `try_stop()` is idempotent and reclaims every thread in a fixed order:
 
-1. Pause the audio stream and clear `is_playing`, so no new events are produced.
-2. Stop the pre-effect runtime — its `reject_waiting_writers` wakes producers blocked in `push_wait`, preventing a join
+1. Shut the watchdog down (`WatchNotify::shutdown`), so it cannot restart a thread during shutdown.
+2. Pause the audio stream and clear `is_playing`, so no new events are produced.
+3. Stop the pre-effect runtime — its `reject_waiting_writers` wakes producers blocked in `push_wait`, preventing a join
    deadlock.
-3. Stop the decoder thread.
-4. Stop the event dispatch thread (`Stop` message + join).
-5. Join the `rx_cmd` thread via the handle stored in the player.
+4. Stop the decoder thread.
+5. Stop the event dispatch thread (`Stop` message + join).
+6. Join the `rx_cmd` thread via the handle stored in the player.
+7. Join the watchdog thread.
 
 Failures at any step are logged, not propagated; `Runtime::run_stop` additionally joins the UI thread.
+
+### 7.6 Crash watchdog (`watchdog.rs`)
+
+- A watched thread (`decoder-runtime`, `pre-effect-running`) owns a `ThreadExitGuard` inside its closure. On `Drop`
+  (panic unwind included) the guard sets its slot bit in `WatchNotify` and wakes the single watchdog thread on a
+  `Condvar` — no `JoinHandle::is_finished()` polling, no second thread.
+- `Player::new` injects the notifier into both runtimes before `run()` and spawns `player-watchdog`.
+- On exit the watchdog pauses playback (it never resumes automatically), sets the decoder poison flag so `Play`
+  recovers by changing track, and restarts the dead thread (`run()` reclaims the finished `JoinHandle` first). For the
+  pre-effect runtime the whole effect chain is rebuilt through the factory registered by `Player::new` before the
+  restart, because the old effects may already be poisoned.
+- `try_stop` shuts the watchdog down before stopping the threads and joins it last, so a normal shutdown never triggers
+  a restart.
 
 ---
 
@@ -1051,8 +1098,8 @@ flowchart TD
 | `water_ball_tool_lib/src/wb_files_pack/test.rs`         | Module       | Pack file create, read/write, verify                                                                                        |
 | `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | Internal API | Manager internal logic                                                                                                      |
 | `.../wb_files_pack/manager_sync/test.rs`                | Public API   | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access                                         |
-| `src/command/music_play/effect/test.rs`                 | Unit         | Effect chain / resampler / fade behavior                                                                                    |
-| `src/command/music_play/event_dispatch/test.rs`         | Unit         | Event dispatch thread, drop counting, stop semantics                                                                        |
+| `water_ball_tool_lib/src/music_play/effect/test.rs`     | Unit         | Effect chain / resampler / fade behavior                                                                                    |
+| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | Unit     | Event dispatch thread, drop counting, stop semantics                                                                        |
 
 **Testing conventions**
 

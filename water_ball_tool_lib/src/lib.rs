@@ -27,6 +27,11 @@ pub mod concurrent_ring;
 /// 读写分离环形缓冲区模块 / Split read-write ring buffer module
 pub mod split_ring_buffer;
 //AI_END===
+
+//AI=== 音乐播放引擎（从二进制包移入）/ music player engine (moved from the binary crate)
+/// 音乐播放引擎模块 / Music player engine module
+pub mod music_play;
+//AI_END===
 /// 游戏模拟器模块（开发中）/ Game simulator module (WIP)
 #[cfg(debug_assertions)]
 pub mod gakumasu;

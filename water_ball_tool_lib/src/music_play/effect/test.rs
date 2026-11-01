@@ -1,5 +1,5 @@
 use super::*;
-use crate::command::music_play::effect::resampler::ResamplePlan;
+use crate::music_play::effect::resampler::ResamplePlan;
 
 #[test]
 fn to_384k_quality_dominant() {

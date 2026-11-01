@@ -4,7 +4,7 @@
 //! These tests only use in-memory objects (channels and sinks); no files or temp dirs.
 
 use super::*;
-use crate::command::music_play::player::{PlayerEvent, PlayerEventSink, PlayerEventType};
+use crate::music_play::player::{PlayerEvent, PlayerEventSink, PlayerEventType};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;

@@ -68,16 +68,9 @@ water_ball_tool（二进制 crate，根包）
   ├── src/command.rs       ← CLI 路由 + 进度条辅助函数
   │   ├── command/ff.rs    ← ff 子命令（搜索 + 可选哈希）
   │   ├── command/wbfp.rs  ← wbfp 子命令
-  │   ├── command/music_play.rs
+  │   ├── command/music_play.rs  ← clap 参数 + stdin 循环 + 播放列表收集
   │   │   └── command/music_play/
-  │   │       ├── player.rs          ← cpal 输出流 + transport + try_stop
-  │   │       ├── decoder_runtime.rs ← symphonia 解码线程
-  │   │       ├── effect.rs          ← 效果器 trait / 音频类型
-  │   │       │   └── effect/        ← resampler / cross_bridge / fade / runtime
-  │   │       ├── play_list.rs       ← 曲目列表 + 循环/洗牌模式
-  │   │       ├── runtime.rs         ← 播放编排 + UI 线程
-  │   │       ├── event_dispatch.rs  ← 实时事件/日志分发线程
-  │   │       ├── tools.rs           ← 时间统计 / 耗时累加器
+  │   │       ├── runtime.rs         ← 播放编排 + indicatif UI 线程
   │   │       └── tui/               ← 终端 UI（开发中）
   │   └── command/test.rs  ← 集成测试
   └── 依赖：
@@ -109,6 +102,14 @@ water_ball_tool（二进制 crate，根包）
         ├── src/concurrent_ring.rs      ← 可并发初始化的环形缓冲区
         ├── src/split_ring_buffer.rs    ← 读写分离有锁/无锁环形缓冲区
         │   └── inner / reader / writer / mode / error / test
+        ├── src/music_play.rs           ← 音乐播放引擎根（LoopMode + 模块树）
+        │   ├── player.rs               ← cpal 输出流 + transport + try_stop
+        │   ├── decoder_runtime.rs      ← symphonia 解码线程
+        │   ├── effect.rs               ← 效果器 trait / 音频类型
+        │   │   └── effect/             ← resampler / cross_bridge / fade / runtime
+        │   ├── play_list.rs            ← 曲目列表 + 循环/洗牌模式
+        │   ├── event_dispatch.rs       ← 实时事件/日志分发线程
+        │   └── tools.rs                ← 时间统计 / 耗时累加器
         └── src/gakumasu/               ← 游戏模拟器（开发中，仅 debug 构建）
             ├── data.rs
             └── simulator.rs
@@ -127,10 +128,10 @@ water_ball_tool_lib/Cargo.toml   → [package] "water_ball_tool_lib"（库）
 **关键规则**
 
 - 根包是二进制 crate `water_ball_tool`；`main.rs` 声明 `mod command;`——`command.rs` 对二进制 crate **私有**。
-- 库 crate `water_ball_tool_lib` 导出：`file_finder`、`wb_files_pack`、`tools`、`concurrent_ring`、`split_ring_buffer`，
-  以及 `gakumasu`（由 `#[cfg(debug_assertions)]` 门控，仅 debug 构建编译）。
+- 库 crate `water_ball_tool_lib` 导出：`file_finder`、`wb_files_pack`、`tools`、`concurrent_ring`、`split_ring_buffer`、
+  `music_play`，以及 `gakumasu`（由 `#[cfg(debug_assertions)]` 门控，仅 debug 构建编译）。
 - 二进制代码通过 crate 名限定路径引用库——`water_ball_tool_lib::file_finder`、`water_ball_tool_lib::wb_files_pack`、
-  `water_ball_tool_lib::tools` 等——而非 `crate::file_finder`。
+  `water_ball_tool_lib::tools`、`water_ball_tool_lib::music_play` 等——而非 `crate::file_finder`。
 - 两个包通过 `[workspace.package]` / `[workspace.dependencies]` 共享元数据与依赖。
 
 **依赖流向**
@@ -144,6 +145,7 @@ flowchart TD
     tm["pub mod tools"]
     crm["pub mod concurrent_ring"]
     srm["pub mod split_ring_buffer"]
+    mpm["pub mod music_play（引擎）"]
     gm["pub mod gakumasu — cfg(debug_assertions)"]
     bin -->|按 crate 名引用| lib
     lib --> ffm
@@ -151,6 +153,7 @@ flowchart TD
     lib --> tm
     lib --> crm
     lib --> srm
+    lib --> mpm
     lib --> gm
 ```
 
@@ -329,7 +332,8 @@ pub struct Dir {
 
 ## 7. 音乐播放器（`mp`）
 
-**文件**：`src/command/music_play.rs` + `src/command/music_play/*.rs`（共约 4,900 行）
+**文件**：引擎位于 `water_ball_tool_lib/src/music_play/`（约 3,100 行）；终端前端位于 `src/command/music_play.rs` +
+`src/command/music_play/`（约 850 行）
 
 ### 7.1 概述
 
@@ -350,20 +354,24 @@ CLI 参数（`MusicPlayArgs`）：
 
 ### 7.2 模块
 
-| 模块                     | 职责                                                                                              |
-|--------------------------|---------------------------------------------------------------------------------------------------|
-| `player.rs`              | cpal 输出流、`PlayCmd` transport、音量/位置原子量、事件 sink、`Player::try_stop`                  |
-| `decoder_runtime.rs`     | symphonia 解码线程：探测/seek 文件，把解码音频写入前效果器环形缓冲区；持有成对的 `DecoderSession` |
-| `effect.rs`              | `PostEffect`/`PreEffect` trait、`AudioFormat`、`PlayCmd`、效果器链                                |
-| `effect/runtime.rs`      | 带锁的前效果器运行时线程（事件 sink、停止/拒绝写入处理）                                          |
-| `effect/resampler.rs`    | rubato FFT 重采样到输出设备采样率                                                                 |
-| `effect/cross_bridge.rs` | 曲目之间的交叉淡入淡出桥接                                                                        |
-| `effect/fade.rs`         | 淡入淡出与暂停/恢复 transport 处理                                                                |
-| `play_list.rs`           | `Track` 列表、循环模式、洗牌队列、下一曲选择                                                      |
-| `runtime.rs`             | 编排：`TrackEnded` 触发换曲、UI 刷新线程、事件消费、停止                                          |
-| `event_dispatch.rs`      | 面向实时回调的事件/日志专用分发线程                                                               |
-| `tools.rs`               | `TimeMetrics` / `DurationAccumulator` 性能统计                                                    |
-| `tui/`                   | 终端 UI（`app.rs`、`ui.rs`、`channel_writer.rs`）——**开发中，尚未接入命令**                       |
+播放引擎位于库 crate，不依赖终端 UI；只有 `runtime.rs`、clap 处理函数和 `tui/` 留在二进制包。
+
+| 模块（所在 crate）           | 职责                                                                                              |
+|------------------------------|---------------------------------------------------------------------------------------------------|
+| `music_play.rs`（库）        | 引擎模块根；持有 `LoopMode`（含 `FromStr`）并声明各子模块                                         |
+| `player.rs`（库）            | cpal 输出流、`PlayCmd` transport、音量/位置原子量、事件 sink、`Player::try_stop`                  |
+| `decoder_runtime.rs`（库）   | symphonia 解码线程：探测/seek 文件，把解码音频写入前效果器环形缓冲区；持有成对的 `DecoderSession` |
+| `effect.rs`（库）            | `PostEffect`/`PreEffect` trait、`AudioFormat`、`PlayCmd`、效果器链                                |
+| `effect/runtime.rs`（库）    | 带锁的前效果器运行时线程（事件 sink、停止/拒绝写入处理）                                          |
+| `watchdog.rs`（库）          | 崩溃看门狗：`ThreadExitGuard`（Drop → 经 `Condvar` 通知）+ `Player` 持有的单一看门狗线程            |
+| `effect/resampler.rs`（库）  | rubato FFT 重采样到输出设备采样率                                                                 |
+| `effect/cross_bridge.rs`（库） | 曲目之间的交叉淡入淡出桥接                                                                      |
+| `effect/fade.rs`（库）       | 淡入淡出与暂停/恢复 transport 处理                                                                |
+| `play_list.rs`（库）         | `Track` 列表、循环模式、洗牌队列、下一曲选择、上一曲的播放轨迹、追加与插入                        |
+| `event_dispatch.rs`（库）    | 面向实时回调的事件/日志专用分发线程                                                               |
+| `tools.rs`（库）             | `TimeMetrics` / `DurationAccumulator` 性能统计                                                    |
+| `runtime.rs`（bin）          | 编排：`TrackEnded` 触发换曲、`indicatif` UI 刷新线程、事件消费、停止                              |
+| `tui/`（bin）                | 终端 UI（`app.rs`、`ui.rs`、`channel_writer.rs`）——**开发中，尚未接入命令**                       |
 
 ### 7.3 实时音频线程
 
@@ -374,6 +382,10 @@ cpal 回调运行在实时上下文，因此：
 - 从不获取阻塞锁（效果器链用 `try_lock`，音频数据用分离环形缓冲区的无锁读端），
 - 从不直接调用 `PlayerEventSink`，
 - 从不写日志。
+
+分离环形缓冲区的无锁读端在发布 `read.pos` 之后再检查是否有等待中的写者；该检查两侧都有 `SeqCst` 屏障
+（发布方在 `notify_*_after_*`、等待方在 `enter_wait`），因此“发布方跳过唤醒”与“等待方读到旧位置”不会同时发生
+——否则对端会永远睡下去。这里只用屏障、不取锁，回调路径仍是实时安全的。
 
 它只用非阻塞 `try_send` 把事件（`TrackEnded`）与日志记录投递到 `EventDispatcher` 的有界通道
 （`DISPATCH_CHANNEL_CAPACITY = 1024`）。通道满时丢弃该消息并递增丢弃计数（停止时以 debug 级别报告）。
@@ -392,12 +404,24 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
 - `DecoderRuntime::run()` 与 `PreEffectRuntime::run()` 返回 `Result`；线程 spawn 失败会中止 `Player::new()` 并返回错误，
   不再只记日志后继续。
 - 解码循环错误策略：
-    - 真实运行期失败——`next_packet` 失败、环形缓冲区真实写入失败、EOF 写入失败、非帧级致命解码错误——发出 `DecoderEvent`
-      错误事件并停止解码线程；
+    - 瞬时 IO 错误（见 `DecoderRuntime::is_retryable_io_error`，如 Windows 1450 `ERROR_NO_SYSTEM_RESOURCES`）先重试，
+      最多 5 次、每次间隔 200 ms，耗尽后才视为失败；
+    - 不可重试或重试耗尽的真实运行期失败——`next_packet` 失败、环形缓冲区真实写入失败、EOF 写入失败、非帧级致命解码错误
+      ——发出 `DecoderEvent` 错误事件，随后取出会话、清空待写输出缓冲并回到 condvar 等待；解码线程保持存活，后续换曲仍能
+      播放；
+    - 同类失败会置位原子 `poisoned` 标志（`DecoderRuntime::is_poisoned`）。换曲成功（`DecoderRuntime::set_decoder_path`）
+      会自动清除它，前端不可能忘记解毒，从而不会把后续播放命令变成提前换曲；
     - 单帧 `DecodeError` 可恢复：上报后跳过该帧继续；
     - 停止、切曲、寻道时的 `WriteRejected` 属于正常控制流，不是错误。
+- 二进制前端通过 `DecoderEventChannelSink` 消费解码错误事件（在通道线程上，绝不在解码线程内联）：暂停播放并唤醒 UI 线程。
+  毒化期间 `mp` 进度条前缀显示 `异常暂停中`，并在歌曲信息与时间统计块之间显示红色 `Error` 行；`Play`/`P` 在毒化时先换曲，
+  随后必定恢复播放。
 - `DecoderRuntime::stop()` 记录 `send_skip` 失败，始终先 join 解码线程，然后返回第一个错误；`Player::try_stop`
   记录停止失败并继续其余关闭步骤。
+- 前效果器运行时线程遇到运行期错误不退出：环错误先用 `Skip` 不连续信号复位效果链，发出
+  `PreEffectRuntimeEventErrorKind::Runtime` 事件，退避 10 ms 后继续消费（写端关闭时因此改为等待而不是空转）；输出写入
+  硬错误同样只上报并丢弃该块。只有 `stop` 标志才结束循环。二进制通过 `PreEffectRuntimeEventChannelSink` 记录这些事件
+  （仅信息性，播放可继续）。
 - 事件通道 sink 构造器（`PlayerEventChannelSink::new`、`DecoderEventChannelSink::new`、
   `PreEffectRuntimeEventChannelSink::new`）返回 `std::io::Result`；DirectSink 的构造不会失败。`Player::new()` 与
   `Runtime::create()` 会传播 sink 与线程 spawn 失败。
@@ -406,13 +430,25 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
 
 `try_stop()` 幂等，并按固定顺序回收所有线程：
 
-1. 暂停音频流并清除 `is_playing`，不再产生新事件。
-2. 停止前效果器运行时——其 `reject_waiting_writers` 会唤醒阻塞在 `push_wait` 的生产者，避免 join 死锁。
-3. 停止解码线程。
-4. 停止事件分发线程（发送 `Stop` 消息并 join）。
-5. 通过 player 中保存的句柄 join `rx_cmd` 线程。
+1. 关停看门狗（`WatchNotify::shutdown`），避免它在关停过程中重启线程。
+2. 暂停音频流并清除 `is_playing`，不再产生新事件。
+3. 停止前效果器运行时——其 `reject_waiting_writers` 会唤醒阻塞在 `push_wait` 的生产者，避免 join 死锁。
+4. 停止解码线程。
+5. 停止事件分发线程（发送 `Stop` 消息并 join）。
+6. 通过 player 中保存的句柄 join `rx_cmd` 线程。
+7. join 看门狗线程。
 
 任一步骤失败都只记日志、不向上传播；`Runtime::run_stop` 还会额外 join UI 线程。
+
+### 7.6 崩溃看门狗（`watchdog.rs`）
+
+- 被监视线程（`decoder-runtime`、`pre-effect-running`）在线程闭包内持有 `ThreadExitGuard`。其 `Drop`（含 panic unwind）
+  在 `WatchNotify` 中置位本线程槽位，并通过 `Condvar` 唤醒唯一的看门狗线程——既不轮询 `JoinHandle::is_finished()`，也
+  不需要第二个线程。
+- `Player::new` 在 `run()` 之前把通知器注入两个运行时，并启动 `player-watchdog`。
+- 线程退出时看门狗暂停播放（绝不自动恢复），置解码器毒化标志让 `Play` 走换曲恢复，并重启死掉的线程（`run()` 先回收已结束的
+  `JoinHandle`）。前效果器线程则在重启前用 `Player::new` 注册的工厂整条重建效果链，因为旧效果器可能已被毒化。
+- `try_stop` 在停线程之前先关停看门狗、最后 join 它，因此正常退出不会触发重启。
 
 ---
 
@@ -1001,8 +1037,8 @@ flowchart TD
 | `water_ball_tool_lib/src/wb_files_pack/test.rs`         | 模块     | 包文件创建、读写、校验                                                                       |
 | `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | 内部 API | Manager 内部逻辑                                                                             |
 | `.../wb_files_pack/manager_sync/test.rs`                | 公共 API | 删除 + 擦除（11 个测试）、文件创建/读写/重开、cow、哈希校验、线程访问                        |
-| `src/command/music_play/effect/test.rs`                 | 单元     | 效果器链 / 重采样 / 淡入淡出行为                                                             |
-| `src/command/music_play/event_dispatch/test.rs`         | 单元     | 事件分发线程、丢弃计数、停止语义                                                             |
+| `water_ball_tool_lib/src/music_play/effect/test.rs`     | 单元     | 效果器链 / 重采样 / 淡入淡出行为                                                             |
+| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | 单元 | 事件分发线程、丢弃计数、停止语义                                                             |
 
 **测试规范**
 

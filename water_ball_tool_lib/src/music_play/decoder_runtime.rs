@@ -1,7 +1,10 @@
-use crate::command::music_play::effect::runtime::PreEffectRuntime;
-use crate::command::music_play::effect::{AudioData, AudioFormat, PreEffectError};
-use crate::command::music_play::tools;
-use crate::command::music_play::tools::{DurationAccumulator, TimeMetrics};
+use crate::music_play::effect::runtime::PreEffectRuntime;
+use crate::music_play::effect::{AudioData, AudioFormat, PreEffectError};
+use crate::music_play::tools;
+use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
+//AI=== 看门狗线程退出通知 / watchdog thread-exit notification
+use crate::music_play::watchdog::{SLOT_DECODER, ThreadExitGuard, WatchNotify};
+//AI_END===
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -22,15 +25,18 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 use tracing::{debug, error};
 //AI=== 只保留实际使用的类型（不再直接引用 `ConcurrentRingError`）/ keep only the types actually used (no direct `ConcurrentRingError` reference)
-use water_ball_tool_lib::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
+use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 //AI_END===
 
 #[derive(Clone)]
-pub(super) struct DecoderRuntime {
+pub struct DecoderRuntime {
     thread_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     ring_buf: ConcurrentRing<AudioData>,
     stop: Arc<AtomicBool>,
     resetting: Arc<AtomicBool>,
+    //AI=== 毒化标志：发生不可恢复错误后置位，换曲后由前端清除 / poisoned flag: set after an unrecoverable error, cleared by the front-end after a track change
+    poisoned: Arc<AtomicBool>,
+    //AI_END===
     //AI=== engine 与 data 合并为单一 session，二者必然成对存在 / merge engine and data into a single session so they always exist as a pair
     session: Arc<Mutex<Option<DecoderSession>>>,
     //AI_END===
@@ -38,6 +44,9 @@ pub(super) struct DecoderRuntime {
     effect_runtime: PreEffectRuntime,
     time_metrics: Arc<TimeMetrics>,
     condvar: Arc<Condvar>,
+    //AI=== 线程退出通知：线程结束时唤醒看门狗（Drop 语义，见 `watchdog`） / thread exit notification for the watchdog
+    exit_notify: Option<Arc<WatchNotify>>,
+    //AI_END===
 }
 
 struct DecoderEngine {
@@ -131,6 +140,28 @@ impl DecoderRuntime {
         }
     }
     //AI_END===
+    //AI=== 瞬时 IO 错误判定：资源耗尽/被中断类错误重试通常可恢复（如 Windows 1450 ERROR_NO_SYSTEM_RESOURCES）/ transient IO error check: resource-exhaustion and interruption errors usually recover on retry (e.g. Windows 1450 ERROR_NO_SYSTEM_RESOURCES)
+    fn is_retryable_io_error(e: &std::io::Error) -> bool {
+        if matches!(
+            e.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        ) {
+            return true;
+        }
+        // 平台相关的瞬时资源错误 / platform-specific transient resource errors
+        #[cfg(windows)]
+        let platform_transient = matches!(e.raw_os_error(), Some(1450 | 8));
+        #[cfg(unix)]
+        let platform_transient = e.raw_os_error() == Some(12);
+        #[cfg(not(any(windows, unix)))]
+        let platform_transient = false;
+        platform_transient
+    }
+    //AI_END===
 }
 
 impl DecoderRuntime {
@@ -147,15 +178,59 @@ impl DecoderRuntime {
             session: Arc::new(Mutex::new(None)),
             //AI_END===
             resetting: Arc::new(AtomicBool::new(false)),
+            //AI=== 毒化标志初始为未中毒 / the poisoned flag starts unset
+            poisoned: Arc::new(AtomicBool::new(false)),
+            //AI_END===
             event_list: Arc::new(Mutex::new(Vec::new())),
             effect_runtime,
             time_metrics,
             condvar: Arc::new(Condvar::new()),
+            //AI=== 默认不通知看门狗，由 `Player` 注入 / no watchdog by default, `Player` injects it
+            exit_notify: None,
+            //AI_END===
         }
     }
 
-    //AI=== run 返回 Result：线程创建失败向上传播；解码循环中的真实运行期错误上报后停止解码 / `run` returns Result: spawn failures propagate upward, and real runtime errors are reported then stop the decode loop
+    //AI=== 注入看门狗退出通知（必须在 `run` 之前调用）/ inject the watchdog exit notification (call before `run`)
+    pub fn set_exit_notify(&mut self, notify: Arc<WatchNotify>) {
+        self.exit_notify = Some(notify);
+    }
+
+    /// 线程是否已因 stop 停止（看门狗用它区分正常关停与崩溃）。
+    /// Whether the runtime was stopped on purpose (the watchdog distinguishes shutdown from a crash).
+    pub fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
+    /// 标记毒化（看门狗在崩溃后置位，让 `Play` 走换曲恢复）。
+    /// Mark the runtime poisoned (the watchdog does this after a crash so `Play` recovers by changing track).
+    pub(crate) fn set_poisoned(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+    //AI_END===
+
+    //AI=== run 返回 Result：线程创建失败向上传播；已退出的线程先回收再重建（看门狗重启）/ `run` returns Result: spawn failures propagate upward; a finished thread is reclaimed and respawned (watchdog restart)
     pub fn run(&mut self) -> DecoderResult<()> {
+        //AI=== 已退出的线程先 join 回收，允许重启 / reclaim a finished thread so it can be restarted
+        let finished = self
+            .thread_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|h| h.is_finished());
+        if finished {
+            let handle = self
+                .thread_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(handle) = handle
+                && let Err(e) = handle.join()
+            {
+                error!("解码线程异常退出（panic）/ decoder thread crashed: {e:?}");
+            }
+        }
+        //AI_END===
         let mut thread_handle_lock = self
             .thread_handle
             .lock()
@@ -165,14 +240,26 @@ impl DecoderRuntime {
                 let ring_buf = self.ring_buf.clone();
                 let stop = self.stop.clone();
                 let resetting = self.resetting.clone();
+                //AI=== 毒化标志传入解码线程 / hand the poisoned flag to the decode thread
+                let poisoned = self.poisoned.clone();
+                //AI_END===
                 let session = self.session.clone();
                 let event_list = self.event_list.clone();
                 let time_metrics = self.time_metrics.clone();
                 let condvar = self.condvar.clone();
+                //AI=== 线程退出的最后一步（含 panic）唤醒看门狗 / the guard's Drop (panic included) wakes the watchdog
+                let exit_guard = self
+                    .exit_notify
+                    .as_ref()
+                    .map(|notify| notify.exit_guard(SLOT_DECODER));
+                //AI_END===
                 // 4. 解码循环 / decode loop
                 std::thread::Builder::new()
                     .name("decoder-runtime".into())
                     .spawn(move || -> () {
+                        //AI=== 守卫必须活到线程结束 / the guard must live until the thread ends
+                        let _exit_guard: Option<ThreadExitGuard> = exit_guard;
+                        //AI_END===
                         debug!("decoder run thread loop start");
                         let mut buf = Vec::new();
                         let mut out_buf = Vec::new();
@@ -180,6 +267,11 @@ impl DecoderRuntime {
                         let mut decode_acc = DurationAccumulator::new();
                         let mut write_wait_acc = DurationAccumulator::new();
                         let mut blocks = 0;
+                        //AI=== IO 错误重试预算与退避：失败的系统调用未消费数据，重试不会破坏流状态 / IO retry budget and backoff: a failed syscall consumed no data, so a retry does not corrupt the stream state
+                        const MAX_IO_RETRY: u32 = 5;
+                        const IO_RETRY_DELAY: Duration = Duration::from_millis(200);
+                        let mut io_retry = 0u32;
+                        //AI_END===
 
                         loop {
                             // 检查停止信号 / check the stop signal
@@ -201,6 +293,9 @@ impl DecoderRuntime {
                             //AI=== 没有会话时等待 condvar；原先“engine 有、data 无”的不配对状态已不可能出现 / wait on the condvar when there is no session; the previous unpaired "engine present, data missing" state is now impossible
                             let Some(session_ref) = session_lock.as_mut() else {
                                 debug!("decoder runtime thread wait start");
+                                //AI=== 等待新曲目时重置重试预算 / reset the retry budget while waiting for a new track
+                                io_retry = 0;
+                                //AI_END===
                                 let _unused = condvar
                                     .wait(session_lock)
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -218,10 +313,13 @@ impl DecoderRuntime {
                             let packet = match session_ref.engine.format.next_packet() {
                                 Ok(Some(p)) => {
                                     decode_acc.record(t0.elapsed());
+                                    //AI=== 读取成功后重置重试预算 / reset the retry budget after a successful read
+                                    io_retry = 0;
+                                    //AI_END===
                                     p
                                 }
                                 Ok(None) => {
-                                    //AI=== EOF 写入失败必须上报错误并停止，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and stop, and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
+                                    //AI=== EOF 写入失败必须上报错误，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
                                     let eof_outcome = match ring_buf.push_wait(AudioData::Eof) {
                                         Ok(()) => EofPushOutcome::Pushed,
                                         Err(e)
@@ -241,10 +339,11 @@ impl DecoderRuntime {
                                             ),
                                         ),
                                     };
-                                    if matches!(eof_outcome, EofPushOutcome::Pushed) {
-                                        // 取出会话，下轮回到等待 / take the session; the next iteration waits
+                                    //AI=== EOF 写入成功或失败：当前会话都已用完，成对取出；只有主动拒绝（停止/切曲）才保留 / on EOF written or EOF push failure the session is done either way: take it out as a pair; only an intentional rejection (stop/track change) keeps it
+                                    if !matches!(eof_outcome, EofPushOutcome::Rejected) {
                                         session_lock.take();
                                     }
+                                    //AI_END===
                                     drop(session_lock);
                                     match eof_outcome {
                                         EofPushOutcome::Pushed => {
@@ -262,31 +361,55 @@ impl DecoderRuntime {
                                             continue;
                                         }
                                         EofPushOutcome::Failed(e) => {
+                                            //AI=== 上报错误并丢弃残留数据，线程保持存活等待下一首 / report the error and drop stale data; the thread stays alive waiting for the next track
+                                            out_buf.clear();
                                             error!("push Eof failed: {e:?} / 写入 EOF 失败: {e:?}");
+                                            poisoned.store(true, Ordering::Release);
                                             Self::emit(
                                                 DecoderEvent { result: Err(e) },
                                                 &event_list,
                                             );
-                                            break;
+                                            continue;
+                                            //AI_END===
                                         }
                                     }
                                     //AI_END===
                                 }
                                 Err(e) => {
-                                    //AI=== next_packet 失败属于真实运行期错误：上报后停止解码 / a next_packet failure is a real runtime error: report then stop decoding
+                                    //AI=== 瞬时 IO 错误先重试（如 Windows 1450），重试耗尽或不可重试时才上报错误 / retry transient IO errors first (e.g. Windows 1450); report only when retries are exhausted or the error is not retryable
+                                    let retryable = matches!(
+                                        &e,
+                                        symphonia::core::errors::Error::IoError(io)
+                                            if Self::is_retryable_io_error(io)
+                                    );
+                                    if retryable && io_retry < MAX_IO_RETRY {
+                                        io_retry += 1;
+                                        debug!(
+                                            "next_packet IO error, retry {io_retry}/{MAX_IO_RETRY}: {e} / 读取数据包 IO 错误，重试 {io_retry}/{MAX_IO_RETRY}"
+                                        );
+                                        drop(session_lock);
+                                        std::thread::sleep(IO_RETRY_DELAY);
+                                        continue;
+                                    }
+                                    // 无法恢复：取出会话、清空缓冲、上报错误，线程回到等待新曲目 / unrecoverable: take the session, clear the buffer, report the error, then wait for a new track
                                     let event_error = DecoderEventError::new(
                                         format!("Error reading packet: {e}"),
                                         DecoderEventErrorKind::NextPacketError(e.to_string()),
                                     );
+                                    session_lock.take();
+                                    out_buf.clear();
                                     drop(session_lock);
                                     error!("Error reading packet: {e}");
+                                    //AI=== 不可恢复：标记毒化，等待前端换曲解毒 / unrecoverable: mark poisoned; the front-end clears it on a track change
+                                    poisoned.store(true, Ordering::Release);
+                                    //AI_END===
                                     Self::emit(
                                         DecoderEvent {
                                             result: Err(event_error),
                                         },
                                         &event_list,
                                     );
-                                    break;
+                                    continue;
                                     //AI_END===
                                 }
                             };
@@ -328,13 +451,22 @@ impl DecoderRuntime {
                                             break;
                                         }
                                         RingWriteOutcome::Failed(e) => {
+                                            //AI=== 上报错误、丢弃会话与残留数据，线程保持存活等待下一首 / report the error, drop the session and stale data; the thread stays alive waiting for the next track
                                             out_buf.clear();
+                                            session
+                                                .lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .take();
                                             error!("write to ring buf failed: {e:?} / 写入环形缓冲区失败: {e:?}");
+                                            //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
+                                            poisoned.store(true, Ordering::Release);
+                                            //AI_END===
                                             Self::emit(
                                                 DecoderEvent { result: Err(e) },
                                                 &event_list,
                                             );
-                                            break;
+                                            continue;
+                                            //AI_END===
                                         }
                                     }
                                     //AI_END===
@@ -364,19 +496,24 @@ impl DecoderRuntime {
                                     //AI_END===
                                 }
                                 Err(e) => {
-                                    //AI=== 致命解码错误（非帧级 DecodeError）：上报后停止解码线程 / fatal decode error (not a frame-level DecodeError): report then stop the decode thread
+                                    //AI=== 致命解码错误（非帧级 DecodeError）：取出会话、清空缓冲、上报错误，线程保持存活等待下一首 / fatal decode error (not a frame-level DecodeError): take the session, clear the buffer, report the error; the thread stays alive waiting for the next track
                                     let message = format!("Fatal decode error, err:{e}");
                                     error!("Fatal decode error: {e}");
                                     let event_error =
                                         DecoderEventError::new(message, DecoderEventErrorKind::from(e));
+                                    session_lock.take();
+                                    out_buf.clear();
                                     drop(session_lock);
+                                    //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
+                                    poisoned.store(true, Ordering::Release);
+                                    //AI_END===
                                     Self::emit(
                                         DecoderEvent {
                                             result: Err(event_error),
                                         },
                                         &event_list,
                                     );
-                                    break;
+                                    continue;
                                     //AI_END===
                                 }
                             }
@@ -399,6 +536,12 @@ impl DecoderRuntime {
     pub fn set_resetting(&self) {
         self.resetting.store(true, Ordering::Release);
     }
+
+    //AI=== 毒化状态：不可恢复错误后置位，换曲成功时自动清除 / poisoned state: set after an unrecoverable error, cleared automatically by a successful track change
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::Acquire)
+    }
+    //AI_END===
 
     pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
         // 1. 打开文件 & 创建 MSS
@@ -482,6 +625,9 @@ impl DecoderRuntime {
         //AI_END===
         self.effect_runtime.reset(decoder_format)?;
         self.resetting.store(false, Ordering::Release);
+        //AI=== 换曲成功即自动解毒：前端无需清除，避免遗忘导致下次播放被误判为毒化而提前换曲 / a successful track change clears the poison automatically, so a forgotten clear cannot make the next play command skip a track
+        self.poisoned.store(false, Ordering::Release);
+        //AI_END===
         self.condvar.notify_one(); //唤醒
         Ok(())
     }
@@ -643,7 +789,7 @@ impl DecoderEventSink for DecoderEventDirectSink {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DecoderEvent {
+pub struct DecoderEvent {
     result: Result<DecoderEventType, DecoderEventError>,
 }
 
@@ -657,13 +803,13 @@ impl DecoderEvent {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum DecoderEventType {
+pub enum DecoderEventType {
     Eof,
     Stop,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DecoderEventError {
+pub struct DecoderEventError {
     message: String,
     kind: DecoderEventErrorKind,
 }
@@ -680,7 +826,7 @@ impl DecoderEventError {
 //AI_END===
 
 #[derive(Debug)]
-pub(super) enum DecoderEventErrorKind {
+pub enum DecoderEventErrorKind {
     //AI=== 改为保存错误描述：原先的 `ConcurrentRingError<f32>` 与 `ConcurrentRing<AudioData>` 的推送错误类型不匹配且从未被构造 / store the error description: the old `ConcurrentRingError<f32>` did not match the AudioData push error type and was never constructed
     RingBufferError(String),
     //AI_END===
@@ -752,10 +898,10 @@ impl From<symphonia::core::errors::Error> for DecoderEventErrorKind {
     }
 }
 
-pub(super) type DecoderResult<T> = Result<T, DecoderError>;
+pub type DecoderResult<T> = Result<T, DecoderError>;
 
 #[derive(Debug)]
-pub(super) struct DecoderError {
+pub struct DecoderError {
     message: String,
     kind: DecoderErrorKind,
 }
@@ -908,4 +1054,37 @@ impl From<PreEffectError> for DecoderErrorKind {
     fn from(value: PreEffectError) -> Self {
         Self::ProEffectError(value)
     }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    //AI=== 瞬时 IO 错误分类：可重试与不可重试各取两例 / transient IO classification: two retryable and two non-retryable cases
+    #[test]
+    fn is_retryable_io_error_classifies_transient_errors() {
+        assert!(DecoderRuntime::is_retryable_io_error(
+            &std::io::Error::from(std::io::ErrorKind::Interrupted)
+        ));
+        assert!(DecoderRuntime::is_retryable_io_error(
+            &std::io::Error::from(std::io::ErrorKind::WouldBlock)
+        ));
+        assert!(!DecoderRuntime::is_retryable_io_error(
+            &std::io::Error::from(std::io::ErrorKind::NotFound)
+        ));
+        assert!(!DecoderRuntime::is_retryable_io_error(
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied)
+        ));
+    }
+    //AI_END===
+
+    //AI=== Windows 1450（ERROR_NO_SYSTEM_RESOURCES）必须判定为可重试 / Windows 1450 (ERROR_NO_SYSTEM_RESOURCES) must be classified as retryable
+    #[cfg(windows)]
+    #[test]
+    fn windows_no_system_resources_is_retryable() {
+        assert!(DecoderRuntime::is_retryable_io_error(
+            &std::io::Error::from_raw_os_error(1450)
+        ));
+    }
+    //AI_END===
 }

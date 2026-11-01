@@ -10,12 +10,24 @@ documentation.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sysinfo = { workspace = true }
+#AI=== 引擎移入库包后需要的音频依赖 / audio dependencies for the engine now living in the library
 tracing = { workspace = true }
 rand = { workspace = true }
 blake3 = { workspace = true }
+crossbeam-channel = { workspace = true }
+lofty = { workspace = true }
+cpal = { workspace = true }
+symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"] }
+rubato = { workspace = true }
+#AI_END===
 #AI=== binrw 二进制序列化依赖（Attribute 等 on-disk 结构）/ binrw binary serialization dependency (on-disk structs like Attribute)
 binrw = { workspace = true }
 #AI_END===
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+
+[features]
+#AI=== 调试开关随引擎移入库包，二进制包转发 / the debug switch moved with the engine; the binary forwards it
+debug-no-audio = []
+#AI_END===

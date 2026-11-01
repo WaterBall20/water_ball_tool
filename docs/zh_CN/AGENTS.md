@@ -13,8 +13,8 @@ cargo build --features debug-no-audio # 跳过音频处理的调试构建（见�
 cargo --config .cargo/native-config.toml build --release # 本机优化构建 → target/native
 cargo check                    # 仅编译检查（快速）
 cargo clippy                   # 代码检查
-cargo test                     # 跳过长时间测试（#[ignore] 自动处理）
-cargo test -- --include-ignored # 包含长时间测试（主分支推送时全量 CI）
+cargo test --workspace         # 跳过长时间测试（#[ignore] 自动处理）
+cargo test --workspace -- --include-ignored # 包含长时间测试（主分支推送时全量 CI）
 ./target/release/water_ball_tool -h
 ```
 
@@ -26,11 +26,13 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
   `cargo --config .cargo/native-config.toml build --release`。它使用 `-C target-cpu=native` 编译，并把产物重定向到
   `target/native/`（二进制位于 `target/native/release/water_ball_tool`）。不要把 native 构建当作可分发版本。
 - `debug-no-audio` feature 是 `mp` 命令的调试辅助：cpal 回调会跳过环形缓冲区读取、后置效果器处理和音量缩放，便于在没有真实
-  音频的情况下快速调试播放控制。它不产生可用的音频输出。
+  音频的情况下快速调试播放控制。它不产生可用的音频输出。该 feature 定义在 `water_ball_tool_lib`（cpal 回调位于库包），
+  二进制包负责转发，因此从仓库根执行 `cargo build --features debug-no-audio` 仍然有效。
 
 ## 测试规范
 
-- 慢速测试标记为 `#[ignore = "longtime"]`。`cargo test` 默认跳过它们。主分支 CI 推送时使用 `--include-ignored` 运行全量套件。
+- 慢速测试标记为 `#[ignore = "longtime"]`。`cargo test --workspace` 默认跳过它们。主分支 CI 推送时使用 `--include-ignored`
+  运行全量套件。必须带 `--workspace`：`water_ball_tool_lib` 是 workspace 成员，单独的 `cargo test` 只覆盖二进制包。
 - 子命令处理函数通过 `crate::multi_progress_init(module)` 自行初始化日志；调用处理函数的测试（`ff::args`、
   `wbfp::commands`、`music_play::args`）因此无需额外设置即可获得可用的 `MultiProgress`。重复注册 subscriber 会被
   `try_init` 拒绝并仅记录日志。
@@ -75,7 +77,7 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 - **随机化测试**：
     - 随机化测试绝不能生成资源文件——只能产生 `temp/test/` 下的临时文件（随机夹具是测试产物，绝不是资源）。
     - 发生非预期错误时，临时文件保留（不删除）；失败现场遗留的文件本身就是复现手段——检查它们即可诊断。无需种子重放机制。
-    - 随机化测试仅在全量模式（`cargo test -- --include-ignored`）运行，用 `#[ignore = "longtime"]` 门控。
+    - 随机化测试仅在全量模式（`cargo test --workspace -- --include-ignored`）运行，用 `#[ignore = "longtime"]` 门控。
 
 ### 测试意图与错误断言
 
@@ -120,11 +122,11 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 - 根 `Cargo.toml` 是 **workspace**（`resolver = "3"`），成员为 `water_ball_tool_lib`；同一文件还声明了源码位于 `src/` 的
   `water_ball_tool` 二进制包。
 - `water_ball_tool_lib/src/lib.rs` 导出库模块：`file_finder`、`wb_files_pack`、`tools`、`concurrent_ring`、
-  `split_ring_buffer`，以及 `gakumasu`（`#[cfg(debug_assertions)]` 门控——仅 debug 构建编译）。
+  `split_ring_buffer`、`music_play`，以及 `gakumasu`（`#[cfg(debug_assertions)]` 门控——仅 debug 构建编译）。
 - `src/main.rs` 声明 `mod command;` —— `command.rs` 对二进制 crate 私有， **不是**库的一部分。
 - 二进制代码通过 crate 名限定路径引用库——`water_ball_tool_lib::file_finder`、`water_ball_tool_lib::wb_files_pack`、
-  `water_ball_tool_lib::tools`、`water_ball_tool_lib::concurrent_ring`、`water_ball_tool_lib::split_ring_buffer`——而非
-  `crate::`。
+  `water_ball_tool_lib::tools`、`water_ball_tool_lib::concurrent_ring`、`water_ball_tool_lib::split_ring_buffer`、
+  `water_ball_tool_lib::music_play`——而非 `crate::`。
 - `command/ff.rs` — `ff` 子命令处理：参数解析、进度条设置、文件搜索编排与可选哈希。调用库中的
   `FileFinder::search_stream()`。命令层工作/哈希线程用 `thread::Builder` 创建，spawn 失败作为错误传播。
     - `[OUT_PATH]` 之后的可选多值 **位置参数** `[HASH]...`：`all`、`md5`、`sha256`、`sha512`、`sha1`、`blake3`、
@@ -134,7 +136,9 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
       `-t/--thread-count`，缺省为可用并行度）消费共享环形缓冲区。
 - `command/wbfp.rs` — `wbfp` 子命令处理：打包/解包/哈希校验，多线程文件 I/O，每工作线程独立进度条，通过
   `FileFinder::search_stream()` 流式发现文件。打包/解包/校验工作线程均用 `thread::Builder` 创建，spawn 失败作为错误传播。
-- `command/music_play.rs` + `command/music_play/` — `mp` 子命令处理（模块 `music_play`，枚举变体 `MP`），终端音乐播放器，见下文。
+- `command/music_play.rs` + `command/music_play/` — `mp` 子命令处理（模块 `music_play`，枚举变体 `MP`）。二进制包只保留
+  终端前端（clap 参数、stdin 命令循环、`indicatif` 进度条）；播放引擎本身位于库包 `water_ball_tool_lib::music_play`。
+  见下文。
 - `command/test.rs` — `ff` 和 `wbfp` 命令的集成测试，含跨平台符号链接循环检测测试。
     - 长时间测试（`#[ignore = "longtime"]`）使用 `create_large_fixture()` 生成 1,000 个随机文件（25 目录 × 40 文件，经
       `rand` crate 随机内容/大小）做压力测试。这些取代了旧的系统目录扫描测试。
@@ -157,7 +161,10 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 ### 环形缓冲区 API
 
 - `concurrent_ring`（`water_ball_tool_lib/src/concurrent_ring.rs`）— 可并发初始化的环形缓冲区（`ConcurrentRing<T>`），用作搜索/解码
-  线程与工作线程之间的生产者-消费者队列。
+  线程与工作线程之间的生产者-消费者队列。阻塞操作也会快速失败而不是永久阻塞：每个阻塞方法（`push_wait` / `write_wait` /
+  `write_all` 与 `pop_wait` / `read_wait` / `read_exact`）登记调用句柄的方向，`Clone`/`Drop` 维护每方向句柄计数；某一方向的
+  最后一个句柄 Drop 后，对向阻塞调用得到 `ReadersClosed` / `WritersClosed`（对齐 `split_ring_buffer` 的「对端关闭 →
+  `CannotWait`」）。没有独立的读/写端句柄类型，也没有手动 close/reopen；从未调用阻塞方法的句柄不会被判为已关闭。
 - `split_ring_buffer`（`water_ball_tool_lib/src/split_ring_buffer.rs`）— 读写分离环形缓冲区，读端与写端可各自独立选择有锁或无锁
   （`locked_ring_buffer`、`unlocked_read_locked_write_ring_buffer` 等）；音频回调用的是无锁读端。
 
@@ -197,28 +204,44 @@ cargo test -- --include-ignored # 包含长时间测试（主分支推送时全�
 
 - `command/music_play.rs` — `mp` 子命令（模块 `music_play`，枚举变体 `MP`）：从文件/目录收集曲目（用 `lofty` 读取元数据），
   构建 `PlayList`，并通过 stdin 命令循环（`next`/`n`、`Play`/`P`、`pause`/`p`、`exit`）驱动 `Runtime`。
+- 播放引擎位于**库包**（`water_ball_tool_lib/src/music_play/`）；二进制包只保留终端前端（`command/music_play.rs` 与
+  `command/music_play/runtime.rs`）。
 - 参数：位置参数 `files...`；`-v/--volume <f32>` 初始音量（0.0–1.0 小数，默认 `0.75`；超出范围时在开始播放前以参数错误返回失败）；
   `--verbose`（仅长选项）；`-m/--mode`，取值 `sequential-loop`（默认）、`sequential`、`repeat-one`、`shuffle`、
   `periodic-shuffle`。
-- `command/music_play/` 下的模块：
+    - `LoopMode` 位于库包并实现 `FromStr`；二进制包无法为外部类型实现 `clap::ValueEnum`，因此 `-m/--mode` 改用
+      `value_parser` 解析。
+- 库模块（`water_ball_tool_lib/src/music_play/`）：
     - `player.rs` — cpal 输出流、transport 命令（`PlayCmd`）、音量/位置原子量、`PlayerEvent` sink、`Player::try_stop()`。
+    - `watchdog.rs` — 崩溃看门狗共享状态。被监视线程持有 `ThreadExitGuard`，其 `Drop`（含 panic unwind）置位槽位并通过
+      `Condvar` 唤醒唯一的看门狗线程，因此不需要轮询 `JoinHandle::is_finished()`。看门狗线程由 `Player` 持有
+      （`player-watchdog`）：线程退出时暂停播放（绝不自动恢复）、置解码器毒化标志让 `Play` 走换曲恢复，并重启死掉的线程；
+      前效果器线程在重启前还会通过 `Player::new` 注册的工厂整条重建效果链。
     - `decoder_runtime.rs` — symphonia 解码线程，向前效果器环形缓冲区喂数据。格式读取器/解码器与轨道元数据合并保存在同一个
-      `DecoderSession` 中，由单个 `Arc<Mutex<Option<...>>>` 保护，成对替换/取出。`run()` 在线程无法创建时返回错误；解码循环
-      上报真实运行期错误并停止，单帧 `DecodeError` 跳过继续，停止/切曲时的 `WriteRejected` 属于正常控制流。
+      `DecoderSession` 中，由单个 `Arc<Mutex<Option<...>>>` 保护，成对替换/取出。`run()` 在线程无法创建时返回错误。解码循环对
+      瞬时 IO 错误先重试（`is_retryable_io_error`：5 次 × 200 ms，如 Windows 1450 `ERROR_NO_SYSTEM_RESOURCES`）；
+      不可重试或重试耗尽的错误上报为 `DecoderEvent`，随后取出会话、清空待写输出缓冲并回到 condvar 等待——线程保持存活，
+      后续换曲仍能播放。此类错误还会置位原子 `poisoned` 标志（`is_poisoned()`）；换曲成功（`set_decoder_path`）会自动清除它，
+      前端不可能忘记解毒。单帧 `DecodeError` 上报后跳过继续，停止/切曲时的 `WriteRejected` 属于正常控制流。
     - `effect.rs` + `effect/runtime.rs` — 效果器 trait 与带锁的前效果器运行时线程；具体效果器为 `effect/resampler.rs`、
-      `effect/cross_bridge.rs`、`effect/fade.rs`。
+      `effect/cross_bridge.rs`、`effect/fade.rs`。该线程遇到运行期错误不会退出：环错误先用 `Skip` 不连续信号复位效果链，
+      发出 `PreEffectRuntimeEventErrorKind::Runtime` 事件，退避 10 ms 后继续消费；输出写入硬错误同样只上报并丢弃该块。
+      只有 `stop` 标志才会结束循环。
     - `play_list.rs` — 曲目列表与循环/洗牌逻辑（`sequential-loop`、`sequential`、`repeat-one`、`shuffle`、
       `periodic-shuffle`）。
-    - `runtime.rs` — 播放编排：UI 刷新线程、自动换曲、事件消费。
     - `event_dispatch.rs` — 面向实时音频回调的专用事件/日志分发线程。
     - `tools.rs` — `TimeMetrics` / `DurationAccumulator` 性能统计辅助。
+- 二进制模块（`command/music_play/`）：
+    - `runtime.rs` — 播放编排：`indicatif` UI 刷新线程、自动换曲、事件消费。解码错误事件通过
+      `DecoderEventChannelSink` 消费（绝不在解码线程内联处理）：暂停播放并唤醒 UI 线程。解码器毒化期间 UI 前缀显示
+      `异常暂停中`，并在歌曲信息与时间统计块之间显示红色 `Error` 行；`Play`/`P` 在毒化时先换曲，随后必定恢复播放。
     - `tui/`（`app.rs`、`ui.rs`、`channel_writer.rs`）— **开发中**，尚未接入命令。
 - **实时线程规则**：cpal 回调绝不能加锁、调用 sink 或写日志。它只用非阻塞 `try_send` 把事件和日志记录投递到有界通道（容量
   1024；通道满
   则丢弃并计数）。`player-event-dispatch` 线程负责加锁、调用 `PlayerEventSink::emit` 以及真正输出 `tracing` 日志。
 - 曲目结束通过原子 EOF 标志检测；回调只投递 `TrackEnded` 事件，不直接调用 sink。
-- **退出顺序（`Player::try_stop`，幂等）**：暂停音频流 → 停止前效果器运行时（唤醒阻塞在 `push_wait` 的生产者）→ 停止解码线程 →
-  停止事件分发线程 → join `rx_cmd` 线程。
+- **退出顺序（`Player::try_stop`，幂等）**：先关停看门狗（避免它在关停过程中重启线程）→ 暂停音频流 → 停止前效果器运行时
+  （唤醒阻塞在 `push_wait` 的生产者）→ 停止解码线程 → 停止事件分发线程 → join `rx_cmd` 线程 → join 看门狗线程。
 
 ### 日志 + 进度条
 

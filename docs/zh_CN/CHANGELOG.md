@@ -2,6 +2,41 @@
 
 > **语言**: [English](../CHANGELOG.md) | 简体中文
 
+## [Unreleased] — 2026-11-01
+
+### 模块布局
+
+- 音乐播放引擎移入库 crate：`player`、`decoder_runtime`、`effect`（含 `runtime`/`resampler`/`cross_bridge`/`fade`）、
+  `play_list`、`event_dispatch` 与 `tools` 现位于 `water_ball_tool_lib/src/music_play/`，通过
+  `water_ball_tool_lib::music_play` 导出。
+- 二进制 crate 只保留终端前端：`src/command/music_play.rs`（clap 参数、stdin 命令循环、播放列表收集）与
+  `src/command/music_play/runtime.rs`（`indicatif` UI 刷新线程 + 编排），以及开发中的 `tui/`。
+- `LoopMode` 移入库包并实现 `FromStr`。二进制包无法再为它派生 `clap::ValueEnum`（orphan rule），因此 `-m/--mode`
+  改用 `value_parser` 解析；可选值保持不变。
+- `debug-no-audio` feature 现定义在 `water_ball_tool_lib`（cpal 回调所在处），由二进制包转发，因此从仓库根执行
+  `cargo build --features debug-no-audio` 仍然有效。
+- `cpal`、`symphonia`、`rubato`、`crossbeam-channel` 从二进制包移至库包；二进制包只保留 `lofty` 用于读取标签。
+- 运行库测试套件现在需要 `cargo test --workspace`（单独的 `cargo test` 只覆盖二进制包）。
+
+### 播放列表修复
+
+- `PeriodicShuffle` 的周期边界：重排下一周期的队列时，正在播放的曲目可能被抽到首位，造成跨周期连续重复。现在重排后会把
+  当前播放索引从队首挪开（新增 `avoid_immediate_repeat` 辅助函数）。只有一首曲目的列表无法避免重复，保持原样。
+- `Shuffle` 使用 `random_range(0..len)`，但曲目索引是 1-based（`get_current_track` 取 `current_index - 1`）：索引 0 会
+  下溢，且末曲永远播不到。范围改为 `1..=len`，单曲列表也能正常播放。
+
+### 播放列表编辑与上一曲
+
+- `PlayList` 新增有界播放轨迹（`VecDeque`，构造时按 `HISTORY_CAP = 1024` 预分配，长度从 0 开始）。只有 `next` 写入：
+  曲目真正发生切换时压入离开的那一首（`RepeatOne` 的自动循环原地不动，不记录），写满后丢弃最旧的一条。
+- 新增 `PlayList::prev()`：弹出轨迹并返回上一首，同时刷新 `next_id`（避免旧曲缓冲的 EOF 事件在新曲上触发自动换曲）。
+  退到轨迹起点时返回 `None`；没有 redo 路径，之后的 `next` 按当前模式重新计算。
+- 周期洗牌下，`prev` 还会把落点从本周期待播队列中移除，保证它不会在同一周期内再播一次。
+- 新增编辑 API：`add_track` / `add_tracks`（追加）与 `insert_track` / `insert_tracks`（1-based 位置，越界夹到
+  `1..=长度+1`）。批量版本是唯一实现，单曲版本转调它。
+- 中间插入会同时后移 `current_index`、轨迹项和周期队列项；追加到末尾不涉及任何一项。周期洗牌进行中时，新曲会补进
+  当前周期的待播队列。
+
 ## [Unreleased] — 2026-10-31（第二轮）
 
 ### 线程创建与错误传播
@@ -36,6 +71,45 @@
 ### 音乐播放器（`mp`）
 
 - `-v/--volume` 超出 0.0–1.0 时改为在开始播放前返回参数错误（原先会 panic）；帮助文本标注范围为 0.0–1.0
+
+### 解码错误恢复
+
+- 解码循环对瞬时 IO 错误先重试（`DecoderRuntime::is_retryable_io_error`：`Interrupted`、`WouldBlock`、`TimedOut`、
+  连接重置/中止，以及 Windows 1450 `ERROR_NO_SYSTEM_RESOURCES` 这类平台资源耗尽码），最多 5 次、每次间隔 200 ms，
+  耗尽后才视为失败。
+- 不可重试或重试耗尽的错误不再杀死解码线程：循环发出 `DecoderEvent` 错误事件，成对取出 `DecoderSession`，清空待写输出
+  缓冲，然后回到 condvar 等待。线程保持存活，后续换曲仍能播放，不会再让解码器永久静音（实际案例：`next_packet` 以
+  `os error 1450` 失败后播放彻底失效）。
+- `DecoderRuntime` 暴露原子 `poisoned` 标志（`is_poisoned`）：上述不可恢复错误置位，换曲成功（`set_decoder_path`）自动清除，
+  因此前端即使忘记解毒也不会把后续播放命令变成提前换曲。
+- `mp` 通过 `DecoderEventChannelSink` 消费解码错误事件（在通道线程上；暂停播放并唤醒 UI 线程）。毒化期间进度条前缀显示
+  `异常暂停中`，并在歌曲信息与时间统计块之间显示红色 `Error` 行；`Play`/`P` 在毒化时先换曲，随后必定恢复播放。
+
+### 环形缓冲区半关闭（第 1 步）
+
+- `ConcurrentRing` 的阻塞调用不再永久阻塞：每个阻塞方法（`push_wait`、`write_wait`、`write_all` 与 `pop_wait`、
+  `read_wait`、`read_exact`）登记调用句柄的方向，句柄的 `Clone`/`Drop` 维护每方向计数。某一方向的最后一个句柄消失后，
+  对向的阻塞调用返回新错误变体 `ReadersClosed` / `WritersClosed`；该方向重新出现登记的句柄即自动恢复。判定完全由方法自身
+  与 `Clone`/`Drop` 完成——没有读/写端句柄类型、没有手动 close/reopen、也没有额外的关闭布尔值（计数即状态）。从未调用过
+  阻塞方法的句柄不会被判为已关闭。
+
+### 前效果器错误处理（第 2 步）
+
+- 前效果器运行时线程遇到运行期错误不再退出：环错误先用 `Skip` 不连续信号复位效果链、发出
+  `PreEffectRuntimeEventErrorKind::Runtime` 事件，再退避 10 ms 继续消费（写端关闭时因此是等待而不是空转）；输出写入
+  硬错误同样只上报并丢弃该块。只有 `stop` 标志结束循环。
+- `Runtime::create` 注册 `PreEffectRuntimeEventChannelSink`，仅记录这些错误（播放可继续，不暂停）。
+
+### 崩溃看门狗（第 3 步）
+
+- 新增库模块 `music_play/watchdog.rs`：被监视线程持有 `ThreadExitGuard`，其 `Drop`（含 panic unwind）在 `WatchNotify`
+  中置位槽位并通过 `Condvar` 唤醒唯一的看门狗线程——不轮询 `JoinHandle::is_finished()`，也不需要第二个线程。
+- `Player::new` 把通知器注入解码器与前效果器运行时，并启动 `player-watchdog`。线程退出时暂停播放（不自动恢复）、置解码器
+  毒化标志让 `Play` 走换曲恢复，并重启线程；`DecoderRuntime::run` / `PreEffectRuntime::run` 现在会先回收已结束的
+  `JoinHandle` 再重建。
+- 前效果器重启会整条重建效果链：`PreEffectRuntime::set_chain_factory`（由 `Player::new` 注册）+
+  `rebuild_effects()` / `set_effects()`，因为旧效果器可能已毒化；重启前还会清空输入环残留。
+- `Player::try_stop` 先关停看门狗、最后 join 它。
 
 ## [Unreleased] — 2026-10-31
 
@@ -97,6 +171,13 @@
 - 音乐播放器退出路径补全：音频流、前效果器运行时、解码线程、事件分发线程与 `rx_cmd` 线程都会在 `try_stop` 中停止/join，
   不再泄漏到进程退出
 - 音乐播放器音频回调：事件 sink 调用与日志输出移到分发线程（修复实时抖动/优先级反转）
+- `split_ring_buffer`：阻塞交接可能极低概率死锁。发布方在发布新位置之后、于 `wait_mutex` 之外检查“是否有等待者”，
+  等待方登记后再读取该位置；x86 的 StoreLoad 重排会让双方同时看不到对方，导致对端永久睡死（跨界容量阻塞测试约
+  1/200 轮复现）。现在两侧握手都执行 `fence(SeqCst)`，“跳过唤醒”与“读到旧位置”不可能同时发生。热路径仍不取锁，
+  实时音频回调保持无锁。
+- `concurrent_ring`：`ConcurrentRingGuard`（`ring.lock()`）从不唤醒阻塞的对端，若唯一的进展来自 Guard 内的操作，
+  阻塞在 `push_wait` / `pop_wait` 的线程会永远睡下去。Guard 存活期间无法唤醒（唤醒需 `wait_lock`，而锁序是
+  `wait_lock → write_lock → read_gate.write`），因此改为在 `Drop` 中先释放两把锁、再唤醒读写两侧。
 
 ### 构建
 

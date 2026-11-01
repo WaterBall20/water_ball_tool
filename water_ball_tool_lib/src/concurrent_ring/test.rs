@@ -1199,6 +1199,60 @@ fn lock_guard_drop_counter_through_clear() {
     assert!(ring.is_empty());
 }
 
+// ---------- 全锁 Guard 的唤醒（只能在 Drop 补唤醒） ----------
+
+#[test]
+fn lock_guard_pop_wakes_blocked_writer() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    ring.write(&[1, 2]);
+    assert!(ring.is_full());
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        let res = r.write_wait(&[3]);
+        send_ok(&tx, ());
+        res
+    });
+    wait_writers_blocked(&ring, 1);
+
+    // Guard 存活期间不能唤醒（唤醒需 wait_lock，与全锁的持锁顺序相反），
+    // 因此等待者保持睡眠；Drop 先解锁再补唤醒。
+    let mut g = ring.lock();
+    assert_eq!(g.pop_front(), Some(1));
+    assert_eq!(g.len(), 1);
+    drop(g);
+
+    recv_timeout_ok(&rx, Duration::from_secs(2));
+    expect_ok(join_ok(writer));
+    assert_eq!(ring.len(), 2);
+    let mut buf = [0u32; 2];
+    assert_eq!(ring.read(&mut buf), 2);
+    assert_eq!(buf, [2, 3]);
+}
+
+#[test]
+fn lock_guard_push_wakes_blocked_reader() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let res = r.pop_wait();
+        send_ok(&tx, ());
+        res
+    });
+    wait_readers_blocked(&ring, 1);
+
+    let mut g = ring.lock();
+    assert!(g.push_back(7).is_ok());
+    assert_eq!(g.len(), 1);
+    drop(g);
+
+    recv_timeout_ok(&rx, Duration::from_secs(2));
+    assert_eq!(expect_ok(join_ok(reader)), 7);
+}
+
 // ==================== 毒化解毒验证 ====================
 
 #[test]
@@ -1701,6 +1755,24 @@ fn wait_writers_blocked<T>(ring: &ConcurrentRing<T>, expected: usize) {
     }
 }
 
+/// 轮询等待至少 `expected` 个读者阻塞在 `not_empty` 上。
+fn wait_readers_blocked<T>(ring: &ConcurrentRing<T>, expected: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = ring.inner.lock_content.read_waiters.load(Ordering::SeqCst);
+        if n >= expected {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timeout: expected at least {} blocked readers, got {}",
+                expected, n
+            );
+        }
+        spin_loop();
+    }
+}
+
 // ---------- 基础行为 ----------
 
 #[test]
@@ -2132,5 +2204,93 @@ fn reject_error_debug_display() {
         debug2.contains("WriteRejectedPartial"),
         "debug should contain WriteRejectedPartial, got: {}",
         debug2
+    );
+}
+
+// ---------- 方向登记：阻塞方法登记方向，Clone/Drop 自动维护计数 ----------
+
+#[test]
+fn reader_thread_death_makes_blocking_writer_fail() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+
+    // 读端线程在空环上阻塞读 → 登记读端方向；拿到数据后退出，句柄 Drop 归还读端计数
+    let reader = ring.clone();
+    let reader_thread = thread::spawn(move || reader.pop_wait());
+    wait_readers_blocked(&ring, 1);
+    assert!(ring.push(1).is_ok());
+    assert_eq!(expect_ok(join_ok(reader_thread)), 1);
+    assert_eq!(
+        ring.inner.read_handles.load(Ordering::SeqCst),
+        0,
+        "reader count must drop to zero after the reader thread exits"
+    );
+
+    // 读端已消失：写满后阻塞写必须立即报错而不是永久阻塞
+    assert!(ring.push(2).is_ok());
+    let err = expect_err(ring.push_wait(3));
+    if !matches!(&err.kind, ConcurrentRingErrorKind::ReadersClosed) {
+        panic!("expected ReadersClosed, got {:?}", err);
+    }
+}
+
+#[test]
+fn writer_thread_death_makes_blocking_reader_fail() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+
+    // 写端线程通过 push_wait 登记写端方向后退出
+    let writer = ring.clone();
+    let writer_thread = thread::spawn(move || writer.push_wait(1));
+    expect_ok(join_ok(writer_thread));
+    assert_eq!(
+        ring.inner.write_handles.load(Ordering::SeqCst),
+        0,
+        "writer count must drop to zero after the writer thread exits"
+    );
+    assert_eq!(ring.pop(), Some(1));
+
+    // 写端已消失：空环上的阻塞读必须立即报错
+    let err = expect_err(ring.pop_wait());
+    if !matches!(&err.kind, ConcurrentRingErrorKind::WritersClosed) {
+        panic!("expected WritersClosed, got {:?}", err);
+    }
+}
+
+#[test]
+fn new_reader_registration_reopens_the_read_side() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(1));
+
+    // 先让一个读端登记后退出 → 读端关闭
+    let reader = ring.clone();
+    let reader_thread = thread::spawn(move || reader.pop_wait());
+    wait_readers_blocked(&ring, 1);
+    assert!(ring.push(1).is_ok());
+    expect_ok(join_ok(reader_thread));
+    assert!(
+        ring.inner.is_readers_closed(),
+        "read side must be closed now"
+    );
+
+    // 新的读端登记（再次阻塞读）→ 读端自动恢复
+    let reader = ring.clone();
+    let reader_thread = thread::spawn(move || reader.pop_wait());
+    wait_readers_blocked(&ring, 1);
+    assert!(
+        !ring.inner.is_readers_closed(),
+        "a newly registered reader must reopen the read side"
+    );
+    assert!(ring.push(9).is_ok());
+    assert_eq!(expect_ok(join_ok(reader_thread)), 9);
+}
+
+#[test]
+fn ring_without_blocking_calls_is_never_closed() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    assert!(ring.push(1).is_ok());
+    assert!(ring.push(2).is_ok());
+    assert_eq!(ring.pop(), Some(1));
+    assert_eq!(ring.pop(), Some(2));
+    assert!(
+        !ring.inner.is_readers_closed() && !ring.inner.is_writers_closed(),
+        "a ring whose handles never registered a direction must never be reported as closed"
     );
 }

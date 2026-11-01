@@ -1,6 +1,8 @@
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+//AI=== 唤醒握手需要 SeqCst 屏障（见 notify_*_after_*）。
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+//AI_END===
 use std::sync::{Condvar, Mutex, MutexGuard};
 
 use crate::split_ring_buffer::error::Kind;
@@ -41,6 +43,14 @@ impl Endpoint {
     #[inline]
     pub(crate) fn enter_wait(&self) {
         self.waiting.fetch_add(1, Ordering::AcqRel);
+        //AI=== 等待方侧屏障：登记计数后必须让随后读取的读写位置排在它之后，
+        // 与发布方 notify_*_after_* 的屏障一起构成 “SB + 双侧 SeqCst fence”，
+        // 保证两侧不会同时看不到对方（丢唤醒 → 永久阻塞）。
+        // Waiter-side barrier: the predicate read that follows registration must not be
+        // reordered before it; with the publisher-side fence in notify_*_after_* this forms the
+        // "SB + two SeqCst fences" pattern, so both sides cannot miss each other at once.
+        fence(Ordering::SeqCst);
+        //AI_END===
     }
     #[inline]
     pub(crate) fn leave_wait(&self) {
@@ -588,6 +598,14 @@ impl<T> Inner<T> {
     }
 
     fn notify_reader_after_write(&self) {
+        //AI=== 发布方侧屏障：write.pos 的 Release 发布必须先于“是否有等待者”的读取，
+        // 否则可能读到 0 而跳过唤醒，同时等待者又读到旧的 write.pos 而睡下 —— 双方互盲后
+        // 再无人唤醒（x86 允许 StoreLoad 重排），表现为阻塞测试偶发永久卡死。
+        // Publisher-side barrier: the Release store of write.pos must be visible before the
+        // waiter-count read; otherwise the notify is skipped while the waiter still observes the
+        // old position (x86 StoreLoad reordering) and sleeps forever with no further wakeup.
+        fence(Ordering::SeqCst);
+        //AI_END===
         if self.read.has_waiters() {
             let _g = lock_ignore_poison(&self.wait_mutex);
             self.read.notify_one_locked();
@@ -595,6 +613,10 @@ impl<T> Inner<T> {
     }
 
     fn notify_writer_after_read(&self) {
+        //AI=== 同上，方向相反：read.pos 的发布先于写者等待计数读取。
+        // Same as above, mirrored: publish read.pos before reading the writer-waiter count.
+        fence(Ordering::SeqCst);
+        //AI_END===
         if self.write.has_waiters() {
             let _g = lock_ignore_poison(&self.wait_mutex);
             self.write.notify_one_locked();

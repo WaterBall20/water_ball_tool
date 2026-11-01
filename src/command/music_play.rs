@@ -1,23 +1,21 @@
-use crate::command::music_play::play_list::{PlayList, Track};
+//AI=== 引擎改为从库包引用 / the engine is now referenced from the library crate
 use crate::command::music_play::runtime::Runtime;
 use crate::multi_progress_init;
-use clap::{Args, ValueEnum};
+use clap::Args;
+use std::str::FromStr;
+use water_ball_tool_lib::music_play::LoopMode;
+use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
+//AI_END===
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use std::error;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-mod decoder_runtime;
-pub mod effect;
-//AI=== 事件分发线程模块 / event dispatch thread module
-mod event_dispatch;
-//AI_END===
-mod play_list;
-mod player;
+//AI=== 引擎已移入库包，这里只保留终端前端 / engine moved to the library, only the terminal front-end stays
 mod runtime;
-pub mod tools;
 pub mod tui;
+//AI_END===
 
 #[derive(Args, Debug)]
 pub(crate) struct MusicPlayArgs {
@@ -31,23 +29,17 @@ pub(crate) struct MusicPlayArgs {
     ///详细输出 / Verbose output
     #[arg(long)]
     verbose: bool,
-    /// 播放模式 / Playback mode
-    #[arg(short, long, default_value = "sequential-loop")]
+    //AI=== 不在二进制包实现 clap 的 ValueEnum（orphan rule），改用 FromStr 解析 / ValueEnum cannot be implemented here, parse via FromStr
+    /// 播放模式（sequential-loop|sequential|repeat-one|shuffle|periodic-shuffle）
+    /// Playback mode (sequential-loop|sequential|repeat-one|shuffle|periodic-shuffle)
+    #[arg(
+        short,
+        long,
+        default_value = "sequential-loop",
+        value_parser = LoopMode::from_str
+    )]
     mode: LoopMode,
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub(crate) enum LoopMode {
-    /// 顺序循环
-    SequentialLoop,
-    /// 顺序播放
-    Sequential,
-    /// 单曲循环
-    RepeatOne,
-    /// 随机播放
-    Shuffle,
-    /// 周期不重复
-    PeriodicShuffle,
+    //AI_END===
 }
 
 pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
@@ -92,10 +84,19 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
                 });
             }
             "Play" | "P" => {
+                //AI=== 毒化时先换曲恢复解码器（换曲成功由解码器自动解毒），随后无论是否毒化都必须恢复播放 / while poisoned, change track first to recover the decoder (a successful track change un-poisons automatically); playback is resumed either way
+                if runtime.is_poisoned() {
+                    warn!("解码器已毒化，先换曲再恢复播放");
+                    debug!("开始执行换曲");
+                    runtime.next().unwrap_or_else(|e| {
+                        error!("换曲发生错误: err:{e}");
+                    });
+                }
                 debug!("播放");
                 runtime.play().unwrap_or_else(|e| {
                     error!("播放发生错误：err: {e}");
                 });
+                //AI_END===
             }
             "pause" | "p" => {
                 debug!("暂停");

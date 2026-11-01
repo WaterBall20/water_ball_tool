@@ -137,7 +137,7 @@ Full specification: [`docs/en_US/wb_files_pack/manifest-data.md`](docs/en_US/wb_
 
 ```
 water_ball_tool_lib/src/          # library crate
-├── lib.rs                        # Module exports (file_finder / wb_files_pack / tools / concurrent_ring / split_ring_buffer / gakumasu)
+├── lib.rs                        # Module exports (file_finder / wb_files_pack / tools / concurrent_ring / split_ring_buffer / music_play / gakumasu)
 ├── file_finder.rs                # Multi-threaded file finder + inode chain cycle detection
 ├── file_finder/
 │   └── test.rs                   # File finder unit tests (symlink scenarios)
@@ -159,7 +159,16 @@ water_ball_tool_lib/src/          # library crate
 │   └── net_server.rs             # Network server (WIP)
 ├── tools.rs                      # Utility functions (path conversion, byte formatting, test helpers)
 ├── concurrent_ring.rs            # Concurrent initializable ring buffer
-├── split_ring_buffer.rs          # Split lock/lock-free ring buffer (+ reader/writer/error/mode submodules)
+├── split_ring_buffer.rs          # Split lock/lock-free read-write ring buffer (+ reader/writer/error/mode submodules)
+├── music_play.rs                 # Music player engine root (LoopMode + module tree)
+├── music_play/
+    ├── player.rs                 # cpal stream + PlayCmd transport + Player::try_stop
+    ├── decoder_runtime.rs        # symphonia decoder thread
+    ├── effect.rs                 # Effect traits / audio format types
+    ├── effect/                   # resampler.rs, cross_bridge.rs, fade.rs, runtime.rs (pre-effect thread)
+    ├── play_list.rs              # Track list + loop/shuffle modes
+    ├── event_dispatch.rs         # Dedicated event/log dispatch thread for the realtime callback
+    └── tools.rs                  # Time metrics / duration accumulators
 └── gakumasu/                     # Gakumasu game simulator (WIP)
     ├── data.rs
     └── simulator.rs
@@ -171,16 +180,9 @@ src/                              # binary crate (water_ball_tool)
     ├── ff.rs                     # ff subcommand implementation (search + optional hashing)
     ├── wbfp.rs                   # wbfp subcommand (pack/unpack/hash-verify)
     ├── test.rs                   # Command-level integration tests (incl. symlink cycle detection)
-    └── music_play.rs             # mp subcommand (terminal music player)
+    └── music_play.rs             # mp subcommand (clap args + stdin loop + playlist collection)
         └── music_play/
-            ├── player.rs         # cpal stream + PlayCmd transport + Player::try_stop
-            ├── decoder_runtime.rs # symphonia decoder thread
-            ├── effect.rs         # Effect traits / audio format types
-            ├── effect/           # resampler.rs, cross_bridge.rs, fade.rs, runtime.rs (pre-effect thread)
-            ├── play_list.rs      # Track list + loop/shuffle modes
-            ├── runtime.rs        # Playback orchestration + UI refresh
-            ├── event_dispatch.rs # Dedicated event/log dispatch thread for the realtime callback
-            ├── tools.rs          # Time metrics / duration accumulators
+            ├── runtime.rs        # Playback orchestration + indicatif UI refresh thread
             └── tui/              # Terminal UI (WIP: app.rs, ui.rs, channel_writer.rs)
 ```
 

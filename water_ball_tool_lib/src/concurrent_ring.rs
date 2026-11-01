@@ -3,7 +3,6 @@ mod test;
 
 use std::cell::{Cell, UnsafeCell};
 use std::fmt::{Debug, Display, Formatter};
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, Index, IndexMut};
 use std::sync::Arc;
@@ -114,6 +113,19 @@ pub struct Inner<T> {
 
     /// 当前共享此 `Inner` 的 [`ConcurrentRing`] 实例数（含自身）。
     ref_count: AtomicUsize,
+
+    //AI=== 方向端点计数：由句柄的 Clone/Drop 维护，关闭判定直接由计数得出，
+    // 不额外保存“关闭”布尔值（该方向计数归零且曾经出现过 = 该端已关闭）。
+    // Directional endpoint counters, maintained by the handles' Clone/Drop; the closed
+    // decision is derived from the counters alone (a direction is closed when its count
+    // reached zero although the direction has existed).
+    /// 活跃读端句柄数（阻塞方法登记方向后由 Clone/Drop 维护）。
+    read_handles: AtomicUsize,
+    /// 活跃写端句柄数（阻塞方法登记方向后由 Clone/Drop 维护）。
+    write_handles: AtomicUsize,
+    /// 曾出现过的方向位（`SEEN_READER` / `SEEN_WRITER`），用于区分“从未有读者”和“读者全部消失”。
+    directions_seen: AtomicUsize,
+    //AI_END===
 }
 
 // SAFETY:
@@ -151,10 +163,22 @@ impl<T> Drop for Inner<T> {
 // ConcurrentRing<T>：句柄 —— Clone 浅克隆共享 Inner
 // ============================================================
 
+//AI=== 句柄方向位：由阻塞方法置位，Clone/Drop 自动同步计数。
+// Direction bits set by the blocking methods; Clone/Drop keep the counters in sync.
+const ROLE_READER: u8 = 0b01;
+const ROLE_WRITER: u8 = 0b10;
+
+/// `directions_seen` 的方向位 / direction bits of `directions_seen`
+const SEEN_READER: usize = 0b01;
+const SEEN_WRITER: usize = 0b10;
+
 pub struct ConcurrentRing<T> {
     inner: Arc<Inner<T>>,
-    _not_sync: PhantomData<Cell<()>>,
+    /// 本句柄登记过的方向（粘性位），`Cell` 同时保证句柄仍是 `!Sync`。
+    /// Directions this handle has registered (sticky bits); `Cell` also keeps it `!Sync`.
+    role: Cell<u8>,
 }
+//AI_END===
 
 impl<T> Deref for ConcurrentRing<T> {
     type Target = Inner<T>;
@@ -166,15 +190,22 @@ impl<T> Deref for ConcurrentRing<T> {
 impl<T> Clone for ConcurrentRing<T> {
     fn clone(&self) -> Self {
         self.inner.ref_count.fetch_add(1, Ordering::Relaxed);
+        //AI=== 克隆继承方向位，计数同步 +1 / a clone inherits the role bits and is counted too
+        let role = self.role.get();
+        self.inner.acquire_role(role);
+        //AI_END===
         Self {
             inner: Arc::clone(&self.inner),
-            _not_sync: PhantomData,
+            role: Cell::new(role),
         }
     }
 }
 
 impl<T> Drop for ConcurrentRing<T> {
     fn drop(&mut self) {
+        //AI=== 先归还本句柄的方向计数（最后一个同向句柄消失时唤醒对向）/ release this handle's direction counts first
+        self.inner.release_role(self.role.get());
+        //AI_END===
         let prev = self.inner.ref_count.fetch_sub(1, Ordering::AcqRel);
         let remaining = prev.saturating_sub(1);
         if remaining == 0 {
@@ -218,9 +249,16 @@ impl<T> ConcurrentRing<T> {
                 max_cap: AtomicUsize::new(0),
                 is_max_cap: AtomicBool::new(false),
                 write_reject_gen: AtomicUsize::new(0),
+                //AI=== 方向端点计数初始为 0（没人登记方向）/ the directional counters start at 0
+                read_handles: AtomicUsize::new(0),
+                write_handles: AtomicUsize::new(0),
+                directions_seen: AtomicUsize::new(0),
+                //AI_END===
                 ref_count: AtomicUsize::new(1),
             }),
-            _not_sync: PhantomData,
+            //AI=== 新句柄尚未登记方向 / a fresh handle has no direction yet
+            role: Cell::new(0),
+            //AI_END===
         }
     }
 
@@ -243,9 +281,16 @@ impl<T> ConcurrentRing<T> {
                 max_cap: AtomicUsize::new(cap),
                 is_max_cap: AtomicBool::new(true),
                 write_reject_gen: AtomicUsize::new(0),
+                //AI=== 方向端点计数初始为 0（没人登记方向）/ the directional counters start at 0
+                read_handles: AtomicUsize::new(0),
+                write_handles: AtomicUsize::new(0),
+                directions_seen: AtomicUsize::new(0),
+                //AI_END===
                 ref_count: AtomicUsize::new(1),
             }),
-            _not_sync: PhantomData,
+            //AI=== 新句柄尚未登记方向 / a fresh handle has no direction yet
+            role: Cell::new(0),
+            //AI_END===
         })
     }
 
@@ -256,13 +301,15 @@ impl<T> ConcurrentRing<T> {
 
     /// 进入全锁模式：同时持有 `write_lock` 与 `read_gate.write`。
     pub fn lock(&self) -> ConcurrentRingGuard<'_, T> {
+        //AI=== 锁守卫改为 Option，Drop 中才能先解锁再唤醒。
         let write_guard = self.lock_write_lock();
         let read_guard = self.lock_read_gate_write();
         ConcurrentRingGuard {
             ring: &*self.inner,
-            _read_guard: read_guard,
-            _write_guard: write_guard,
+            _read_guard: Some(read_guard),
+            _write_guard: Some(write_guard),
         }
+        //AI_END===
     }
 }
 
@@ -271,6 +318,96 @@ impl<T> Default for ConcurrentRing<T> {
         Self::new()
     }
 }
+
+// ============================================================
+// 方向登记：阻塞方法自己登记方向，Clone/Drop 自动维护计数
+// Direction registration: blocking methods register the direction, Clone/Drop keep counts
+// ============================================================
+//AI=== 不拆分读/写端类型：句柄在调用阻塞方法时登记方向位（粘性），
+// Clone 同步 +1、Drop 同步 -1；某方向计数归零即认为该端已消失，
+// 对向阻塞调用得到 ReadersClosed / WritersClosed 而不是永久阻塞。
+// 方向位记录“该方向曾出现过”，因此从未有读者/写者的环不会被误判关闭。
+// No reader/writer handle types: a handle registers its direction bit (sticky) when it calls a
+// blocking method; Clone adds and Drop removes the matching counts. When a direction's count
+// reaches zero that end is considered gone and the opposite side gets
+// ReadersClosed / WritersClosed instead of blocking forever. The "seen" bit records that the
+// direction existed at all, so a ring that never used that direction is never reported closed.
+
+impl<T> Inner<T> {
+    /// 申请方向计数（方法登记或 Clone）。/ take direction counts (method registration or Clone).
+    fn acquire_role(&self, roles: u8) {
+        if roles & ROLE_READER != 0 {
+            self.directions_seen.fetch_or(SEEN_READER, Ordering::AcqRel);
+            self.read_handles.fetch_add(1, Ordering::AcqRel);
+            // 读端出现：唤醒可能因“读端关闭”而返回错误的写者 / a reader is back: wake writers
+            self.notify_readers_changed();
+        }
+        if roles & ROLE_WRITER != 0 {
+            self.directions_seen.fetch_or(SEEN_WRITER, Ordering::AcqRel);
+            self.write_handles.fetch_add(1, Ordering::AcqRel);
+            // 写端出现：唤醒可能因“写端关闭”而返回错误的读者 / a writer is back: wake readers
+            self.notify_writers_changed();
+        }
+    }
+
+    /// 归还方向计数（句柄 Drop），归零时唤醒对向。/ release direction counts; wake the opposite side at zero.
+    fn release_role(&self, roles: u8) {
+        if roles & ROLE_READER != 0 && self.read_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.notify_readers_changed();
+        }
+        if roles & ROLE_WRITER != 0 && self.write_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.notify_writers_changed();
+        }
+    }
+
+    /// 唤醒对向等待者（`wake_*` 内部已持 `wait_lock`，与等待者的“登记 + 等待”互斥）。
+    fn notify_readers_changed(&self) {
+        self.wake_writers();
+    }
+
+    fn notify_writers_changed(&self) {
+        self.wake_readers();
+    }
+
+    /// 读端已关闭：该方向曾出现，但当前已无任何登记读端的句柄。
+    fn is_readers_closed(&self) -> bool {
+        self.read_handles.load(Ordering::Acquire) == 0
+            && self.directions_seen.load(Ordering::Acquire) & SEEN_READER != 0
+    }
+
+    /// 写端已关闭：该方向曾出现，但当前已无任何登记写端的句柄。
+    fn is_writers_closed(&self) -> bool {
+        self.write_handles.load(Ordering::Acquire) == 0
+            && self.directions_seen.load(Ordering::Acquire) & SEEN_WRITER != 0
+    }
+
+    fn readers_closed_error() -> ConcurrentRingError<T> {
+        ConcurrentRingError::new(
+            "readers closed; a blocking writer can never be woken",
+            ConcurrentRingErrorKind::ReadersClosed,
+        )
+    }
+
+    fn writers_closed_error() -> ConcurrentRingError<T> {
+        ConcurrentRingError::new(
+            "writers closed; a blocking reader can never be woken",
+            ConcurrentRingErrorKind::WritersClosed,
+        )
+    }
+}
+
+impl<T> ConcurrentRing<T> {
+    /// 阻塞方法登记本句柄的方向（粘性，不撤销）。/ a blocking method registers this handle's direction (sticky).
+    fn adopt_role(&self, role: u8) {
+        let old = self.role.get();
+        if old & role == role {
+            return;
+        }
+        self.role.set(old | role);
+        self.inner.acquire_role(role);
+    }
+}
+//AI_END===
 
 // ---------- 锁 helper ----------
 
@@ -847,16 +984,20 @@ impl<T: Copy> Inner<T> {
     }
 }
 
-// ---------- 阻塞路径 ----------
+// ---------- 阻塞路径（句柄方法：先登记方向，再进入阻塞实现）----------
 
-impl<T> Inner<T> {
+impl<T> ConcurrentRing<T> {
     /// 阻塞写入单元素。
     ///
     /// # Error
     /// - `SingleInstance` / `AllWaiting`：同原语义。
     /// - `WriteRejected(Some(value))`：被 [`reject_waiting_writers`] 清空并拒绝，
     ///   返回未写入的值，调用方可取回。
+    /// - `ReadersClosed`：该环曾经有读者，但当前已无任何登记读端的句柄。
     pub fn push_wait(&self, value: T) -> ConcurrentRingResult<(), T> {
+        //AI=== 阻塞写方法登记本句柄为写端 / a blocking write registers this handle as a writer
+        self.adopt_role(ROLE_WRITER);
+        //AI_END===
         let mut value = value;
         let mut guard = self.lock_wait_lock();
         loop {
@@ -873,6 +1014,11 @@ impl<T> Inner<T> {
                 }
                 Err(v) => {
                     value = v;
+                    //AI=== 读端已关闭：写者不可能再被唤醒，立即报错 / readers closed: a writer can never be woken, fail fast
+                    if self.is_readers_closed() {
+                        return Err(Inner::<T>::readers_closed_error());
+                    }
+                    //AI_END===
                     if self.is_max_cap.load(Ordering::Acquire) {
                         self.ensure_waitable()?;
                         let gen_before = self.write_reject_gen.load(Ordering::Acquire);
@@ -910,7 +1056,14 @@ impl<T> Inner<T> {
     }
 
     /// 阻塞读取单元素。
+    ///
+    /// # Error
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WritersClosed`：该环曾经有写者，但当前已无任何登记写端的句柄。
     pub fn pop_wait(&self) -> ConcurrentRingResult<T, T> {
+        //AI=== 阻塞读方法登记本句柄为读端 / a blocking read registers this handle as a reader
+        self.adopt_role(ROLE_READER);
+        //AI_END===
         let mut guard = self.lock_wait_lock();
         loop {
             let result = {
@@ -923,6 +1076,11 @@ impl<T> Inner<T> {
                 }
                 return Ok(v);
             }
+            //AI=== 写端已关闭：读者不可能再被唤醒，立即报错 / writers closed: a reader can never be woken, fail fast
+            if self.is_writers_closed() {
+                return Err(Inner::<T>::writers_closed_error());
+            }
+            //AI_END===
             self.ensure_waitable()?;
             self.lock_content
                 .read_waiters
@@ -935,7 +1093,7 @@ impl<T> Inner<T> {
     }
 }
 
-impl<T: Copy> Inner<T> {
+impl<T: Copy> ConcurrentRing<T> {
     /// 阻塞写入至少 1 个元素，最多 `values.len()`。
     ///
     /// # Error
@@ -946,6 +1104,9 @@ impl<T: Copy> Inner<T> {
         if values.is_empty() {
             return Ok(0);
         }
+        //AI=== 阻塞写方法登记本句柄为写端 / a blocking write registers this handle as a writer
+        self.adopt_role(ROLE_WRITER);
+        //AI_END===
         let mut guard = self.lock_wait_lock();
         loop {
             let n = {
@@ -958,6 +1119,11 @@ impl<T: Copy> Inner<T> {
                 }
                 return Ok(n);
             }
+            //AI=== 读端已关闭：写者不可能再被唤醒，立即报错 / readers closed: a writer can never be woken, fail fast
+            if self.is_readers_closed() {
+                return Err(Inner::<T>::readers_closed_error());
+            }
+            //AI_END===
             if self.is_max_cap.load(Ordering::Acquire) {
                 self.ensure_waitable()?;
                 let gen_before = self.write_reject_gen.load(Ordering::Acquire);
@@ -999,6 +1165,7 @@ impl<T: Copy> Inner<T> {
     /// - `SingleInstance` / `AllWaiting`：同原语义。
     /// - `WriteRejectedPartial { written }`：被 [`reject_waiting_writers`] 拒绝，
     ///   `written` 为已成功写入的数量；未写入部分仍在调用方 slice 中。
+    /// - `ReadersClosed`：该环曾经有读者，但当前已无任何登记读端的句柄。
     pub fn write_all(&self, values: &[T]) -> ConcurrentRingResult<(), T> {
         if values.is_empty() {
             return Ok(());
@@ -1012,6 +1179,9 @@ impl<T: Copy> Inner<T> {
                 ));
             }
         }
+        //AI=== 阻塞写方法登记本句柄为写端 / a blocking write registers this handle as a writer
+        self.adopt_role(ROLE_WRITER);
+        //AI_END===
         let mut guard = self.lock_wait_lock();
         let mut written = 0;
         loop {
@@ -1028,6 +1198,11 @@ impl<T: Copy> Inner<T> {
             if written == values.len() {
                 return Ok(());
             }
+            //AI=== 读端已关闭：写者不可能再被唤醒，立即报错 / readers closed: a writer can never be woken, fail fast
+            if self.is_readers_closed() {
+                return Err(Inner::<T>::readers_closed_error());
+            }
+            //AI_END===
             if self.is_max_cap.load(Ordering::Acquire) {
                 self.ensure_waitable()?;
                 let gen_before = self.write_reject_gen.load(Ordering::Acquire);
@@ -1066,10 +1241,17 @@ impl<T: Copy> Inner<T> {
     }
 
     /// 阻塞读取至少 1 个元素。
+    ///
+    /// # Error
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WritersClosed`：该环曾经有写者，但当前已无任何登记写端的句柄。
     pub fn read_wait(&self, out: &mut [T]) -> ConcurrentRingResult<usize, T> {
         if out.is_empty() {
             return Ok(0);
         }
+        //AI=== 阻塞读方法登记本句柄为读端 / a blocking read registers this handle as a reader
+        self.adopt_role(ROLE_READER);
+        //AI_END===
         let mut guard = self.lock_wait_lock();
         loop {
             let n = {
@@ -1082,6 +1264,11 @@ impl<T: Copy> Inner<T> {
                 }
                 return Ok(n);
             }
+            //AI=== 写端已关闭：读者不可能再被唤醒，立即报错 / writers closed: a reader can never be woken, fail fast
+            if self.is_writers_closed() {
+                return Err(Inner::<T>::writers_closed_error());
+            }
+            //AI_END===
             self.ensure_waitable()?;
             self.lock_content
                 .read_waiters
@@ -1094,6 +1281,11 @@ impl<T: Copy> Inner<T> {
     }
 
     /// 阻塞读满 `out`。
+    ///
+    /// # Error
+    /// - `TooLarge`：固定模式下 `out.len() > max_cap`。
+    /// - `SingleInstance` / `AllWaiting`：同原语义。
+    /// - `WritersClosed`：该环曾经有写者，但当前已无任何登记写端的句柄。
     pub fn read_exact(&self, out: &mut [T]) -> ConcurrentRingResult<(), T> {
         if out.is_empty() {
             return Ok(());
@@ -1109,6 +1301,9 @@ impl<T: Copy> Inner<T> {
             }
         }
 
+        //AI=== 阻塞读方法登记本句柄为读端 / a blocking read registers this handle as a reader
+        self.adopt_role(ROLE_READER);
+        //AI_END===
         let mut guard = self.lock_wait_lock();
         let mut filled = 0;
         loop {
@@ -1125,6 +1320,11 @@ impl<T: Copy> Inner<T> {
             if filled == out.len() {
                 return Ok(());
             }
+            //AI=== 写端已关闭：读者不可能再被唤醒，立即报错 / writers closed: a reader can never be woken, fail fast
+            if self.is_writers_closed() {
+                return Err(Inner::<T>::writers_closed_error());
+            }
+            //AI_END===
             self.ensure_waitable()?;
             self.lock_content
                 .read_waiters
@@ -1338,6 +1538,10 @@ impl<T> Debug for ConcurrentRingError<T> {
             ConcurrentRingErrorKind::AllWaiting => "AllWaiting",
             ConcurrentRingErrorKind::WriteRejected(_) => "WriteRejected",
             ConcurrentRingErrorKind::WriteRejectedPartial { .. } => "WriteRejectedPartial",
+            //AI=== 半关闭状态 / half-closed states
+            ConcurrentRingErrorKind::ReadersClosed => "ReadersClosed",
+            ConcurrentRingErrorKind::WritersClosed => "WritersClosed",
+            //AI_END===
         };
         write!(
             f,
@@ -1386,6 +1590,13 @@ pub enum ConcurrentRingErrorKind<T> {
     WriteRejectedPartial {
         written: usize,
     },
+
+    //AI=== 对端已关闭：阻塞方不可能再被唤醒 / the opposite side is closed: the blocked side can never be woken
+    /// 读端已关闭：阻塞写者无法再被唤醒，立即返回。
+    ReadersClosed,
+    /// 写端已关闭：阻塞读者无法再被唤醒，立即返回。
+    WritersClosed,
+    //AI_END===
 }
 
 // ============================================================
@@ -1394,9 +1605,25 @@ pub enum ConcurrentRingErrorKind<T> {
 
 pub struct ConcurrentRingGuard<'a, T> {
     ring: &'a Inner<T>,
-    _read_guard: RwLockWriteGuard<'a, ()>,
-    _write_guard: MutexGuard<'a, ()>,
+    //AI=== Option 仅为让 Drop 先释放锁、再唤醒；Guard 存活期间不加锁唤醒。
+    _read_guard: Option<RwLockWriteGuard<'a, ()>>,
+    _write_guard: Option<MutexGuard<'a, ()>>,
+    //AI_END===
 }
+
+//AI=== Guard 期间持全锁，等待者只能睡在 condvar 上；解锁后必须补一次唤醒，
+// 否则 `push_wait` / `pop_wait` 不会被 Guard 里的 push/pop 唤醒。
+// 顺序必须是“先解锁、再唤醒”：唤醒要拿 `wait_lock`，而阻塞方是持着
+// `wait_lock` 去抢 `write_lock` / `read_gate.write` 的，反过来就是 ABBA 死锁。
+impl<T> Drop for ConcurrentRingGuard<'_, T> {
+    fn drop(&mut self) {
+        drop(self._read_guard.take());
+        drop(self._write_guard.take());
+        self.ring.wake_writers();
+        self.ring.wake_readers();
+    }
+}
+//AI_END===
 
 impl<'a, T> ConcurrentRingGuard<'a, T> {
     #[inline]

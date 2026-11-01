@@ -1,11 +1,14 @@
-use crate::command::music_play::decoder_runtime::{
-    DecoderError, DecoderErrorKind, DecoderEventDirectSink, DecoderEventType, DecoderResult,
+use water_ball_tool_lib::music_play::decoder_runtime::{
+    DecoderError, DecoderErrorKind, DecoderEventChannelSink, DecoderEventDirectSink, DecoderEventType,
+    DecoderResult,
 };
-use crate::command::music_play::effect::fade::FadeEffect;
-use crate::command::music_play::effect::runtime::PreEffectRuntime;
-use crate::command::music_play::play_list::{PlayList, Track};
-use crate::command::music_play::player::{Player, PlayerEventChannelSink, PlayerEventType};
-use crate::command::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
+use water_ball_tool_lib::music_play::effect::fade::FadeEffect;
+use water_ball_tool_lib::music_play::effect::runtime::{
+    PreEffectRuntime, PreEffectRuntimeEventChannelSink,
+};
+use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
+use water_ball_tool_lib::music_play::player::{Player, PlayerEventChannelSink, PlayerEventType};
+use water_ball_tool_lib::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
 use colored::Colorize;
 use indicatif::MultiProgress;
 use std::any::Any;
@@ -90,6 +93,34 @@ impl Runtime {
             condvar.clone(),
         );
         let run_stop = Arc::new(AtomicBool::new(false));
+        //AI=== 解码错误事件走事件通道：暂停播放并唤醒 UI 线程显示错误行 / decode errors travel through the event channel: pause playback and wake the UI thread to show the error line
+        player
+            .decoder_runtime()
+            .clone()
+            .add_event(Box::new(DecoderEventChannelSink::new({
+                let player = player.clone();
+                let condvar = condvar.clone();
+                move |e| {
+                    if e.result().is_err() {
+                        if let Err(err) = player.pause() {
+                            error!("暂停发生错误, err: {err}");
+                        }
+                        error!("发生解码错误事件, 将暂停： {e:?}");
+                        condvar.notify_all();
+                    }
+                }
+            })?));
+        //AI_END===
+        //AI=== 前效果器运行期错误只记录：线程不会退出，播放可继续 / pre-effect runtime errors are only logged: the thread keeps running, playback continues
+        player
+            .pre_effect_runtime()
+            .clone()
+            .add_event(Box::new(PreEffectRuntimeEventChannelSink::new(|e| {
+                if e.result().is_err() {
+                    error!("前效果器运行期错误：{e:?}");
+                }
+            })?));
+        //AI_END===
         let ui_content = Arc::new(Mutex::new(UIContent {
             ui_track: None,
             last_play_pos: Duration::from_millis(0),
@@ -252,6 +283,18 @@ impl Runtime {
                     let artist_str = track.artist().bright_blue(); // 艺术家: 亮蓝
                     let path_str = track.path().display().to_string().dimmed(); // 路径: 暗淡弱化
 
+                    //AI=== 毒化时在歌曲信息下方、时间统计上方插入红色错误行 / insert a red error line below the song info and above the time metrics while poisoned
+                    let error_str = if play_object.player.decoder_runtime().is_poisoned() {
+                        format!(
+                            "\n{label}: {msg}",
+                            label = "Error".red().bold(),
+                            msg = "解码错误，按 n 换曲恢复".red()
+                        )
+                    } else {
+                        String::new()
+                    };
+                    //AI_END===
+
                     //时间统计
                     let time_metrics_str = {
                         let time_m = &play_object.time_metrics;
@@ -286,7 +329,7 @@ impl Runtime {
                         "[{time_str}] [{volume_str}]\
                         \n{label_title: <6}: {title_str}\
                         \n{label_artist: <6}: {artist_str}\
-                        \n{label_path: <6}: {path_str}\
+                        \n{label_path: <6}: {path_str}{error_str}\
                         \n{time_metrics_str}",
                         label_title = "Title".green(),
                         label_artist = "Artist".green(),
@@ -310,7 +353,13 @@ impl Runtime {
                 }
                 //暂停时挂起
                 if !play_object.player.is_playing() && !run_stop.load(Ordering::Acquire) {
-                    pb.set_prefix("暂停中");
+                    //AI=== 暂停时检查毒化：毒化显示异常暂停中 / check the poisoned flag while paused: show 异常暂停中
+                    if play_object.player.decoder_runtime().is_poisoned() {
+                        pb.set_prefix("异常暂停中");
+                    } else {
+                        pb.set_prefix("暂停中");
+                    }
+                    //AI_END===
                     //AI=== Condvar 中毒恢复，不再 expect / recover from condvar poisoning without expect
                     ui_content = condvar
                         .wait(ui_content)
@@ -340,6 +389,12 @@ impl Runtime {
         self.thread_control.condvar.notify_all();
         Ok(())
     }
+
+    //AI=== 毒化查询：毒化时播放命令改为换曲恢复 / poison query: while poisoned the play command recovers by changing track
+    pub(super) fn is_poisoned(&self) -> bool {
+        self.play_object.player.decoder_runtime().is_poisoned()
+    }
+    //AI_END===
 
     /// 下一曲
     pub(super) fn next(&mut self) -> Result<(), Box<dyn Error>> {
@@ -455,12 +510,11 @@ impl PlayObject {
                                 debug!("解码退出事件");
                             }
                         },
-                        Err(err) => {
-                            if let Err(e) = player.pause() {
-                                error!("暂停发生错误, err: {e}");
-                            }
-                            error!("发生解码错误事件, 将暂停： {err:?}");
+                        //AI=== 错误事件统一由事件通道 sink 处理（暂停 + 唤醒 UI），解码线程只投递事件 / error events are handled by the channel sink (pause + wake the UI); the decode thread only posts events
+                        Err(_) => {
+                            debug!("解码错误事件交由 DecoderEventChannelSink 处理 / decode error event handled by the channel sink")
                         }
+                        //AI_END===
                     }
                 })));
         }

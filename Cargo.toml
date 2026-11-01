@@ -83,17 +83,16 @@ md-5 = { workspace = true }
 crc32fast = { workspace = true }
 
 colored = { workspace = true }
-#Audio
+#AI=== 音频引擎已移入库包，二进制包只保留 lofty 读标签 / audio engine moved to the library; only lofty stays for tag reading
 lofty = { workspace = true }
-cpal = { workspace = true }
-symphonia = { workspace = true, features = ["aac", "mp3", "mkv", "flac"] }
-rubato = { workspace = true }
 ratatui = { workspace = true }
-crossbeam-channel = { workspace = true }
+#AI_END===
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 
 
 [features]
-debug-no-audio = []
+#AI=== 音频引擎移入库包，该开关转发给库包 / the audio engine moved to the library; forward the switch
+debug-no-audio = ["water_ball_tool_lib/debug-no-audio"]
+#AI_END===

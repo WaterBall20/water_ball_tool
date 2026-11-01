@@ -134,7 +134,7 @@ water_ball_tool mp ./music --verbose
 
 ```
 water_ball_tool_lib/src/          # 库 crate
-├── lib.rs                        # 模块导出（file_finder / wb_files_pack / tools / concurrent_ring / split_ring_buffer / gakumasu）
+├── lib.rs                        # 模块导出（file_finder / wb_files_pack / tools / concurrent_ring / split_ring_buffer / music_play / gakumasu）
 ├── file_finder.rs                # 多线程文件搜索器 + inode 链循环检测
 ├── file_finder/
 │   └── test.rs                   # 文件搜索器单元测试（符号链接场景）
@@ -157,6 +157,15 @@ water_ball_tool_lib/src/          # 库 crate
 ├── tools.rs                      # 工具函数（路径转换、字节格式化、测试辅助）
 ├── concurrent_ring.rs            # 可并发初始化的环形缓冲区
 ├── split_ring_buffer.rs          # 读写分离有锁/无锁环形缓冲区（含 reader/writer/error/mode 子模块）
+├── music_play.rs                 # 音乐播放引擎根（LoopMode + 模块树）
+├── music_play/
+│   ├── player.rs                 # cpal 输出流 + PlayCmd transport + Player::try_stop
+│   ├── decoder_runtime.rs        # symphonia 解码线程
+│   ├── effect.rs                 # 效果器 trait / 音频格式类型
+│   ├── effect/                   # resampler.rs、cross_bridge.rs、fade.rs、runtime.rs（前效果器线程）
+│   ├── play_list.rs              # 曲目列表 + 循环/洗牌模式
+│   ├── event_dispatch.rs         # 面向实时回调的专用事件/日志分发线程
+│   └── tools.rs                  # 时间统计 / 耗时累加器
 └── gakumasu/                     # 学园偶像大师游戏模拟器（开发中）
     ├── data.rs
     └── simulator.rs
@@ -168,16 +177,9 @@ src/                              # 二进制 crate（water_ball_tool）
     ├── ff.rs                     # ff 子命令实现（搜索 + 可选哈希）
     ├── wbfp.rs                   # wbfp 子命令实现（打包/解包/哈希校验）
     ├── test.rs                   # 命令级集成测试（含符号链接循环检测）
-    └── music_play.rs             # mp 子命令（终端音乐播放器）
+    └── music_play.rs             # mp 子命令（clap 参数 + stdin 循环 + 播放列表收集）
         └── music_play/
-            ├── player.rs         # cpal 输出流 + PlayCmd transport + Player::try_stop
-            ├── decoder_runtime.rs # symphonia 解码线程
-            ├── effect.rs         # 效果器 trait / 音频格式类型
-            ├── effect/           # resampler.rs、cross_bridge.rs、fade.rs、runtime.rs（前效果器线程）
-            ├── play_list.rs      # 曲目列表 + 循环/洗牌模式
-            ├── runtime.rs        # 播放编排 + UI 刷新
-            ├── event_dispatch.rs # 面向实时回调的专用事件/日志分发线程
-            ├── tools.rs          # 时间统计 / 耗时累加器
+            ├── runtime.rs        # 播放编排 + indicatif UI 刷新线程
             └── tui/              # 终端 UI（开发中：app.rs、ui.rs、channel_writer.rs）
 ```
 

@@ -1,4 +1,4 @@
-use crate::command::music_play::effect::{
+use crate::music_play::effect::{
     AudioFormat, PreEffect, PreEffectDiscontinuity, PreEffectInfo, PreEffectOutputFormat,
 };
 use rubato::audioadapter_buffers::direct::InterleavedSlice;

@@ -2,6 +2,48 @@
 
 > **Language**: English | [简体中文](docs/zh_CN/CHANGELOG.md)
 
+## [Unreleased] — 2026-11-01
+
+### Module Layout
+
+- The music player engine moved into the library crate: `player`, `decoder_runtime`, `effect` (+ `runtime`/`resampler`/
+  `cross_bridge`/`fade`), `play_list`, `event_dispatch` and `tools` now live under
+  `water_ball_tool_lib/src/music_play/` and are exported as `water_ball_tool_lib::music_play`.
+- The binary crate keeps only the terminal front-end: `src/command/music_play.rs` (clap arguments, stdin command loop,
+  playlist collection) and `src/command/music_play/runtime.rs` (`indicatif` UI refresh thread + orchestration), plus
+  the WIP `tui/`.
+- `LoopMode` moved to the library with a `FromStr` implementation. The binary can no longer derive `clap::ValueEnum` for
+  it (orphan rule), so `-m/--mode` is parsed via `value_parser`; accepted values are unchanged.
+- The `debug-no-audio` feature is now defined on `water_ball_tool_lib` (where the cpal callback lives) and forwarded by
+  the binary package, so `cargo build --features debug-no-audio` still works from the root.
+- `cpal`, `symphonia`, `rubato` and `crossbeam-channel` moved from the binary package to the library; the binary keeps
+  only `lofty` for tag reading.
+- `cargo test --workspace` is now required to run the library test suite (a plain `cargo test` only covers the binary).
+
+### Playlist Fixes
+
+- `PeriodicShuffle` cycle boundary: when a cycle is refilled, the track that is still playing could be drawn first and
+  repeat back to back. The refilled queue now moves the current index out of the front (new `avoid_immediate_repeat`
+  helper). A single-track list cannot avoid the repeat and is left as-is.
+- `Shuffle` picked `random_range(0..len)`, but track indices are 1-based (`get_current_track` uses `current_index - 1`):
+  index 0 underflowed and the last track could never play. The range is now `1..=len`, so a single-track list plays.
+
+### Playlist Editing & Previous Track
+
+- `PlayList` gained a bounded navigation history (`VecDeque`, pre-allocated to `HISTORY_CAP = 1024`, starting empty).
+  Only `next` writes it: it pushes the index it leaves whenever the track actually changes (a `RepeatOne` automatic loop
+  stays put and records nothing), evicting the oldest entry when full.
+- `PlayList::prev()` pops the history and returns the previous track with a fresh `next_id` (so the outgoing track's
+  buffered EOF cannot trigger an automatic advance on the new one). It returns `None` at the start of the history; there
+  is no redo path, so a following `next` is recalculated from the current mode.
+- In `PeriodicShuffle`, `prev` also drops the landing track from the current cycle queue, so it cannot play twice in the
+  same cycle.
+- New editing API: `add_track` / `add_tracks` (append) and `insert_track` / `insert_tracks` (1-based position, clamped
+  to `1..=length+1`). The batch variant is the only implementation; the single-track one forwards to it.
+- A middle insertion shifts `current_index`, every history entry and every cycle entry at or after the insertion point;
+  appending at the end touches none of them. In `PeriodicShuffle` the new tracks are queued for the current cycle when
+  one is in progress.
+
 ## [Unreleased] — 2026-10-31 (Round 2)
 
 ### Thread Creation & Error Propagation
@@ -43,6 +85,56 @@
 
 - `-v/--volume` out of the 0.0–1.0 range is now an argument error returned before playback starts (previously panicked);
   the help text documents 0.0–1.0
+
+### Decoder Error Recovery
+
+- The decode loop retries transient IO errors (`DecoderRuntime::is_retryable_io_error`: `Interrupted`, `WouldBlock`,
+  `TimedOut`, connection reset/abort, and platform resource-exhaustion codes such as Windows 1450
+  `ERROR_NO_SYSTEM_RESOURCES`) up to 5 times with a 200 ms delay before treating them as failures.
+- Errors that cannot be retried, or whose retries are exhausted, no longer kill the decode thread: the loop emits the
+  `DecoderEvent` error, takes the `DecoderSession` as a pair, clears the pending output buffer and returns to the condvar
+  wait. The thread stays alive, so a later track change plays again instead of leaving the decoder permanently silent
+  (observed in practice after `next_packet` failed with `os error 1450`).
+- `DecoderRuntime` exposes an atomic `poisoned` flag (`is_poisoned`), set by those unrecoverable errors and cleared
+  automatically by a successful `set_decoder_path`, so a forgotten front-end cleanup cannot turn the next play command
+  into a premature track change.
+- `mp` consumes decoder error events through a `DecoderEventChannelSink` (channel thread; it pauses playback and wakes
+  the UI thread). While poisoned, the progress bar shows the `异常暂停中` prefix and a red `Error` line between the song
+  info and the time-metrics block, and `Play`/`P` changes track first while poisoned and always resumes playback
+  afterwards.
+
+### Ring Half-Close (Step 1)
+
+- `ConcurrentRing` now fails blocking calls fast instead of blocking forever: every blocking method (`push_wait`,
+  `write_wait`, `write_all` and `pop_wait`, `read_wait`, `read_exact`) registers the calling handle's direction, and
+  the handles' `Clone`/`Drop` keep a per-direction count. Once the last handle of one direction disappears, a blocking
+  call on the opposite side returns the new `ReadersClosed` / `WritersClosed` error; a newly registered handle of that
+  direction restores it. The decision is fully automatic through the methods plus `Clone`/`Drop` — no reader/writer
+  handle type, no manual close/reopen and no extra "closed" booleans (the counters are the state). A ring whose handles
+  never called a blocking method is never reported closed.
+
+### Pre-Effect Runtime Error Handling (Step 2)
+
+- The pre-effect runtime thread no longer exits on a runtime error: a ring error resets the effect chain with the
+  `Skip` discontinuity, emits `PreEffectRuntimeEventErrorKind::Runtime`, backs off 10 ms and keeps consuming (a closed
+  write side therefore parks instead of spinning); a hard output-write error is reported the same way and the block is
+  dropped. Only the `stop` flag ends the loop.
+- `Runtime::create` registers a `PreEffectRuntimeEventChannelSink` that only logs these errors (playback may continue,
+  no pause).
+
+### Crash Watchdog (Step 3)
+
+- New library module `music_play/watchdog.rs`: watched threads own a `ThreadExitGuard` whose `Drop` (panic unwind
+  included) marks their slot in `WatchNotify` and wakes a single watchdog thread on a `Condvar` — no
+  `JoinHandle::is_finished()` polling and no second thread.
+- `Player::new` injects the notifier into the decoder and pre-effect runtimes and spawns `player-watchdog`. On a thread
+  exit it pauses playback (no automatic resume), sets the decoder poison flag so `Play` recovers by changing track, and
+  restarts the thread; `DecoderRuntime::run` / `PreEffectRuntime::run` now reclaim a finished `JoinHandle` before
+  respawning.
+- Pre-effect restart rebuilds the whole effect chain: `PreEffectRuntime::set_chain_factory` (registered by
+  `Player::new`) + `rebuild_effects()` / `set_effects()`, because the old effects may already be poisoned. The stale
+  input ring is cleared before the restart.
+- `Player::try_stop` shuts the watchdog down first and joins it last.
 
 ## [Unreleased] — 2026-10-31
 
@@ -109,6 +201,15 @@
   `rx_cmd` thread are all stopped/joined on `try_stop` instead of leaking until process exit
 - Music player audio callback: event sink calls and logging moved to the dispatch thread (realtime jitter / priority
   inversion fix)
+- `split_ring_buffer`: blocking handoffs could rarely deadlock. The publisher checked "are there waiters?" outside  `wait_mutex` right after publishing the new position, while the waiter registered itself and then re-read that
+  position; x86 StoreLoad reordering let both miss each other, parking the peer forever (reproduced ~1 in 200 runs of
+  the cross-capacity blocking tests). Both sides now execute `fence(SeqCst)` around the handshake, so a skipped
+  wakeup and a stale position read cannot coincide. The hot path still takes no lock, so the realtime audio callback
+  remains lock-free.
+- `concurrent_ring`: `ConcurrentRingGuard` (`ring.lock()`) never woke blocked peers, so a thread parked in `push_wait` /
+  `pop_wait` could sleep forever when the only progress came from guard operations. Waking inside the guard is
+  impossible (it needs `wait_lock`, and the lock order is `wait_lock → write_lock → read_gate.write`), so the guard now
+  releases both locks in `Drop` and only then wakes writers and readers.
 
 ### Build
 
