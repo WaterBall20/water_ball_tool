@@ -1,8 +1,12 @@
+use crate::concurrent_ring::ConcurrentRing;
 use crate::music_play::effect::{
     AudioData, AudioFormat, PreEffect, PreEffectChain, PreEffectDiscontinuity, PreEffectError,
     PreEffectInfo,
 };
 use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
+//AI=== 看门狗线程退出通知 / watchdog thread-exit notification
+use crate::music_play::watchdog::{SLOT_PRE_EFFECT, ThreadExitGuard, WatchNotify};
+use crate::split_ring_buffer::LockedWriter;
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -11,10 +15,6 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
-use crate::concurrent_ring::ConcurrentRing;
-use crate::split_ring_buffer::LockedWriter;
-//AI=== 看门狗线程退出通知 / watchdog thread-exit notification
-use crate::music_play::watchdog::{SLOT_PRE_EFFECT, ThreadExitGuard, WatchNotify};
 //AI_END===
 
 #[derive(Clone)]
@@ -52,9 +52,7 @@ impl PreEffectRuntime {
             sink.emit(event.clone());
         }
     }
-}
 
-impl PreEffectRuntime {
     fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) -> Result<(), PreEffectError> {
         self.input_buf.reject_waiting_writers();
         self.input_buf.push_wait(audio_data)?;
@@ -318,7 +316,7 @@ impl PreEffectRuntime {
                                             Err(e) => {
                                                 unreachable!(
                                                     "AudioData 不连续变体转换失败（逻辑不变量被破坏）: {e} / \
-                                                     discontinuity AudioData variant conversion failed (logic invariant broken): {e}"
+                                                    discontinuity AudioData variant conversion failed (logic invariant broken): {e}"
                                                 )
                                             }
                                         };
@@ -440,6 +438,10 @@ impl PreEffectRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(event);
+    }
+
+    pub fn pre_effect_ring_buffer(&self) -> &ConcurrentRing<AudioData> {
+        &self.input_buf
     }
 }
 

@@ -1,6 +1,4 @@
-use crate::music_play::effect::{
-    AudioFormat, Decision, PlayCmd, PostEffect, TransportAware,
-};
+use crate::music_play::effect::{AudioFormat, Decision, PlayCmd, PostEffect, TransportAware};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;

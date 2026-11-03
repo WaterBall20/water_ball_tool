@@ -1,3 +1,5 @@
+//AI=== 只保留实际使用的类型（不再直接引用 `ConcurrentRingError`）/ keep only the types actually used (no direct `ConcurrentRingError` reference)
+use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 use crate::music_play::effect::runtime::PreEffectRuntime;
 use crate::music_play::effect::{AudioData, AudioFormat, PreEffectError};
 use crate::music_play::tools;
@@ -12,7 +14,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::SeekErrorKind;
@@ -22,10 +24,9 @@ use symphonia::core::formats::{
 };
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::packet::Packet;
 use symphonia::core::units::Time;
 use tracing::{debug, error};
-//AI=== 只保留实际使用的类型（不再直接引用 `ConcurrentRingError`）/ keep only the types actually used (no direct `ConcurrentRingError` reference)
-use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 //AI_END===
 
 #[derive(Clone)]
@@ -162,14 +163,174 @@ impl DecoderRuntime {
         platform_transient
     }
     //AI_END===
+
+    fn decoder_next_packet_none(
+        ring_buf: &ConcurrentRing<AudioData>,
+        mut session_lock: MutexGuard<Option<DecoderSession>>,
+        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        out_buf: &mut Vec<f32>,
+        poisoned: &Arc<AtomicBool>,
+    ) {
+        //AI=== EOF 写入失败必须上报错误，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
+        let eof_outcome = match ring_buf.push_wait(AudioData::Eof) {
+            Ok(()) => EofPushOutcome::Pushed,
+            Err(e) if matches!(&e.kind, ConcurrentRingErrorKind::WriteRejected(_)) => {
+                EofPushOutcome::Rejected
+            }
+            Err(e) => EofPushOutcome::Failed(DecoderEventError::new(
+                format!("push Eof failed: {e}"),
+                DecoderEventErrorKind::RingBufferError(e.to_string()),
+            )),
+        };
+        //AI=== EOF 写入成功或失败：当前会话都已用完，成对取出；只有主动拒绝（停止/切曲）才保留 / on EOF written or EOF push failure the session is done either way: take it out as a pair; only an intentional rejection (stop/track change) keeps it
+        if !matches!(eof_outcome, EofPushOutcome::Rejected) {
+            session_lock.take();
+        }
+        //AI_END===
+        drop(session_lock);
+        match eof_outcome {
+            EofPushOutcome::Pushed => {
+                Self::emit(
+                    DecoderEvent {
+                        result: Ok(DecoderEventType::Eof),
+                    },
+                    event_list,
+                );
+            }
+            EofPushOutcome::Rejected => {
+                // 停止/切曲中的主动拒绝：不发送 Eof 成功事件，交由循环顶部处理 stop/resetting / intentional rejection during stop/track change: no Eof success event; the loop top handles stop/resetting
+                debug!(
+                    "push Eof rejected by ring (stop/reset in progress) / 写入 EOF 被环拒绝（正在停止/重置）"
+                );
+            }
+            EofPushOutcome::Failed(e) => {
+                //AI=== 上报错误并丢弃残留数据，线程保持存活等待下一首 / report the error and drop stale data; the thread stays alive waiting for the next track
+                out_buf.clear();
+                error!("push Eof failed: {e:?} / 写入 EOF 失败: {e:?}");
+                poisoned.store(true, Ordering::Release);
+                Self::emit(DecoderEvent { result: Err(e) }, event_list);
+                //AI_END===
+            }
+        }
+        //AI_END===
+    }
+
+    fn decoder_inner(
+        packet: Packet,
+        buf: &mut Vec<f32>,
+        mut session_lock: MutexGuard<Option<DecoderSession>>,
+        ring_buf: &ConcurrentRing<AudioData>,
+        stop: &Arc<AtomicBool>,
+        out_buf: &mut Vec<f32>,
+        write_wait_acc: &mut DurationAccumulator,
+        session: &Arc<Mutex<Option<DecoderSession>>>,
+        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        poisoned: &Arc<AtomicBool>,
+        blocks: &mut u32,
+        decode_acc: &mut DurationAccumulator,
+        time_metrics: &Arc<TimeMetrics>,
+    ) -> bool {
+        let Some(session_ref) = &mut *session_lock else {
+            unreachable!("逻辑错误")
+        };
+        match session_ref.engine.decoder.decode(&packet) {
+            Ok(decoded) => {
+                // 使用新方法进行交错转换 / interleave the decoded samples
+                decoded.copy_to_vec_interleaved(buf);
+                out_buf.extend_from_slice(buf);
+                if out_buf.len() < session_ref.data.ring_buf_write_len {
+                    return false;
+                }
+                // 阻塞写入前释放会话锁（保持原先写入前释放 engine/data 锁的行为）/ release the session lock before the blocking write (same as releasing the engine/data locks before)
+                drop(session_lock);
+                //AI=== 写入结果需区分成功/主动拒绝/停止/真实错误；失败时清空 out_buf，不带着旧数据继续 / distinguish written/rejected/stopped/failed; clear out_buf on failure so stale data is not reused
+                match Self::write_all_to_ring_buf(
+                    ring_buf,
+                    stop,
+                    event_list,
+                    out_buf,
+                    write_wait_acc,
+                ) {
+                    RingWriteOutcome::Written => {
+                        out_buf.clear();
+                    }
+                    RingWriteOutcome::Rejected => {
+                        // 停止/切曲/寻道中的主动拒绝：丢弃旧数据，由循环顶部处理 stop/resetting / intentional rejection during stop/track change/seek: discard stale data; the loop top handles stop/resetting
+                        out_buf.clear();
+                        return false;
+                    }
+                    RingWriteOutcome::Stopped => {
+                        // 停止事件已由 write_all_to_ring_buf 上报 / the stop event was already emitted by write_all_to_ring_buf
+                        out_buf.clear();
+                        return true;
+                    }
+                    RingWriteOutcome::Failed(e) => {
+                        //AI=== 上报错误、丢弃会话与残留数据，线程保持存活等待下一首 / report the error, drop the session and stale data; the thread stays alive waiting for the next track
+                        out_buf.clear();
+                        session
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take();
+                        error!("write to ring buf failed: {e:?} / 写入环形缓冲区失败: {e:?}");
+                        //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
+                        poisoned.store(true, Ordering::Release);
+                        //AI_END===
+                        Self::emit(DecoderEvent { result: Err(e) }, event_list);
+                        return false;
+                        //AI_END===
+                    }
+                }
+                //AI_END===
+                //统计 / statistics
+                *blocks += 1;
+                if (*blocks).is_multiple_of(tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL) {
+                    decode_acc.flush_into(&time_metrics.decode);
+                    write_wait_acc.flush_into(&time_metrics.decode_write_wait);
+                }
+            }
+            Err(symphonia::core::errors::Error::DecodeError(e)) => {
+                //AI=== 单帧 DecodeError 可恢复：上报后跳过该帧继续，保持原行为 / a single-frame DecodeError is recoverable: report then skip the frame, preserving the old behavior
+                let event_error = DecoderEventError::new(
+                    format!("Decode error (skipping frame): {e}"),
+                    DecoderEventErrorKind::DecodeError(e),
+                );
+                drop(session_lock);
+                error!("Decode error (skipping frame): {e}");
+                Self::emit(
+                    DecoderEvent {
+                        result: Err(event_error),
+                    },
+                    event_list,
+                );
+                //AI_END===
+            }
+            Err(e) => {
+                //AI=== 致命解码错误（非帧级 DecodeError）：取出会话、清空缓冲、上报错误，线程保持存活等待下一首 / fatal decode error (not a frame-level DecodeError): take the session, clear the buffer, report the error; the thread stays alive waiting for the next track
+                let message = format!("Fatal decode error, err:{e}");
+                error!("Fatal decode error: {e}");
+                let event_error = DecoderEventError::new(message, DecoderEventErrorKind::from(e));
+                session_lock.take();
+                out_buf.clear();
+                drop(session_lock);
+                //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
+                poisoned.store(true, Ordering::Release);
+                //AI_END===
+                Self::emit(
+                    DecoderEvent {
+                        result: Err(event_error),
+                    },
+                    event_list,
+                );
+                //AI_END===
+            }
+        }
+        false
+    }
 }
 
 impl DecoderRuntime {
-    pub fn new(
-        ring_buf: ConcurrentRing<AudioData>,
-        effect_runtime: PreEffectRuntime,
-        time_metrics: Arc<TimeMetrics>,
-    ) -> Self {
+    pub fn create(effect_runtime: PreEffectRuntime, time_metrics: Arc<TimeMetrics>) -> Self {
+        let ring_buf = effect_runtime.pre_effect_ring_buffer().clone();
         Self {
             thread_handle: Arc::new(Mutex::new(None)),
             ring_buf,
@@ -209,26 +370,23 @@ impl DecoderRuntime {
     }
     //AI_END===
 
+    //AI=== IO 错误重试预算与退避：失败的系统调用未消费数据，重试不会破坏流状态 / IO retry budget and backoff: a failed syscall consumed no data, so a retry does not corrupt the stream state
+    const MAX_IO_RETRY: u32 = 5;
+    const IO_RETRY_DELAY: Duration = Duration::from_millis(200);
+    //AI_END===
+
     //AI=== run 返回 Result：线程创建失败向上传播；已退出的线程先回收再重建（看门狗重启）/ `run` returns Result: spawn failures propagate upward; a finished thread is reclaimed and respawned (watchdog restart)
     pub fn run(&mut self) -> DecoderResult<()> {
         //AI=== 已退出的线程先 join 回收，允许重启 / reclaim a finished thread so it can be restarted
-        let finished = self
+        let handle = self
             .thread_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(|h| h.is_finished());
-        if finished {
-            let handle = self
-                .thread_handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(handle) = handle
-                && let Err(e) = handle.join()
-            {
-                error!("解码线程异常退出（panic）/ decoder thread crashed: {e:?}");
-            }
+            .take();
+        if let Some(handle) = handle
+            && let Err(e) = handle.join()
+        {
+            error!("解码线程异常退出（panic）/ decoder thread crashed: {e:?}");
         }
         //AI_END===
         let mut thread_handle_lock = self
@@ -268,8 +426,6 @@ impl DecoderRuntime {
                         let mut write_wait_acc = DurationAccumulator::new();
                         let mut blocks = 0;
                         //AI=== IO 错误重试预算与退避：失败的系统调用未消费数据，重试不会破坏流状态 / IO retry budget and backoff: a failed syscall consumed no data, so a retry does not corrupt the stream state
-                        const MAX_IO_RETRY: u32 = 5;
-                        const IO_RETRY_DELAY: Duration = Duration::from_millis(200);
                         let mut io_retry = 0u32;
                         //AI_END===
 
@@ -296,9 +452,7 @@ impl DecoderRuntime {
                                 //AI=== 等待新曲目时重置重试预算 / reset the retry budget while waiting for a new track
                                 io_retry = 0;
                                 //AI_END===
-                                let _unused = condvar
-                                    .wait(session_lock)
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let _unused = condvar.wait(session_lock);
                                 debug!("decoder runtime thread wait end");
                                 continue;
                             };
@@ -319,61 +473,14 @@ impl DecoderRuntime {
                                     p
                                 }
                                 Ok(None) => {
-                                    //AI=== EOF 写入失败必须上报错误，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
-                                    let eof_outcome = match ring_buf.push_wait(AudioData::Eof) {
-                                        Ok(()) => EofPushOutcome::Pushed,
-                                        Err(e)
-                                        if matches!(
-                                                &e.kind,
-                                                ConcurrentRingErrorKind::WriteRejected(_)
-                                            ) =>
-                                            {
-                                                EofPushOutcome::Rejected
-                                            }
-                                        Err(e) => EofPushOutcome::Failed(
-                                            DecoderEventError::new(
-                                                format!("push Eof failed: {e}"),
-                                                DecoderEventErrorKind::RingBufferError(
-                                                    e.to_string(),
-                                                ),
-                                            ),
-                                        ),
-                                    };
-                                    //AI=== EOF 写入成功或失败：当前会话都已用完，成对取出；只有主动拒绝（停止/切曲）才保留 / on EOF written or EOF push failure the session is done either way: take it out as a pair; only an intentional rejection (stop/track change) keeps it
-                                    if !matches!(eof_outcome, EofPushOutcome::Rejected) {
-                                        session_lock.take();
-                                    }
-                                    //AI_END===
-                                    drop(session_lock);
-                                    match eof_outcome {
-                                        EofPushOutcome::Pushed => {
-                                            Self::emit(
-                                                DecoderEvent {
-                                                    result: Ok(DecoderEventType::Eof),
-                                                },
-                                                &event_list,
-                                            );
-                                            continue;
-                                        }
-                                        EofPushOutcome::Rejected => {
-                                            // 停止/切曲中的主动拒绝：不发送 Eof 成功事件，交由循环顶部处理 stop/resetting / intentional rejection during stop/track change: no Eof success event; the loop top handles stop/resetting
-                                            debug!("push Eof rejected by ring (stop/reset in progress) / 写入 EOF 被环拒绝（正在停止/重置）");
-                                            continue;
-                                        }
-                                        EofPushOutcome::Failed(e) => {
-                                            //AI=== 上报错误并丢弃残留数据，线程保持存活等待下一首 / report the error and drop stale data; the thread stays alive waiting for the next track
-                                            out_buf.clear();
-                                            error!("push Eof failed: {e:?} / 写入 EOF 失败: {e:?}");
-                                            poisoned.store(true, Ordering::Release);
-                                            Self::emit(
-                                                DecoderEvent { result: Err(e) },
-                                                &event_list,
-                                            );
-                                            continue;
-                                            //AI_END===
-                                        }
-                                    }
-                                    //AI_END===
+                                    Self::decoder_next_packet_none(
+                                        &ring_buf,
+                                        session_lock,
+                                        &event_list,
+                                        &mut out_buf,
+                                        &poisoned,
+                                    );
+                                    continue;
                                 }
                                 Err(e) => {
                                     //AI=== 瞬时 IO 错误先重试（如 Windows 1450），重试耗尽或不可重试时才上报错误 / retry transient IO errors first (e.g. Windows 1450); report only when retries are exhausted or the error is not retryable
@@ -382,13 +489,16 @@ impl DecoderRuntime {
                                         symphonia::core::errors::Error::IoError(io)
                                             if Self::is_retryable_io_error(io)
                                     );
-                                    if retryable && io_retry < MAX_IO_RETRY {
+                                    if retryable && io_retry < Self::MAX_IO_RETRY {
                                         io_retry += 1;
                                         debug!(
-                                            "next_packet IO error, retry {io_retry}/{MAX_IO_RETRY}: {e} / 读取数据包 IO 错误，重试 {io_retry}/{MAX_IO_RETRY}"
+                                            "next_packet IO error, retry \
+                                            {io_retry}/{max}: {e} / 读取数据包 IO 错误，重试 \
+                                            {io_retry}/{max}",
+                                            max = Self::MAX_IO_RETRY,
                                         );
                                         drop(session_lock);
-                                        std::thread::sleep(IO_RETRY_DELAY);
+                                        std::thread::sleep(Self::IO_RETRY_DELAY);
                                         continue;
                                     }
                                     // 无法恢复：取出会话、清空缓冲、上报错误，线程回到等待新曲目 / unrecoverable: take the session, clear the buffer, report the error, then wait for a new track
@@ -418,104 +528,22 @@ impl DecoderRuntime {
                             if packet.track_id != session_ref.data.track_id {
                                 continue;
                             }
-
-                            match session_ref.engine.decoder.decode(&packet) {
-                                Ok(decoded) => {
-                                    // 使用新方法进行交错转换 / interleave the decoded samples
-                                    decoded.copy_to_vec_interleaved(&mut buf);
-                                    out_buf.extend_from_slice(&buf);
-                                    if out_buf.len() < session_ref.data.ring_buf_write_len {
-                                        continue;
-                                    }
-                                    // 阻塞写入前释放会话锁（保持原先写入前释放 engine/data 锁的行为）/ release the session lock before the blocking write (same as releasing the engine/data locks before)
-                                    drop(session_lock);
-                                    //AI=== 写入结果需区分成功/主动拒绝/停止/真实错误；失败时清空 out_buf，不带着旧数据继续 / distinguish written/rejected/stopped/failed; clear out_buf on failure so stale data is not reused
-                                    match Self::write_all_to_ring_buf(
-                                        &ring_buf,
-                                        &stop,
-                                        &event_list,
-                                        &out_buf,
-                                        &mut write_wait_acc,
-                                    ) {
-                                        RingWriteOutcome::Written => {
-                                            out_buf.clear();
-                                        }
-                                        RingWriteOutcome::Rejected => {
-                                            // 停止/切曲/寻道中的主动拒绝：丢弃旧数据，由循环顶部处理 stop/resetting / intentional rejection during stop/track change/seek: discard stale data; the loop top handles stop/resetting
-                                            out_buf.clear();
-                                            continue;
-                                        }
-                                        RingWriteOutcome::Stopped => {
-                                            // 停止事件已由 write_all_to_ring_buf 上报 / the stop event was already emitted by write_all_to_ring_buf
-                                            out_buf.clear();
-                                            break;
-                                        }
-                                        RingWriteOutcome::Failed(e) => {
-                                            //AI=== 上报错误、丢弃会话与残留数据，线程保持存活等待下一首 / report the error, drop the session and stale data; the thread stays alive waiting for the next track
-                                            out_buf.clear();
-                                            session
-                                                .lock()
-                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                                .take();
-                                            error!("write to ring buf failed: {e:?} / 写入环形缓冲区失败: {e:?}");
-                                            //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
-                                            poisoned.store(true, Ordering::Release);
-                                            //AI_END===
-                                            Self::emit(
-                                                DecoderEvent { result: Err(e) },
-                                                &event_list,
-                                            );
-                                            continue;
-                                            //AI_END===
-                                        }
-                                    }
-                                    //AI_END===
-                                    //统计 / statistics
-                                    blocks += 1;
-                                    if blocks % tools::DURATION_ACCUMULATOR_FLUSH_INTERVAL == 0 {
-                                        decode_acc.flush_into(&time_metrics.decode);
-                                        write_wait_acc
-                                            .flush_into(&time_metrics.decode_write_wait);
-                                    }
-                                }
-                                Err(symphonia::core::errors::Error::DecodeError(e)) => {
-                                    //AI=== 单帧 DecodeError 可恢复：上报后跳过该帧继续，保持原行为 / a single-frame DecodeError is recoverable: report then skip the frame, preserving the old behavior
-                                    let event_error = DecoderEventError::new(
-                                        format!("Decode error (skipping frame): {e}"),
-                                        DecoderEventErrorKind::DecodeError(e),
-                                    );
-                                    drop(session_lock);
-                                    error!("Decode error (skipping frame): {e}");
-                                    Self::emit(
-                                        DecoderEvent {
-                                            result: Err(event_error),
-                                        },
-                                        &event_list,
-                                    );
-                                    continue;
-                                    //AI_END===
-                                }
-                                Err(e) => {
-                                    //AI=== 致命解码错误（非帧级 DecodeError）：取出会话、清空缓冲、上报错误，线程保持存活等待下一首 / fatal decode error (not a frame-level DecodeError): take the session, clear the buffer, report the error; the thread stays alive waiting for the next track
-                                    let message = format!("Fatal decode error, err:{e}");
-                                    error!("Fatal decode error: {e}");
-                                    let event_error =
-                                        DecoderEventError::new(message, DecoderEventErrorKind::from(e));
-                                    session_lock.take();
-                                    out_buf.clear();
-                                    drop(session_lock);
-                                    //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
-                                    poisoned.store(true, Ordering::Release);
-                                    //AI_END===
-                                    Self::emit(
-                                        DecoderEvent {
-                                            result: Err(event_error),
-                                        },
-                                        &event_list,
-                                    );
-                                    continue;
-                                    //AI_END===
-                                }
+                            if Self::decoder_inner(
+                                packet,
+                                &mut buf,
+                                session_lock,
+                                &ring_buf,
+                                &stop,
+                                &mut out_buf,
+                                &mut write_wait_acc,
+                                &session,
+                                &event_list,
+                                &poisoned,
+                                &mut blocks,
+                                &mut decode_acc,
+                                &time_metrics,
+                            ) {
+                                break;
                             }
                         }
                         debug!("decoder run thread loop end");
@@ -543,7 +571,7 @@ impl DecoderRuntime {
     }
     //AI_END===
 
-    pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
+    pub fn set_decoder_path(&self, path: &Path) -> DecoderResult<()> {
         // 1. 打开文件 & 创建 MSS
         let file = File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
@@ -618,6 +646,7 @@ impl DecoderRuntime {
         //更改解码器 / replace the decoder
         //AI=== 在同一把锁内成对替换 engine 与 data，避免再出现不配对状态 / replace engine and data as a pair under a single lock, so no unpaired state can occur
         let session = DecoderSession { engine, data };
+        self.resetting.store(true, Ordering::Release);
         self.session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

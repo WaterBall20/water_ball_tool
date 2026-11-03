@@ -80,11 +80,13 @@ fn zero_length_operations() {
     assert_eq!(r.read(&mut empty_r), 0);
     assert_eq!(w.write(&empty_w), 0);
     assert_eq!(
-        r.read_wait(&mut empty_r).expect("read_wait on empty slice should succeed"),
+        r.read_wait(&mut empty_r)
+            .expect("read_wait on empty slice should succeed"),
         0
     );
     assert_eq!(
-        w.write_wait(&empty_w).expect("write_wait on empty slice should succeed"),
+        w.write_wait(&empty_w)
+            .expect("write_wait on empty slice should succeed"),
         0
     );
     assert!(r.read_exact(&mut empty_r).is_ok());
@@ -94,7 +96,8 @@ fn zero_length_operations() {
 #[test]
 fn write_all_fits_in_capacity() {
     let (r, w) = locked_ring_buffer::<u8>(8);
-    w.write_all(&[1, 2, 3, 4, 5]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4, 5])
+        .expect("write_all should succeed");
     assert_eq!(r.len(), 5);
     let mut buf = [0u8; 5];
     r.read_exact(&mut buf).expect("read_exact should succeed");

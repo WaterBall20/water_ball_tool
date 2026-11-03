@@ -1,14 +1,3 @@
-use water_ball_tool_lib::music_play::decoder_runtime::{
-    DecoderError, DecoderErrorKind, DecoderEventChannelSink, DecoderEventDirectSink, DecoderEventType,
-    DecoderResult,
-};
-use water_ball_tool_lib::music_play::effect::fade::FadeEffect;
-use water_ball_tool_lib::music_play::effect::runtime::{
-    PreEffectRuntime, PreEffectRuntimeEventChannelSink,
-};
-use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
-use water_ball_tool_lib::music_play::player::{Player, PlayerEventChannelSink, PlayerEventType};
-use water_ball_tool_lib::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
 use colored::Colorize;
 use indicatif::MultiProgress;
 use std::any::Any;
@@ -19,6 +8,17 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 use std::{io, thread};
 use tracing::{debug, error, info};
+use water_ball_tool_lib::music_play::decoder_runtime::{
+    DecoderError, DecoderErrorKind, DecoderEventChannelSink, DecoderEventDirectSink,
+    DecoderEventType, DecoderResult,
+};
+use water_ball_tool_lib::music_play::effect::fade::FadeEffect;
+use water_ball_tool_lib::music_play::effect::runtime::{
+    PreEffectRuntime, PreEffectRuntimeEventChannelSink,
+};
+use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
+use water_ball_tool_lib::music_play::player::{Player, PlayerEventChannelSink, PlayerEventType};
+use water_ball_tool_lib::music_play::tools::{DurationStats, DurationStatsWindow, TimeMetrics};
 
 pub(super) struct Runtime {
     play_object: PlayObject,
@@ -81,40 +81,29 @@ impl Runtime {
         //控制变量
         let condvar = Arc::new(Condvar::new());
 
-        let play_object = PlayObject::new(
-            Arc::new(Mutex::new(play_list)),
-            player.clone(),
-            decoder_track.clone(),
-            NextContent {
-                next_id: Arc::new(AtomicUsize::new(0)),
-                err_count: Arc::new(AtomicUsize::new(0)),
-            },
-            player.time_metrics().clone(),
-            condvar.clone(),
-        );
         let run_stop = Arc::new(AtomicBool::new(false));
         //AI=== 解码错误事件走事件通道：暂停播放并唤醒 UI 线程显示错误行 / decode errors travel through the event channel: pause playback and wake the UI thread to show the error line
-        player
-            .decoder_runtime()
-            .clone()
-            .add_event(Box::new(DecoderEventChannelSink::new({
-                let player = player.clone();
-                let condvar = condvar.clone();
-                move |e| {
-                    if e.result().is_err() {
-                        if let Err(err) = player.pause() {
-                            error!("暂停发生错误, err: {err}");
+        {
+            let this_player = player.clone();
+            player
+                .decoder_runtime_mut()
+                .add_event(Box::new(DecoderEventChannelSink::new({
+                    let condvar = condvar.clone();
+                    move |e| {
+                        if e.result().is_err() {
+                            if let Err(err) = this_player.pause() {
+                                error!("暂停发生错误, err: {err}");
+                            }
+                            error!("发生解码错误事件, 将暂停： {e:?}");
+                            condvar.notify_all();
                         }
-                        error!("发生解码错误事件, 将暂停： {e:?}");
-                        condvar.notify_all();
                     }
-                }
-            })?));
+                })?));
+        }
         //AI_END===
         //AI=== 前效果器运行期错误只记录：线程不会退出，播放可继续 / pre-effect runtime errors are only logged: the thread keeps running, playback continues
         player
-            .pre_effect_runtime()
-            .clone()
+            .pre_effect_runtime_mut()
             .add_event(Box::new(PreEffectRuntimeEventChannelSink::new(|e| {
                 if e.result().is_err() {
                     error!("前效果器运行期错误：{e:?}");
@@ -127,23 +116,6 @@ impl Runtime {
             last_play_pos_eq_count: 0,
             last_pos_eq_start_time: Duration::from_millis(0),
         }));
-        //创建线程
-        //UI线程
-        let ui_thread = {
-            let condvar = condvar.clone();
-            let play_object = play_object.clone();
-            Self::create_ui_thread(
-                condvar,
-                play_object.clone(),
-                mp,
-                run_stop.clone(),
-                ui_content.clone(),
-            )
-        }?;
-        let thread_control = ThreadControl {
-            ui_thread: Some(ui_thread),
-            condvar,
-        };
 
         //注册事件
         {
@@ -172,6 +144,32 @@ impl Runtime {
         }
         //添加效果(淡出淡入)
         player.add_audio_post_effect(FadeEffect::new());
+
+        let time_metrics = player.time_metrics().clone();
+        let play_object = PlayObject::new(
+            Arc::new(Mutex::new(play_list)),
+            player,
+            decoder_track,
+            NextContent {
+                next_id: Arc::new(AtomicUsize::new(0)),
+                err_count: Arc::new(AtomicUsize::new(0)),
+            },
+            time_metrics,
+            condvar.clone(),
+        );
+
+        //UI线程
+        let ui_thread = Self::create_ui_thread(
+            condvar.clone(),
+            play_object.clone(),
+            mp,
+            run_stop.clone(),
+            ui_content.clone(),
+        )?;
+        let thread_control = ThreadControl {
+            ui_thread: Some(ui_thread),
+            condvar,
+        };
 
         Ok(Self {
             play_object,
@@ -479,15 +477,14 @@ impl PlayObject {
         time_metrics: Arc<TimeMetrics>,
         condvar: Arc<Condvar>,
     ) -> Self {
+        let mut player = player;
         {
             let play_list = play_list.clone();
-            let player = player.clone();
+            let this_player = player.clone();
             let decoder_track = decoder_track.clone();
             let next_content = next_content.clone();
-            let pre_effect_runtime = player.pre_effect_runtime().clone();
             player
-                .decoder_runtime()
-                .clone()
+                .decoder_runtime_mut()
                 .add_event(Box::new(DecoderEventDirectSink::new(move |e| {
                     debug!("解码器事件触发：{e:?}");
                     match e.result() {
@@ -496,11 +493,11 @@ impl PlayObject {
                                 if let Err(e) = Self::next_inner(
                                     &play_list,
                                     true,
-                                    player.clone(),
+                                    &this_player,
                                     &decoder_track,
                                     None,
                                     &next_content,
-                                    &pre_effect_runtime,
+                                    this_player.pre_effect_runtime(),
                                     &condvar,
                                 ) {
                                     error!("自动换曲发生错误，err:{e}");
@@ -512,9 +509,11 @@ impl PlayObject {
                         },
                         //AI=== 错误事件统一由事件通道 sink 处理（暂停 + 唤醒 UI），解码线程只投递事件 / error events are handled by the channel sink (pause + wake the UI); the decode thread only posts events
                         Err(_) => {
-                            debug!("解码错误事件交由 DecoderEventChannelSink 处理 / decode error event handled by the channel sink")
-                        }
-                        //AI_END===
+                            debug!(
+                                "解码错误事件交由 DecoderEventChannelSink 处理 /\
+                            decode error event handled by the channel sink"
+                            );
+                        } //AI_END===
                     }
                 })));
         }
@@ -557,7 +556,7 @@ impl PlayObject {
         Self::next_inner(
             &self.play_list,
             false,
-            self.player.clone(),
+            &self.player,
             &self.decoder_track,
             Some(ui_track),
             &self.next_content,
@@ -569,14 +568,13 @@ impl PlayObject {
     fn next_inner(
         play_list: &Arc<Mutex<PlayList>>,
         play_end: bool,
-        player: Player,
+        player: &Player,
         decoder_track: &Arc<Mutex<Option<Track>>>,
         ui_track: Option<&mut Option<Track>>,
         next_content: &NextContent,
         pre_effect_runtime: &PreEffectRuntime,
         condvar: &Arc<Condvar>,
     ) -> DecoderResult<Option<Track>> {
-        let mut player = player;
         let mut play_list_lock = play_list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -623,7 +621,7 @@ impl PlayObject {
                             return Self::next_inner(
                                 play_list,
                                 play_end,
-                                player.clone(),
+                                player,
                                 decoder_track,
                                 ui_track,
                                 next_content,

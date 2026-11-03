@@ -1,3 +1,5 @@
+//AI_END===
+use crate::concurrent_ring::ConcurrentRing;
 use crate::music_play::decoder_runtime::{DecoderError, DecoderResult, DecoderRuntime};
 use crate::music_play::effect::cross_bridge::CrossBridgeEffect;
 use crate::music_play::effect::resampler::ResamplerEffect;
@@ -5,17 +7,16 @@ use crate::music_play::effect::runtime::{
     PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventType,
 };
 use crate::music_play::effect::{
-    AudioData, AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain, PreEffectChain,
-    PreEffectError,
+    AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain, PreEffectChain, PreEffectError,
 };
-//AI=== 看门狗：线程崩溃后暂停并重启被监视线程 / watchdog: pause and restart watched threads after a crash
-use crate::music_play::watchdog::{SLOT_DECODER, SLOT_PRE_EFFECT, WatchNotify};
 //AI_END===
 //AI=== 引入事件分发线程：实时回调只投递事件/日志，加锁与 sink 调用移到分发线程
 use crate::music_play::event_dispatch::{EventDispatcher, LogLevel};
-//AI_END===
 use crate::music_play::tools;
 use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
+//AI=== 看门狗：线程崩溃后暂停并重启被监视线程 / watchdog: pause and restart watched threads after a crash
+use crate::music_play::watchdog::{SLOT_DECODER, SLOT_PRE_EFFECT, WatchNotify};
+use crate::split_ring_buffer::{LockedWriter, UnlockedReader};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
@@ -27,8 +28,6 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
-use crate::concurrent_ring::ConcurrentRing;
-use crate::split_ring_buffer::{LockedWriter, UnlockedReader};
 
 pub struct Player {
     pos: Arc<AtomicU64>,
@@ -84,7 +83,6 @@ impl Drop for Player {
 
 #[derive(Clone)]
 struct SoundEngine {
-    pre_effect_ring_buf: ConcurrentRing<AudioData>,
     audio_ring_buffer: LockedWriter<f32>,
     decoder_runtime: DecoderRuntime,
     stream_config: Arc<StreamConfig>,
@@ -355,7 +353,7 @@ impl Player {
         //AI_END===
         //效果运行时
         let mut pre_effect_runtime = PreEffectRuntime::create(
-            pre_effect_ring_buf.clone(),
+            pre_effect_ring_buf,
             audio_ring_buffer.clone(),
             time_metrics.clone(),
         );
@@ -374,11 +372,8 @@ impl Player {
         pre_effect_runtime.set_exit_notify(watch_notify.clone());
         //AI_END===
 
-        let mut decoder_runtime = DecoderRuntime::new(
-            pre_effect_ring_buf.clone(),
-            pre_effect_runtime.clone(),
-            time_metrics.clone(),
-        );
+        let mut decoder_runtime =
+            DecoderRuntime::create(pre_effect_runtime.clone(), time_metrics.clone());
         //AI=== 解码线程创建失败必须中止播放器初始化 / abort player init when the decoder thread cannot start
         // `DecoderError` 不满足 `Sync`，因此把启动失败转成可读错误信息传播。
         // `DecoderError` is not `Sync`, so the startup failure is propagated as a readable message.
@@ -452,7 +447,6 @@ impl Player {
 
         let player = Self {
             sound_engine: SoundEngine {
-                pre_effect_ring_buf,
                 audio_ring_buffer,
                 decoder_runtime,
                 stream_config,
@@ -557,12 +551,6 @@ impl Player {
     }
     pub fn audio_ring_buffer_mut(&mut self) -> &mut LockedWriter<f32> {
         &mut self.sound_engine.audio_ring_buffer
-    }
-    pub fn pre_effect_ring_buffer(&self) -> &ConcurrentRing<AudioData> {
-        &self.sound_engine.pre_effect_ring_buf
-    }
-    pub fn pre_effect_ring_buffer_mut(&mut self) -> &mut ConcurrentRing<AudioData> {
-        &mut self.sound_engine.pre_effect_ring_buf
     }
     pub fn pre_effect_runtime(&self) -> &PreEffectRuntime {
         &self.sound_engine.pre_effect_runtime
@@ -714,7 +702,7 @@ impl Player {
     //AI_END===
     //AI_END===
 
-    pub fn set_decoder_path(&mut self, path: &Path) -> DecoderResult<()> {
+    pub fn set_decoder_path(&self, path: &Path) -> DecoderResult<()> {
         self.sound_engine.decoder_runtime.set_resetting();
         //AI=== 用 `?` 传播 skip 失败（`From<PreEffectError> for DecoderError` 已实现）/ propagate via `?`
         self.sound_engine
@@ -746,7 +734,7 @@ impl Player {
     /// **永久阻塞（线程泄漏）**，且 `reset` 会与旧线程 push 竞争。
     ///
     /// 手动切换 / 需要丢弃旧曲尾音 / 无法保证已 EOF 时，请使用 `set_decoder`。
-    pub fn set_decoder_path_no_clear(&mut self, path: &Path) -> DecoderResult<()> {
+    pub fn set_decoder_path_no_clear(&self, path: &Path) -> DecoderResult<()> {
         self.sound_engine.decoder_runtime.set_decoder_path(path)
     }
 
@@ -773,7 +761,9 @@ impl Player {
                 .load(Ordering::Acquire)
                 != 0
         {
-            self.pre_effect_ring_buffer().reject_waiting_writers();
+            self.pre_effect_runtime()
+                .pre_effect_ring_buffer()
+                .reject_waiting_writers();
             //AI=== skip 发送失败只记录日志并继续清理 / log a failed skip and keep cleaning up
             if let Err(e) = self.sound_engine.pre_effect_runtime.send_skip() {
                 error!("清理 Eof 缓冲区时发送 skip 失败 / failed to send skip: {e}");

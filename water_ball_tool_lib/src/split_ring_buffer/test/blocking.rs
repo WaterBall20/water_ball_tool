@@ -59,7 +59,10 @@ fn write_wait_blocks_until_space() {
     let (r, w) = locked_ring_buffer::<u8>(2);
     w.write_all(&[1, 2]).expect("write_all should succeed");
     let w2 = w.clone();
-    let h = thread::spawn(move || w2.write_wait(&[3, 4, 5]).expect("write_wait should succeed"));
+    let h = thread::spawn(move || {
+        w2.write_wait(&[3, 4, 5])
+            .expect("write_wait should succeed")
+    });
     thread::sleep(WAIT);
     let mut buf = [0u8; 2];
     r.read_exact(&mut buf).expect("read_exact should succeed");
@@ -77,7 +80,8 @@ fn write_all_exceeds_capacity_with_reader() {
 
     let h = thread::spawn(move || {
         let mut received = vec![0u8; total as usize];
-        r.read_exact(&mut received).expect("read_exact should succeed");
+        r.read_exact(&mut received)
+            .expect("read_exact should succeed");
         received
     });
 
@@ -94,11 +98,13 @@ fn read_exact_exceeds_capacity_with_writer() {
     let data_for_writer = data.clone();
 
     let h = thread::spawn(move || {
-        w.write_all(&data_for_writer).expect("write_all should succeed");
+        w.write_all(&data_for_writer)
+            .expect("write_all should succeed");
     });
 
     let mut received = vec![0u8; total as usize];
-    r.read_exact(&mut received).expect("read_exact should succeed");
+    r.read_exact(&mut received)
+        .expect("read_exact should succeed");
     h.join().expect("writer thread should not panic");
     assert_eq!(received, data);
 }
@@ -134,7 +140,8 @@ fn pop_wait_returns_cannot_wait_on_writer_drop() {
 #[test]
 fn write_all_returns_cannot_wait_on_reader_drop() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.write_all(&[5, 6, 7, 8]));
     thread::sleep(WAIT);
@@ -196,7 +203,9 @@ fn writer_drop_wakes_multiple_readers() {
 #[test]
 fn truncate_back_unblocks_waiting_write_all() {
     let (reader, writer) = locked_ring_buffer::<u8>(4);
-    writer.write_all(&[1, 2, 3, 4]).expect("write_all should succeed"); // 满
+    writer
+        .write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed"); // 满
     let w2 = writer.clone();
     let h = thread::spawn(move || w2.write_all(&[5]));
 
@@ -221,7 +230,9 @@ fn truncate_back_unblocks_waiting_write_all() {
 
     // 截断保留前 2 个元素，被阻塞的写端随后追加 5。
     let mut buf = [0u8; 3];
-    reader.read_exact(&mut buf).expect("read_exact should succeed");
+    reader
+        .read_exact(&mut buf)
+        .expect("read_exact should succeed");
     assert_eq!(buf, [1, 2, 5]);
     h.join()
         .expect("writer thread should not panic")

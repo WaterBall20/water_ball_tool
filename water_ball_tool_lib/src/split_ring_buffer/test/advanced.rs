@@ -41,9 +41,7 @@ fn try_push_success() {
 #[test]
 fn try_write_success() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    let mut n = w
-        .try_write(&[1, 2, 3])
-        .expect("try_write should succeed");
+    let mut n = w.try_write(&[1, 2, 3]).expect("try_write should succeed");
     assert_eq!(n, 3);
     n = w.try_write(&[4, 5, 6]).expect("try_write should succeed");
     assert_eq!(n, 1);
@@ -90,7 +88,8 @@ fn try_read_locked_when_read_lock_held() {
 #[test]
 fn try_push_locked_when_write_lock_held() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.write_all(&[5, 6, 7, 8]));
     thread::sleep(WAIT);
@@ -108,7 +107,8 @@ fn try_push_locked_when_write_lock_held() {
 #[test]
 fn try_write_locked_when_write_lock_held() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.write_all(&[5, 6, 7, 8]));
     thread::sleep(WAIT);
@@ -143,11 +143,13 @@ fn clear_empties_buffer() {
 #[test]
 fn clear_after_full_allows_write() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed");
     assert!(r.is_full());
     w.clear();
     assert!(!r.is_full());
-    w.write_all(&[5, 6, 7, 8]).expect("write_all should succeed");
+    w.write_all(&[5, 6, 7, 8])
+        .expect("write_all should succeed");
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).expect("read_exact should succeed");
     assert_eq!(buf, [5, 6, 7, 8]);
@@ -156,7 +158,8 @@ fn clear_after_full_allows_write() {
 #[test]
 fn clear_wakes_write_waiters() {
     let (r, w) = locked_ring_buffer::<u8>(4);
-    w.write_all(&[1, 2, 3, 4]).expect("write_all should succeed");
+    w.write_all(&[1, 2, 3, 4])
+        .expect("write_all should succeed");
     let w2 = w.clone();
     let h = thread::spawn(move || w2.push_wait(99));
     thread::sleep(WAIT);
@@ -179,7 +182,8 @@ fn concurrent_write_all_read_exact() {
     let wh = thread::spawn(move || w.write_all(&expected_w));
     let rh = thread::spawn(move || {
         let mut received = vec![0u64; total as usize];
-        r.read_exact(&mut received).expect("read_exact should succeed");
+        r.read_exact(&mut received)
+            .expect("read_exact should succeed");
         received
     });
 

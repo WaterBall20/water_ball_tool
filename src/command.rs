@@ -81,13 +81,12 @@ fn create_pb(mp: &MultiProgress) -> ProgressBar {
 /// An invalid template (for example a malformed placeholder) never panics: an error is
 /// logged and the default bar style is returned, so the task degrades instead of aborting.
 pub(crate) fn progress_style(template: &str) -> ProgressStyle {
-    match ProgressStyle::default_bar().template(template) {
-        Ok(style) => style,
-        Err(e) => {
+    ProgressStyle::default_bar()
+        .template(template)
+        .unwrap_or_else(|e| {
             error!("进度条模板非法，回退到默认样式 / invalid progress template: {e}");
             ProgressStyle::default_bar()
-        }
-    }
+        })
 }
 //AI_END===
 
