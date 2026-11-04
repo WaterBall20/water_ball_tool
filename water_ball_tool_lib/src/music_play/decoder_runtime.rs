@@ -2,6 +2,7 @@
 use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 use crate::music_play::effect::runtime::PreEffectRuntime;
 use crate::music_play::effect::{AudioData, AudioFormat, PreEffectError};
+use crate::music_play::event::{EventChannelSink, EventDirectSink, EventSink};
 use crate::music_play::tools;
 use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
 //AI=== 看门狗线程退出通知 / watchdog thread-exit notification
@@ -12,9 +13,8 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::SeekErrorKind;
@@ -29,7 +29,6 @@ use symphonia::core::units::Time;
 use tracing::{debug, error};
 //AI_END===
 
-#[derive(Clone)]
 pub struct DecoderRuntime {
     thread_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
@@ -40,13 +39,51 @@ pub struct DecoderRuntime {
     //AI=== engine 与 data 合并为单一 session，二者必然成对存在 / merge engine and data into a single session so they always exist as a pair
     session: Arc<Mutex<Option<DecoderSession>>>,
     //AI_END===
-    event_list: Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+    event_list: Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>,
     effect_runtime: PreEffectRuntime,
     time_metrics: Arc<TimeMetrics>,
     condvar: Arc<Condvar>,
     //AI=== 线程退出通知：线程结束时唤醒看门狗（Drop 语义，见 `watchdog`） / thread exit notification for the watchdog
     exit_notify: Option<Arc<WatchNotify>>,
     //AI_END===
+    strong: Arc<AtomicUsize>,
+}
+impl Clone for DecoderRuntime {
+    fn clone(&self) -> Self {
+        self.strong.fetch_add(1, Ordering::Release);
+        Self {
+            thread_handle: self.thread_handle.clone(),
+            stop: self.stop.clone(),
+            resetting: self.resetting.clone(),
+            poisoned: self.poisoned.clone(),
+            session: self.session.clone(),
+            event_list: self.event_list.clone(),
+            effect_runtime: self.effect_runtime.clone(),
+            time_metrics: self.time_metrics.clone(),
+            condvar: self.condvar.clone(),
+            exit_notify: self.exit_notify.clone(),
+            strong: self.strong.clone(),
+        }
+    }
+}
+impl Drop for DecoderRuntime {
+    fn drop(&mut self) {
+        if self.strong.fetch_sub(1, Ordering::Release) == 1 {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread_handle) = self
+                .thread_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                _ = thread_handle.join();
+            }
+            self.event_list
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
 }
 
 struct DecoderEngine {
@@ -95,7 +132,7 @@ enum EofPushOutcome {
 //AI_END===
 
 impl DecoderRuntime {
-    fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>) {
+    fn emit(event: DecoderEvent, list: &Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>) {
         let event = Arc::new(event);
         //AI=== 锁中毒时恢复内部数据而非 panic / Recover from mutex poisoning instead of panicking
         let mut list = list
@@ -110,7 +147,7 @@ impl DecoderRuntime {
     fn write_all_to_ring_buf(
         ring_buf: &ConcurrentRing<AudioData>,
         stop: &Arc<AtomicBool>,
-        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>,
         write_buf: &[f32],
         write_wait_acc: &mut DurationAccumulator,
     ) -> RingWriteOutcome {
@@ -166,7 +203,7 @@ impl DecoderRuntime {
     fn decoder_next_packet_none(
         ring_buf: &ConcurrentRing<AudioData>,
         mut session_lock: MutexGuard<Option<DecoderSession>>,
-        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>,
         out_buf: &mut Vec<f32>,
         poisoned: &Arc<AtomicBool>,
     ) {
@@ -223,7 +260,7 @@ impl DecoderRuntime {
         out_buf: &mut Vec<f32>,
         write_wait_acc: &mut DurationAccumulator,
         session: &Arc<Mutex<Option<DecoderSession>>>,
-        event_list: &Arc<Mutex<Vec<Box<dyn DecoderEventSink>>>>,
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>,
         poisoned: &Arc<AtomicBool>,
         blocks: &mut u32,
         decode_acc: &mut DurationAccumulator,
@@ -346,6 +383,7 @@ impl DecoderRuntime {
             //AI=== 默认不通知看门狗，由 `Player` 注入 / no watchdog by default, `Player` injects it
             exit_notify: None,
             //AI_END===
+            strong: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -675,14 +713,14 @@ impl DecoderRuntime {
         //AI_END===
     }
 
-    pub fn add_event(&mut self, event: Box<dyn DecoderEventSink>) {
+    pub fn add_event(&mut self, event: Box<dyn EventSink<DecoderEvent>>) {
         self.event_list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(event);
     }
 
-    pub fn add_event_insert(&mut self, index: usize, event: Box<dyn DecoderEventSink>) {
+    pub fn add_event_insert(&mut self, index: usize, event: Box<dyn EventSink<DecoderEvent>>) {
         self.event_list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -763,72 +801,44 @@ impl DecoderRuntime {
     }
 }
 
-pub trait DecoderEventSink: Send + 'static {
-    fn emit(&mut self, event: Arc<DecoderEvent>);
-    fn type_of(&self) -> &'static str;
-}
-
-pub struct DecoderEventChannelSink(Sender<Arc<DecoderEvent>>);
+pub struct DecoderEventChannelSink;
 
 //AI=== 构造函数从 trait 移出为固有方法；线程创建失败必须返回 io::Error / constructors moved out of the trait into inherent methods; a spawn failure must return io::Error
 impl DecoderEventChannelSink {
-    pub fn new<F>(f: F) -> std::io::Result<Self>
+    pub fn create<F>(f: F) -> Result<EventChannelSink<DecoderEvent>, DecoderEventError>
     where
         F: Fn(&DecoderEvent) + Send + 'static,
     {
-        let (sender, receiver) = mpsc::channel::<Arc<DecoderEvent>>();
-        std::thread::Builder::new()
-            .name("decoder_event_channel_sink".to_string())
-            .spawn(move || {
-                for event in receiver {
-                    f(&event);
-                }
-            })?;
-        Ok(Self(sender))
+        EventChannelSink::new("DecoderEventChannelSink", f).map_err(|e| {
+            DecoderEventError::new(
+                "Create DecoderEventChannelSink failed",
+                DecoderEventErrorKind::Create(e),
+            )
+        })
     }
 }
 //AI_END===
 
-impl DecoderEventSink for DecoderEventChannelSink {
-    fn emit(&mut self, event: Arc<DecoderEvent>) {
-        // send 非阻塞；满了就丢弃（或 try_send + 计数）/ non-blocking send; the event is dropped when the channel is full
-        let _ = self.0.send(event);
-    }
-
-    fn type_of(&self) -> &'static str {
-        "DecoderEventChannelSink"
-    }
-}
-
-pub struct DecoderEventDirectSink(Box<dyn Fn(&DecoderEvent) + Send + 'static>);
+pub struct DecoderEventDirectSink;
 
 //AI=== 直接由解码线程调用的 sink 构造函数 / constructor for the sink invoked directly from the decode thread
 impl DecoderEventDirectSink {
-    pub fn new<F>(f: F) -> Self
+    pub fn create<F>(f: F) -> EventDirectSink<DecoderEvent>
     where
         F: Fn(&DecoderEvent) + Send + 'static,
     {
-        Self(Box::new(f))
+        EventDirectSink::new("DecoderEventDirectSink", f)
     }
 }
 //AI_END===
 
-impl DecoderEventSink for DecoderEventDirectSink {
-    fn emit(&mut self, event: Arc<DecoderEvent>) {
-        self.0(&event); // 就在解码线程里跑 / runs on the decode thread
-    }
-
-    fn type_of(&self) -> &'static str {
-        "DecoderEventDirectSink"
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DecoderEvent {
     result: Result<DecoderEventType, DecoderEventError>,
 }
 
 impl DecoderEvent {
+    #[must_use]
     pub fn result(&self) -> &Result<DecoderEventType, DecoderEventError> {
         &self.result
     }
@@ -843,7 +853,7 @@ pub enum DecoderEventType {
     Stop,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DecoderEventError {
     message: String,
     kind: DecoderEventErrorKind,
@@ -858,7 +868,24 @@ impl DecoderEventError {
         }
     }
 }
+impl DecoderEventError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn kind(&self) -> &DecoderEventErrorKind {
+        &self.kind
+    }
+}
 //AI_END===
+
+impl Display for DecoderEventError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl Error for DecoderEventError {}
 
 #[derive(Debug)]
 pub enum DecoderEventErrorKind {
@@ -887,34 +914,7 @@ pub enum DecoderEventErrorKind {
     /// 其他未定义错误 / other undefined error
     Other(String),
     //AI_END===
-}
-impl Clone for DecoderEventErrorKind {
-    fn clone(&self) -> Self {
-        match &self {
-            Self::RingBufferError(e) => Self::RingBufferError(e.clone()),
-            Self::IoError(e) => Self::IoError(std::io::Error::new(e.kind(), e.to_string())),
-            Self::DecodeError(e) => Self::DecodeError(e),
-            //AI=== `SeekErrorKind` 是非穷尽外部枚举：已知变体逐个重建，未知变体退化为 Other 而不是 panic / `SeekErrorKind` is a non-exhaustive external enum: rebuild known variants, degrade unknown ones to Other instead of panicking
-            Self::SeekError(e) => Self::SeekError(match e {
-                SeekErrorKind::Unseekable => SeekErrorKind::Unseekable,
-                SeekErrorKind::ForwardOnly => SeekErrorKind::ForwardOnly,
-                SeekErrorKind::OutOfRange => SeekErrorKind::OutOfRange,
-                SeekErrorKind::InvalidTrack => SeekErrorKind::InvalidTrack,
-                other => {
-                    return Self::Other(format!("unknown symphonia SeekErrorKind: {other:?}"));
-                }
-            }),
-            //AI_END===
-            Self::Unsupported(e) => Self::Unsupported(e),
-            Self::LimitError(e) => Self::LimitError(e),
-            Self::ResetRequired => Self::ResetRequired,
-            Self::NextPacketError(e) => Self::NextPacketError(e.clone()),
-            Self::DecoderStop => Self::DecoderStop,
-            //AI=== 未知错误兜底 / fallback for undefined errors
-            Self::Other(e) => Self::Other(e.clone()),
-            //AI_END===
-        }
-    }
+    Create(Box<dyn Error + Send + Sync + 'static>),
 }
 
 impl From<symphonia::core::errors::Error> for DecoderEventErrorKind {
@@ -996,14 +996,17 @@ impl DecoderError {
         }
     }
 
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    #[must_use]
     pub fn kind(&self) -> &DecoderErrorKind {
         &self.kind
     }
 
+    #[must_use]
     pub fn get_kind(self) -> DecoderErrorKind {
         self.kind
     }

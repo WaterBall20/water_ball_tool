@@ -3,6 +3,7 @@ use crate::music_play::effect::{
     AudioData, AudioFormat, PreEffect, PreEffectChain, PreEffectDiscontinuity, PreEffectError,
     PreEffectInfo,
 };
+use crate::music_play::event::{EventChannelSink, EventDirectSink, EventSink};
 use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
 //AI=== 看门狗线程退出通知 / watchdog thread-exit notification
 use crate::music_play::watchdog::{SLOT_PRE_EFFECT, ThreadExitGuard, WatchNotify};
@@ -10,27 +11,62 @@ use crate::split_ring_buffer::LockedWriter;
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
 //AI_END===
 
-#[derive(Clone)]
 pub struct PreEffectRuntime {
     effects: Arc<Mutex<PreEffectChain>>,
     input_buf: ConcurrentRing<AudioData>,
     audio_buf: LockedWriter<f32>,
     stop: Arc<AtomicBool>,
     effect_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    event_list: Arc<Mutex<Vec<Box<dyn PreEffectRuntimeEventSink>>>>,
+    event_list: Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
     time_metrics: Arc<TimeMetrics>,
     //AI=== 效果链重建工厂：线程崩溃后需要整条重建（旧链可能已毒化）/ effect-chain factory: a crash requires a full rebuild (the old chain may be poisoned)
     chain_factory: Arc<Mutex<Option<ChainFactory>>>,
     //AI=== 线程退出通知：线程结束时唤醒看门狗 / thread exit notification for the watchdog
     exit_notify: Option<Arc<WatchNotify>>,
     //AI_END===
+    strong: Arc<AtomicUsize>,
+}
+impl Clone for PreEffectRuntime {
+    fn clone(&self) -> Self {
+        self.strong.fetch_add(1, Ordering::Release);
+        Self {
+            effects: self.effects.clone(),
+            input_buf: self.input_buf.clone(),
+            audio_buf: self.audio_buf.clone(),
+            stop: self.stop.clone(),
+            effect_thread: self.effect_thread.clone(),
+            event_list: self.event_list.clone(),
+            time_metrics: self.time_metrics.clone(),
+            chain_factory: self.chain_factory.clone(),
+            exit_notify: self.exit_notify.clone(),
+            strong: self.strong.clone(),
+        }
+    }
+}
+impl Drop for PreEffectRuntime {
+    fn drop(&mut self) {
+        if self.strong.fetch_sub(1, Ordering::Release) == 1 {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self
+                .effect_thread
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                _ = thread.join();
+            }
+            self.event_list
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
 }
 
 //AI=== 效果链重建工厂类型 / effect-chain factory type
@@ -40,7 +76,7 @@ type ChainFactory = Box<dyn Fn() -> Result<PreEffectChain, PreEffectError> + Sen
 impl PreEffectRuntime {
     fn emit(
         event: PreEffectRuntimeEvent,
-        list: &Arc<Mutex<Vec<Box<dyn PreEffectRuntimeEventSink>>>>,
+        list: &Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
     ) {
         let event = Arc::new(event);
         //AI=== 锁中毒时恢复内部数据而非 panic / Recover from mutex poisoning instead of panicking
@@ -62,11 +98,21 @@ impl PreEffectRuntime {
     fn audio_buf_write_all(
         buf: &LockedWriter<f32>,
         data: &[f32],
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
     ) -> Result<bool, crate::split_ring_buffer::error::Error<f32>> {
         if let Err(e) = buf.write_all(data) {
             if let crate::split_ring_buffer::error::Kind::WriteRejected = e.kind {
                 return Ok(true);
             }
+            Self::emit(
+                PreEffectRuntimeEvent {
+                    result: Err(PreEffectRuntimeEventError::new(
+                        "Pre effect runtime write error",
+                        PreEffectRuntimeEventErrorKind::Runtime(e.to_string()),
+                    )),
+                },
+                &event_list,
+            );
             //AI=== 硬错误只上报，是否退出线程由调用方决定（现在不退出）/ a hard error is only reported; the caller decides (it no longer exits)
             error!("Failed to write all audio data: {}", e);
             //AI_END===
@@ -94,6 +140,7 @@ impl PreEffectRuntime {
             chain_factory: Arc::new(Mutex::new(None)),
             exit_notify: None,
             //AI_END===
+            strong: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -150,7 +197,9 @@ impl PreEffectRuntime {
         self.stop.load(Ordering::Acquire)
     }
     //AI_END===
-
+    //AI=== 环错误后的退避：避免写端缺失时空转 / back off after a ring error so a missing writer cannot spin the loop
+    const ERROR_BACKOFF: Duration = Duration::from_millis(10);
+    //AI_END===
     //AI=== run 返回 Result：effect 线程创建失败必须回传调用方；已退出的线程先回收再重建（看门狗重启）
     /// `run` returns a Result: a failed effect-thread spawn must propagate to the caller; a finished
     /// thread is reclaimed and respawned (watchdog restart).
@@ -210,9 +259,7 @@ impl PreEffectRuntime {
                         let mut process_acc = DurationAccumulator::new();
                         let mut write_wait_acc = DurationAccumulator::new();
                         let mut blocks = 0;
-                        //AI=== 环错误后的退避：避免写端缺失时空转 / back off after a ring error so a missing writer cannot spin the loop
-                        const ERROR_BACKOFF: Duration = Duration::from_millis(10);
-                        //AI_END===
+
                         debug!("Pre effect thread started");
                         loop {
                             if stop.load(Ordering::Acquire) {
@@ -247,7 +294,7 @@ impl PreEffectRuntime {
                                         &event_list,
                                     );
                                     drop(effects);
-                                    std::thread::sleep(ERROR_BACKOFF);
+                                    std::thread::sleep(Self::ERROR_BACKOFF);
                                     continue;
                                 }
                                 //AI_END===
@@ -271,21 +318,12 @@ impl PreEffectRuntime {
                                     // longer end the thread: a hard error is reported as an event and the block is dropped;
                                     // WriteRejected means the ring rejects writes (shutdown/track change), so skip the block
                                     // and keep consuming control data such as Eof/NoNext.
-                                    match Self::audio_buf_write_all(&audio_buf, &out_temp_buf[..len]) {
+                                    match Self::audio_buf_write_all(&audio_buf,
+                                                                    &out_temp_buf[..len],
+                                                                    &event_list) {
                                         Ok(true) => continue,
                                         Ok(false) => {}
-                                        Err(e) => {
-                                            Self::emit(
-                                                PreEffectRuntimeEvent {
-                                                    result: Err(PreEffectRuntimeEventError::new(
-                                                        "Pre effect runtime write error",
-                                                        PreEffectRuntimeEventErrorKind::Runtime(
-                                                            e.to_string(),
-                                                        ),
-                                                    )),
-                                                },
-                                                &event_list,
-                                            );
+                                        Err(_) => {
                                             continue;
                                         }
                                     }
@@ -323,22 +361,13 @@ impl PreEffectRuntime {
                                         discontinuity,
                                     );
                                     //AI_END===
-                                    match Self::audio_buf_write_all(&audio_buf, &out_temp_buf[..len]) {
+                                    match Self::audio_buf_write_all(&audio_buf,
+                                                                    &out_temp_buf[..len],
+                                                                    &event_list) {
                                         Ok(true) => continue,
                                         Ok(false) => {}
                                         //AI=== 硬错误不再退出线程：上报事件后跳过本块 / a hard error no longer ends the thread: report and skip
-                                        Err(e) => {
-                                            Self::emit(
-                                                PreEffectRuntimeEvent {
-                                                    result: Err(PreEffectRuntimeEventError::new(
-                                                        "Pre effect runtime write error",
-                                                        PreEffectRuntimeEventErrorKind::Runtime(
-                                                            e.to_string(),
-                                                        ),
-                                                    )),
-                                                },
-                                                &event_list,
-                                            );
+                                        Err(_) => {
                                             continue;
                                         }
                                         //AI_END===
@@ -431,7 +460,7 @@ impl PreEffectRuntime {
             .push(effect)
     }
 
-    pub fn add_event(&mut self, event: Box<dyn PreEffectRuntimeEventSink>) {
+    pub fn add_event(&mut self, event: Box<dyn EventSink<PreEffectRuntimeEvent>>) {
         self.event_list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -449,6 +478,7 @@ pub struct PreEffectRuntimeEvent {
 }
 
 impl PreEffectRuntimeEvent {
+    #[must_use]
     pub fn result(&self) -> &Result<PreEffectRuntimeEventType, PreEffectRuntimeEventError> {
         &self.result
     }
@@ -465,6 +495,7 @@ pub struct PreEffectRuntimeEventError {
 }
 
 impl PreEffectRuntimeEventError {
+    #[must_use]
     pub fn new(message: &str, kind: PreEffectRuntimeEventErrorKind) -> Self {
         Self {
             message: message.to_string(),
@@ -472,11 +503,13 @@ impl PreEffectRuntimeEventError {
         }
     }
 
+    #[must_use]
     pub fn kind(&self) -> &PreEffectRuntimeEventErrorKind {
         &self.kind
     }
 
-    pub fn message(&self) -> &String {
+    #[must_use]
+    pub fn message(&self) -> &str {
         &self.message
     }
 }
@@ -488,6 +521,8 @@ impl Debug for PreEffectRuntimeEventError {
             //AI=== 运行期环错误 / runtime ring error
             PreEffectRuntimeEventErrorKind::Runtime(e) => &format!("Runtime({e})"),
             //AI_END===
+            PreEffectRuntimeEventErrorKind::Other(e) => &format!("Other({e})"),
+            PreEffectRuntimeEventErrorKind::Create(e) => &format!("Create({e})"),
         };
         write!(
             f,
@@ -505,12 +540,23 @@ impl Display for PreEffectRuntimeEventError {
 
 impl Error for PreEffectRuntimeEventError {}
 
+impl From<Box<dyn Error + Send + Sync + 'static>> for PreEffectRuntimeEventError {
+    fn from(err: Box<dyn Error + Send + Sync + 'static>) -> Self {
+        Self {
+            message: format!("{err}"),
+            kind: PreEffectRuntimeEventErrorKind::Other(err),
+        }
+    }
+}
+
 pub enum PreEffectRuntimeEventErrorKind {
     ResetErrors(Vec<(PreEffectInfo, PreEffectError)>),
     //AI=== 运行期环错误：线程继续存活，事件仅用于上报 / runtime ring error: the thread keeps running, the event is informational
     /// 环形缓冲区/输出写入的运行期错误描述。
     Runtime(String),
     //AI_END===
+    Other(Box<dyn Error + Send + Sync + 'static>),
+    Create(Box<dyn Error + Send + Sync + 'static>),
 }
 
 impl From<Vec<(PreEffectInfo, PreEffectError)>> for PreEffectRuntimeEventErrorKind {
@@ -519,62 +565,35 @@ impl From<Vec<(PreEffectInfo, PreEffectError)>> for PreEffectRuntimeEventErrorKi
     }
 }
 
-pub trait PreEffectRuntimeEventSink: Send + 'static {
-    fn emit(&mut self, event: Arc<PreEffectRuntimeEvent>);
-    fn type_of(&self) -> &'static str;
-}
-
-pub struct PreEffectRuntimeEventChannelSink(Sender<Arc<PreEffectRuntimeEvent>>);
+pub struct PreEffectRuntimeEventChannelSink;
 
 //AI=== 构造器改为 inherent 方法：事件线程创建失败必须返回 io::Result 而非仅记录日志 / Constructor moved to an inherent method: a failed event-thread spawn must be returned as io::Result instead of merely logged
 impl PreEffectRuntimeEventChannelSink {
-    pub fn new<F>(f: F) -> std::io::Result<Self>
+    pub fn create<F>(
+        f: F,
+    ) -> Result<EventChannelSink<PreEffectRuntimeEvent>, PreEffectRuntimeEventError>
     where
         F: Fn(&PreEffectRuntimeEvent) + Send + 'static,
     {
-        let (sender, receiver) = mpsc::channel::<Arc<PreEffectRuntimeEvent>>();
-        std::thread::Builder::new()
-            .name("pre_effect_running_event_channel_sink".to_string())
-            .spawn(move || {
-                for event in receiver {
-                    f(&event);
-                }
-            })?;
-        Ok(Self(sender))
+        EventChannelSink::new("PreEffectRuntimeEventChannelSink", f).map_err(|e| {
+            PreEffectRuntimeEventError::new(
+                "Create PreEffectRuntimeEventChannelSink failed",
+                PreEffectRuntimeEventErrorKind::Create(e),
+            )
+        })
     }
 }
 //AI_END===
 
-impl PreEffectRuntimeEventSink for PreEffectRuntimeEventChannelSink {
-    fn emit(&mut self, event: Arc<PreEffectRuntimeEvent>) {
-        // send 非阻塞；满了就丢弃（或 try_send + 计数）
-        let _ = self.0.send(event);
-    }
-
-    fn type_of(&self) -> &'static str {
-        "PreEffectRuntimeEventChannelSink"
-    }
-}
-
-pub struct PreEffectRuntimeEventDirectSink(Box<dyn Fn(&PreEffectRuntimeEvent) + Send + 'static>);
+pub struct PreEffectRuntimeEventDirectSink;
 
 //AI=== 构造器改为 inherent 方法（无失败路径，不需要 Result）/ Constructor moved to an inherent method (infallible, so no Result is needed)
 impl PreEffectRuntimeEventDirectSink {
-    pub fn new<F>(f: F) -> Self
+    pub fn create<F>(f: F) -> EventDirectSink<PreEffectRuntimeEvent>
     where
         F: Fn(&PreEffectRuntimeEvent) + Send + 'static,
     {
-        Self(Box::new(f))
+        EventDirectSink::new("PreEffectRuntimeEventDirectSink", f)
     }
 }
 //AI_END===
-
-impl PreEffectRuntimeEventSink for PreEffectRuntimeEventDirectSink {
-    fn emit(&mut self, event: Arc<PreEffectRuntimeEvent>) {
-        self.0(&event); // 就在解码线程里跑
-    }
-
-    fn type_of(&self) -> &'static str {
-        "PreEffectRuntimeEventDirectSink"
-    }
-}

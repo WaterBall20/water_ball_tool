@@ -4,7 +4,7 @@
 //! These tests only use in-memory objects (channels and sinks); no files or temp dirs.
 
 use super::*;
-use crate::music_play::player::{PlayerEvent, PlayerEventSink, PlayerEventType};
+use crate::music_play::player::{PlayerEvent, PlayerEventType};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -16,7 +16,7 @@ struct RecordingSink {
     events: mpsc::Sender<(Arc<PlayerEvent>, thread::ThreadId)>,
 }
 
-impl PlayerEventSink for RecordingSink {
+impl EventSink<PlayerEvent> for RecordingSink {
     fn emit(&mut self, event: Arc<PlayerEvent>) {
         let _ = self.events.send((event, thread::current().id()));
     }
@@ -29,7 +29,7 @@ impl PlayerEventSink for RecordingSink {
 #[test]
 fn dispatcher_delivers_event_on_dispatch_thread() {
     let (tx, rx) = mpsc::channel::<(Arc<PlayerEvent>, thread::ThreadId)>();
-    let list: Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>> =
+    let list: Arc<Mutex<Vec<Box<dyn EventSink<PlayerEvent>>>>> =
         Arc::new(Mutex::new(vec![Box::new(RecordingSink { events: tx })]));
     //AI=== 分发线程创建失败在测试中直接判失败 / a spawn failure fails the test explicitly
     let dispatcher = match EventDispatcher::new(list) {

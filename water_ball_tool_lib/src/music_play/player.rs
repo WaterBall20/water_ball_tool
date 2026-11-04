@@ -9,6 +9,7 @@ use crate::music_play::effect::runtime::{
 use crate::music_play::effect::{
     AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain, PreEffectChain, PreEffectError,
 };
+use crate::music_play::event::{EventChannelSink, EventSink};
 //AI_END===
 //AI=== 引入事件分发线程：实时回调只投递事件/日志，加锁与 sink 调用移到分发线程
 use crate::music_play::event_dispatch::{EventDispatcher, LogLevel};
@@ -21,9 +22,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
 use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -104,7 +106,7 @@ struct Control {
 struct EventContent {
     pre_effect_item_eof: Arc<AtomicBool>,
     pre_effect_item_eof_pos: Arc<AtomicUsize>,
-    list: Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>,
+    list: Arc<Mutex<Vec<Box<dyn EventSink<PlayerEvent>>>>>,
     //AI=== 音频回调事件走独立分发线程，回调内不再加锁 / callback events go through the dispatch thread
     /// 事件分发器：音频回调只投递，sink 调用在分发线程执行。
     ///
@@ -256,15 +258,17 @@ impl Player {
         audio_ring_buffer: LockedWriter<f32>,
         pre_effect_item_eof: Arc<AtomicBool>,
     ) {
-        pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::new(move |e| {
-            debug!("前效果器事件触发：{e:?}");
-            if let Ok(e) = e.result()
-                && let PreEffectRuntimeEventType::Eof = e
-            {
-                pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Release);
-                pre_effect_item_eof.store(true, Ordering::Release);
-            }
-        })));
+        pre_effect_runtime.add_event(Box::new(PreEffectRuntimeEventDirectSink::create(
+            move |e| {
+                debug!("前效果器事件触发：{e:?}");
+                if let Ok(e) = e.result()
+                    && let PreEffectRuntimeEventType::Eof = e
+                {
+                    pre_effect_item_eof_pos.store(audio_ring_buffer.len(), Ordering::Release);
+                    pre_effect_item_eof.store(true, Ordering::Release);
+                }
+            },
+        )));
     }
 
     fn create_rx_cmd_thread(
@@ -620,6 +624,11 @@ impl Player {
         //AI=== 最后 join 看门狗线程 / join the watchdog thread last
         Self::join_watchdog(&self.watchdog_thread);
         //AI_END===
+        self.event_content
+            .list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
@@ -775,7 +784,7 @@ impl Player {
         }
     }
 
-    pub fn add_event(&mut self, event: Box<dyn PlayerEventSink>) {
+    pub fn add_event(&mut self, event: Box<dyn EventSink<PlayerEvent>>) {
         self.event_content
             .list
             .lock()
@@ -795,52 +804,28 @@ impl Player {
     }
 }
 
-//AI=== 事件 sink 构造移出 trait：线程创建失败必须返回错误，而不是记录日志后返回失效 sink
-/// 播放器事件 sink。`new` 不再是 trait 方法：需要启动线程的 sink 通过 inherent `new` 返回错误。
-///
-/// Player event sink. `new` is no longer a trait method: sinks that spawn a thread expose an
-/// inherent `new` returning `io::Result` so spawn failures can be propagated.
-pub trait PlayerEventSink: Send + 'static {
-    fn emit(&mut self, event: Arc<PlayerEvent>);
-    fn type_of(&self) -> &'static str;
-}
-//AI_END===
-
-pub struct PlayerEventChannelSink(mpsc::Sender<Arc<PlayerEvent>>);
+pub struct PlayerEventChannelSink;
 
 impl PlayerEventChannelSink {
     //AI=== 线程创建失败返回错误 / return an error when the thread cannot be created
     /// 创建基于通道的 sink：内部事件转发线程创建失败时返回错误。
     ///
     /// Create a channel-backed sink; returns an error if the forwarding thread cannot be spawned.
-    pub fn new<F>(f: F) -> std::io::Result<Self>
+    pub fn create<F>(f: F) -> Result<EventChannelSink<PlayerEvent>, PlayerEventError>
     where
         F: Fn(&PlayerEvent) + Send + 'static,
     {
-        let (sender, receiver) = mpsc::channel::<Arc<PlayerEvent>>();
-        thread::Builder::new()
-            .name("player_event_channel_sink".to_string())
-            .spawn(move || {
-                for event in receiver {
-                    f(&event);
-                }
-            })?;
-        Ok(Self(sender))
+        EventChannelSink::new("PlayerEventChannelSink", f).map_err(|e| {
+            PlayerEventError::new(
+                "Create PlayerEventChannelSink failed",
+                PlayerEventErrorKind::Create(e),
+            )
+        })
     }
     //AI_END===
 }
 
-impl PlayerEventSink for PlayerEventChannelSink {
-    fn emit(&mut self, event: Arc<PlayerEvent>) {
-        let _ = self.0.send(event);
-    }
-
-    fn type_of(&self) -> &'static str {
-        "PlayerEventChannelSink"
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PlayerEvent {
     result: Result<PlayerEventType, PlayerEventError>,
 }
@@ -872,11 +857,38 @@ pub enum PlayerEventType {
     TrackEnded,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PlayerEventError {
     message: String,
     kind: PlayerEventErrorKind,
 }
+impl PlayerEventError {
+    fn new(message: &str, kind: PlayerEventErrorKind) -> Self {
+        Self {
+            message: message.to_string(),
+            kind,
+        }
+    }
+}
 
-#[derive(Debug, Clone)]
-pub enum PlayerEventErrorKind {}
+impl PlayerEventError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    pub fn kind(&self) -> &PlayerEventErrorKind {
+        &self.kind
+    }
+}
+
+impl Display for PlayerEventError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl Error for PlayerEventError {}
+
+#[derive(Debug)]
+pub enum PlayerEventErrorKind {
+    Create(Box<dyn Error + Send + Sync + 'static>),
+}

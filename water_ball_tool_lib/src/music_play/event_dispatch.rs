@@ -11,7 +11,8 @@
 //! log lines to a bounded channel with non-blocking `try_send`, while the actual work (locking,
 //! invoking `PlayerEventSink`, writing logs) happens on this thread.
 
-use super::player::{PlayerEvent, PlayerEventSink};
+use super::player::PlayerEvent;
+use crate::music_play::event::EventSink;
 use crossbeam_channel::{Sender, bounded};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -62,7 +63,7 @@ impl EventDispatcher {
     /// Spawn the dispatch thread. A spawn failure is returned so player initialization can abort; it is
     /// no longer logged-and-ignored.
     pub(super) fn new(
-        event_list: Arc<Mutex<Vec<Box<dyn PlayerEventSink>>>>,
+        event_list: Arc<Mutex<Vec<Box<dyn EventSink<PlayerEvent>>>>>,
     ) -> std::io::Result<Self> {
         let (tx, rx) = bounded::<DispatchMsg>(DISPATCH_CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));

@@ -10,6 +10,7 @@
 //AI=== 引擎模块树 / engine module tree
 pub mod decoder_runtime;
 pub mod effect;
+pub mod event;
 mod event_dispatch;
 pub mod play_list;
 pub mod player;

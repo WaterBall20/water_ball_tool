@@ -87,7 +87,7 @@ impl Runtime {
             let this_player = player.clone();
             player
                 .decoder_runtime_mut()
-                .add_event(Box::new(DecoderEventChannelSink::new({
+                .add_event(Box::new(DecoderEventChannelSink::create({
                     let condvar = condvar.clone();
                     move |e| {
                         if e.result().is_err() {
@@ -102,13 +102,13 @@ impl Runtime {
         }
         //AI_END===
         //AI=== 前效果器运行期错误只记录：线程不会退出，播放可继续 / pre-effect runtime errors are only logged: the thread keeps running, playback continues
-        player
-            .pre_effect_runtime_mut()
-            .add_event(Box::new(PreEffectRuntimeEventChannelSink::new(|e| {
+        player.pre_effect_runtime_mut().add_event(Box::new(
+            PreEffectRuntimeEventChannelSink::create(|e| {
                 if e.result().is_err() {
                     error!("前效果器运行期错误：{e:?}");
                 }
-            })?));
+            })?,
+        ));
         //AI_END===
         let ui_content = Arc::new(Mutex::new(UIContent {
             ui_track: None,
@@ -122,7 +122,7 @@ impl Runtime {
             let decoder_track = decoder_track.clone();
             let ui_content = ui_content.clone();
             //AI=== sink 线程创建失败返回错误（`Runtime::create` 传播）/ propagate sink spawn errors
-            player.add_event(Box::new(PlayerEventChannelSink::new(move |e| {
+            player.add_event(Box::new(PlayerEventChannelSink::create(move |e| {
                 debug!("播放事件触发: {e:?}");
                 if let Ok(e) = e.result() {
                     match e {
@@ -485,7 +485,7 @@ impl PlayObject {
             let next_content = next_content.clone();
             player
                 .decoder_runtime_mut()
-                .add_event(Box::new(DecoderEventDirectSink::new(move |e| {
+                .add_event(Box::new(DecoderEventDirectSink::create(move |e| {
                     debug!("解码器事件触发：{e:?}");
                     match e.result() {
                         Ok(decoder_event) => match decoder_event {
