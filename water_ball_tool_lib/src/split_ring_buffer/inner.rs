@@ -175,7 +175,7 @@ impl<T> Inner<T> {
     pub(crate) fn reader_should_wait(&self) -> bool {
         self.clear_pending.load(Ordering::Acquire)
             || self.truncate_pending.load(Ordering::Acquire)
-            || self.len() == 0
+            || self.is_empty()
     }
 
     pub(crate) fn writer_should_wait(&self) -> bool {
@@ -243,14 +243,11 @@ impl<T> Inner<T> {
     }
 
     pub(crate) fn push_one(&self, value: T) -> Result<(), Kind<T>> {
-        let _guard = match self.enter() {
-            Some(g) => g,
-            None => {
-                if self.clear_pending.load(Ordering::Acquire) {
-                    return Err(Kind::Clearing(value));
-                }
-                return Err(Kind::Truncating(value));
+        let Some(_guard) = self.enter() else {
+            if self.clear_pending.load(Ordering::Acquire) {
+                return Err(Kind::Clearing(value));
             }
+            return Err(Kind::Truncating(value));
         };
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
@@ -300,7 +297,7 @@ impl<T> Inner<T> {
             (r, w)
         };
         // 由 BDroppingGuard 记录 old_r / old_w，用于 panic 兜底
-        self.set_b_range(&mut cp_guard, old_r, old_w);
+        Self::set_b_range(&mut cp_guard, old_r, old_w);
 
         self.open_rw_window_and_notify(&mut cp_guard);
         self.drop_b_range(old_r, old_w);
@@ -353,7 +350,7 @@ impl<T> Inner<T> {
             let w = self.write.pos.swap(0, Ordering::AcqRel);
             (r, w)
         };
-        self.set_b_range(&mut cp_guard, old_r, old_w);
+        Self::set_b_range(&mut cp_guard, old_r, old_w);
 
         // 关键：递增 epoch 与 notify_all(write) 必须在同一 wait_mutex 临界区内，
         // 且发生在 clear_pending 复位之前。
@@ -411,7 +408,7 @@ impl<T> Inner<T> {
         }
     }
 
-    fn set_b_range(&self, cp_guard: &mut ClearPendingGuard<'_, T>, old_r: usize, old_w: usize) {
+    fn set_b_range(cp_guard: &mut ClearPendingGuard<'_, T>, old_r: usize, old_w: usize) {
         cp_guard.old_r = old_r;
         cp_guard.old_w = old_w;
         cp_guard.has_range = true;
@@ -437,7 +434,7 @@ impl<T> Inner<T> {
             let mut idx = old_r;
             while idx != old_w {
                 let slot = idx % self.cap;
-                let slot_ptr = b[slot].get() as *mut T;
+                let slot_ptr = b[slot].get().cast::<T>();
                 let value = std::ptr::read(slot_ptr);
                 std::ptr::write(b[slot].get(), MaybeUninit::uninit());
                 drop(value);
@@ -499,7 +496,7 @@ impl<T> Inner<T> {
                 let mut idx = new_w;
                 while idx != w {
                     let slot = idx % self.cap;
-                    let ptr = a[slot].get() as *mut T;
+                    let ptr = a[slot].get().cast::<T>();
                     let val = std::ptr::read(ptr);
                     std::ptr::write(a[slot].get(), MaybeUninit::uninit());
                     drop(val);
@@ -540,7 +537,7 @@ impl<T> Inner<T> {
             unsafe {
                 // SAFETY: 槽位位于 `[r, r + n)` 内，已初始化；
                 // `ptr::read` move 出 `T`，立即置 `uninit` 防止二次 drop。
-                let ptr = a[start + i].get() as *mut T;
+                let ptr = a[start + i].get().cast::<T>();
                 let val = std::ptr::read(ptr);
                 std::ptr::write(a[start + i].get(), MaybeUninit::uninit());
                 out.push(val);
@@ -549,7 +546,7 @@ impl<T> Inner<T> {
         for i in 0..(n - first) {
             unsafe {
                 // SAFETY: 回绕段仍位于 `[r, r + n)` 内，已初始化。
-                let ptr = a[i].get() as *mut T;
+                let ptr = a[i].get().cast::<T>();
                 let val = std::ptr::read(ptr);
                 std::ptr::write(a[i].get(), MaybeUninit::uninit());
                 out.push(val);
@@ -577,7 +574,7 @@ impl<T> Inner<T> {
         for i in 0..first {
             unsafe {
                 // SAFETY: 槽位位于 `[r, r + n)` 内，已初始化。
-                let ptr = a[start + i].get() as *mut T;
+                let ptr = a[start + i].get().cast::<T>();
                 let val = std::ptr::read(ptr);
                 std::ptr::write(a[start + i].get(), MaybeUninit::uninit());
                 drop(val);
@@ -586,7 +583,7 @@ impl<T> Inner<T> {
         for i in 0..(n - first) {
             unsafe {
                 // SAFETY: 回绕段仍位于 `[r, r + n)` 内，已初始化。
-                let ptr = a[i].get() as *mut T;
+                let ptr = a[i].get().cast::<T>();
                 let val = std::ptr::read(ptr);
                 std::ptr::write(a[i].get(), MaybeUninit::uninit());
                 drop(val);
@@ -643,10 +640,7 @@ impl<T: Copy> Inner<T> {
         if dst.is_empty() {
             return 0;
         }
-        let _guard = match self.enter() {
-            Some(g) => g,
-            None => return 0,
-        };
+        let Some(_guard) = self.enter() else { return 0 };
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let avail = w.wrapping_sub(r);
@@ -683,10 +677,7 @@ impl<T: Copy> Inner<T> {
         if src.is_empty() {
             return 0;
         }
-        let _guard = match self.enter() {
-            Some(g) => g,
-            None => return 0,
-        };
+        let Some(_guard) = self.enter() else { return 0 };
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let used = w.wrapping_sub(r);
@@ -846,7 +837,7 @@ impl<T> Drop for Inner<T> {
                 // SAFETY: 独占 `&mut self`，无并发；`idx` 位于 `[r, w)`，槽位
                 // 已初始化。`drop_in_place` 把 `*mut MaybeUninit<T>` cast 成
                 // `*mut T`（布局相同），就地 drop 元素，不读取值。
-                std::ptr::drop_in_place(a[slot].get() as *mut T);
+                std::ptr::drop_in_place(a[slot].get().cast::<T>());
             }
             idx = idx.wrapping_add(1);
         }

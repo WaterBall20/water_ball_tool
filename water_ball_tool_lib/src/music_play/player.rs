@@ -240,7 +240,7 @@ impl Player {
             },
             //AI=== 流错误日志改由分发线程输出 / stream errors are logged on the dispatch thread
             move |err| {
-                error_dispatcher.try_log(LogLevel::Error, format!("流错误 / stream error: {err}"))
+                error_dispatcher.try_log(LogLevel::Error, format!("流错误 / stream error: {err}"));
             },
             //AI_END===
             None,
@@ -519,7 +519,7 @@ impl Player {
         self.set_volume(percent / 100.0);
     }
 
-    pub fn play(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn play(&self) -> Result<(), Box<dyn Error>> {
         self.control
             .tx_cmd
             .try_send(PlayCmd::Play)
@@ -529,7 +529,7 @@ impl Player {
         Ok(())
     }
 
-    pub fn pause(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn pause(&self) -> Result<(), Box<dyn Error>> {
         if self.control.is_playing.load(Ordering::Acquire) {
             self.control
                 .tx_cmd
@@ -738,7 +738,7 @@ impl Player {
         self.sound_engine.decoder_runtime.set_decoder_path(path)
     }
 
-    pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn Error>> {
         Err("Seek is not implemented".into())
     }
 
@@ -848,6 +848,7 @@ pub struct PlayerEvent {
 impl PlayerEvent {
     //AI=== 新增 TrackEnded 构造器：供音频回调与测试使用 / constructor shared by the callback and tests
     /// 构造「一首曲目播放结束」事件 / Build a "track ended" event.
+    #[must_use]
     pub fn track_ended() -> Self {
         Self {
             result: Ok(PlayerEventType::TrackEnded),
@@ -855,9 +856,12 @@ impl PlayerEvent {
     }
     //AI_END===
 
+    #[must_use]
     pub fn result(&self) -> &Result<PlayerEventType, PlayerEventError> {
         &self.result
     }
+
+    #[must_use]
     pub fn get_result(self) -> Result<PlayerEventType, PlayerEventError> {
         self.result
     }

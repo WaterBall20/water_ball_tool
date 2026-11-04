@@ -32,7 +32,6 @@ use tracing::{debug, error};
 #[derive(Clone)]
 pub struct DecoderRuntime {
     thread_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
-    ring_buf: ConcurrentRing<AudioData>,
     stop: Arc<AtomicBool>,
     resetting: Arc<AtomicBool>,
     //AI=== 毒化标志：发生不可恢复错误后置位，换曲后由前端清除 / poisoned flag: set after an unrecoverable error, cleared by the front-end after a track change
@@ -330,10 +329,8 @@ impl DecoderRuntime {
 
 impl DecoderRuntime {
     pub fn create(effect_runtime: PreEffectRuntime, time_metrics: Arc<TimeMetrics>) -> Self {
-        let ring_buf = effect_runtime.pre_effect_ring_buffer().clone();
         Self {
             thread_handle: Arc::new(Mutex::new(None)),
-            ring_buf,
             stop: Arc::new(AtomicBool::new(false)),
             //AI=== engine/data 两个 Option 合并为单一 session / merge the two engine/data Options into a single session
             session: Arc::new(Mutex::new(None)),
@@ -378,15 +375,22 @@ impl DecoderRuntime {
     //AI=== run 返回 Result：线程创建失败向上传播；已退出的线程先回收再重建（看门狗重启）/ `run` returns Result: spawn failures propagate upward; a finished thread is reclaimed and respawned (watchdog restart)
     pub fn run(&mut self) -> DecoderResult<()> {
         //AI=== 已退出的线程先 join 回收，允许重启 / reclaim a finished thread so it can be restarted
-        let handle = self
-            .thread_handle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        if let Some(handle) = handle
-            && let Err(e) = handle.join()
         {
-            error!("解码线程异常退出（panic）/ decoder thread crashed: {e:?}");
+            let mut thread_handle_lock = self
+                .thread_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let finished = thread_handle_lock
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished);
+            if finished {
+                let handle = thread_handle_lock.take();
+                if let Some(handle) = handle
+                    && let Err(e) = handle.join()
+                {
+                    error!("解码线程异常退出（panic）/ decoder thread crashed: {e:?}");
+                }
+            }
         }
         //AI_END===
         let mut thread_handle_lock = self
@@ -395,7 +399,7 @@ impl DecoderRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if thread_handle_lock.is_none() {
             let spawn_result = {
-                let ring_buf = self.ring_buf.clone();
+                let ring_buf = self.effect_runtime.pre_effect_ring_buffer().clone();
                 let stop = self.stop.clone();
                 let resetting = self.resetting.clone();
                 //AI=== 毒化标志传入解码线程 / hand the poisoned flag to the decode thread
@@ -713,7 +717,9 @@ impl DecoderRuntime {
     }
 
     pub fn try_seek(&mut self, d: Duration) -> DecoderResult<symphonia::core::formats::SeekedTo> {
-        self.ring_buf.reject_waiting_writers();
+        self.effect_runtime
+            .pre_effect_ring_buffer()
+            .reject_waiting_writers();
         //AI=== 从合并后的 session 同时取 engine/data / take engine and data from the merged session together
         let mut session = self
             .session

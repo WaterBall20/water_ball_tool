@@ -88,8 +88,8 @@ impl<T> LockedWriter<T> {
                 let _g = lock_ignore_poison(&self.inner.write.lock);
                 match self.inner.push_one(value) {
                     Ok(()) => return Ok(()),
-                    Err(Kind::Full(v)) | Err(Kind::Clearing(v)) | Err(Kind::Truncating(v)) => {
-                        value = v
+                    Err(Kind::Full(v) | Kind::Clearing(v) | Kind::Truncating(v)) => {
+                        value = v;
                     }
                     Err(_) => unreachable!(),
                 }
@@ -228,6 +228,7 @@ impl<T> LockedWriter<T> {
     /// assert!(writer.push(1).is_ok());
     /// assert_eq!(writer.len(), 1);
     /// ```
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -242,6 +243,7 @@ impl<T> LockedWriter<T> {
     /// let (_reader, writer) = locked_ring_buffer::<u8>(4);
     /// assert!(writer.is_empty());
     /// ```
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -258,6 +260,7 @@ impl<T> LockedWriter<T> {
     /// assert!(writer.push(2).is_ok());
     /// assert!(writer.is_full());
     /// ```
+    #[must_use]
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
@@ -589,6 +592,7 @@ impl<T> UnlockedWriter<T> {
     /// assert!(writer.push(1).is_ok());
     /// assert_eq!(writer.len(), 1);
     /// ```
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -603,6 +607,7 @@ impl<T> UnlockedWriter<T> {
     /// let (_reader, mut writer) = unlocked_ring_buffer::<u8>(4);
     /// assert!(writer.is_empty());
     /// ```
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -619,6 +624,7 @@ impl<T> UnlockedWriter<T> {
     /// assert!(writer.push(2).is_ok());
     /// assert!(writer.is_full());
     /// ```
+    #[must_use]
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
@@ -814,6 +820,7 @@ impl<T> Writer<T> {
     /// let (_reader, writer) = ring_buffer::<u8>(4, ReadMode::Locked, WriteMode::Locked);
     /// assert!(writer.is_locked());
     /// ```
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         matches!(self, Writer::Locked(_))
     }
@@ -828,6 +835,7 @@ impl<T> Writer<T> {
     /// let (_reader, writer) = ring_buffer::<u8>(4, ReadMode::Locked, WriteMode::Unlocked);
     /// assert!(writer.is_unlocked());
     /// ```
+    #[must_use]
     pub fn is_unlocked(&self) -> bool {
         matches!(self, Writer::Unlocked(_))
     }

@@ -32,6 +32,7 @@ pub struct WatchNotify {
 }
 
 impl WatchNotify {
+    #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(WatchState::default()),

@@ -10,6 +10,7 @@ pub struct DurationAccumulator {
 }
 
 impl DurationAccumulator {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -65,10 +66,12 @@ pub struct DurationStatsWindow {
 }
 
 impl DurationStatsWindow {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
+    #[must_use]
     pub fn mean(&self) -> Duration {
         Duration::from_nanos(self.total_ns / self.count.max(1))
     }
@@ -89,6 +92,7 @@ pub struct TimeMetrics {
     pub underrun: AtomicU64,
 }
 impl TimeMetrics {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             enabled: AtomicBool::new(true),

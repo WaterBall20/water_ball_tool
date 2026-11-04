@@ -42,6 +42,7 @@ impl<T> LockedReader<T> {
     /// assert!(writer.push(String::from("a")).is_ok());
     /// assert_eq!(reader.pop().as_deref(), Some("a"));
     /// ```
+    #[must_use]
     pub fn pop(&self) -> Option<T> {
         let _g = lock_ignore_poison(&self.inner.read.lock);
         self.inner.pop_one()
@@ -130,6 +131,7 @@ impl<T> LockedReader<T> {
     /// assert!(writer.push(1).is_ok());
     /// assert_eq!(reader.len(), 1);
     /// ```
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -144,6 +146,7 @@ impl<T> LockedReader<T> {
     /// let (reader, _writer) = locked_ring_buffer::<u8>(4);
     /// assert!(reader.is_empty());
     /// ```
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -160,6 +163,7 @@ impl<T> LockedReader<T> {
     /// assert!(writer.push(2).is_ok());
     /// assert!(reader.is_full());
     /// ```
+    #[must_use]
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
@@ -476,6 +480,7 @@ impl<T> UnlockedReader<T> {
     /// assert!(writer.push(1).is_ok());
     /// assert_eq!(reader.len(), 1);
     /// ```
+    #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -490,6 +495,7 @@ impl<T> UnlockedReader<T> {
     /// let (mut reader, _writer) = unlocked_ring_buffer::<u8>(4);
     /// assert!(reader.is_empty());
     /// ```
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
@@ -506,6 +512,7 @@ impl<T> UnlockedReader<T> {
     /// assert!(writer.push(2).is_ok());
     /// assert!(reader.is_full());
     /// ```
+    #[must_use]
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
@@ -741,6 +748,7 @@ impl<T> Reader<T> {
     /// let (reader, _writer) = ring_buffer::<u8>(4, ReadMode::Locked, WriteMode::Locked);
     /// assert!(reader.is_locked());
     /// ```
+    #[must_use]
     pub fn is_locked(&self) -> bool {
         matches!(self, Reader::Locked(_))
     }
@@ -755,6 +763,7 @@ impl<T> Reader<T> {
     /// let (reader, _writer) = ring_buffer::<u8>(4, ReadMode::Unlocked, WriteMode::Locked);
     /// assert!(reader.is_unlocked());
     /// ```
+    #[must_use]
     pub fn is_unlocked(&self) -> bool {
         matches!(self, Reader::Unlocked(_))
     }

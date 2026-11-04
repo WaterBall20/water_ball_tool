@@ -158,18 +158,15 @@ impl PreEffectRuntime {
         //AI_END===
         //AI=== 已退出的线程先 join 回收，并清空输入环残留 / reclaim a finished thread and drop stale input
         {
-            let finished = self
+            let mut effect_thread_lock = self
                 .effect_thread
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let finished = effect_thread_lock
                 .as_ref()
-                .is_some_and(|h| h.is_finished());
+                .is_some_and(std::thread::JoinHandle::is_finished);
             if finished {
-                let handle = self
-                    .effect_thread
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
+                let handle = effect_thread_lock.take();
                 // 旧线程已死：清掉环里崩溃前未消费的块，避免重启后先播残留音频
                 // The old thread is gone: drop blocks it never consumed so a restart does not replay them.
                 self.input_buf.reject_waiting_writers();
@@ -315,8 +312,9 @@ impl PreEffectRuntime {
                                             Ok(discontinuity) => discontinuity,
                                             Err(e) => {
                                                 unreachable!(
-                                                    "AudioData 不连续变体转换失败（逻辑不变量被破坏）: {e} / \
-                                                    discontinuity AudioData variant conversion failed (logic invariant broken): {e}"
+                                                    "AudioData 不连续变体转换失败（逻辑不变量被破坏）: {} / \
+                                                    discontinuity AudioData variant conversion \
+                                                    failed (logic invariant broken): {}", e, e
                                                 )
                                             }
                                         };

@@ -60,6 +60,7 @@ pub struct FadeEffect {
 }
 
 impl FadeEffect {
+    #[must_use]
     pub fn new() -> Self {
         let mut s = Self {
             enabled: true,
@@ -108,6 +109,12 @@ impl FadeEffect {
         let idx = (f64::from(pos) * self.lut_scale) as usize;
         // lut 长度 = lut_size + 1，末位即 pos == duration_samples 时的端点 1.0
         self.lut[idx.min(self.lut_size)]
+    }
+}
+
+impl Default for FadeEffect {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

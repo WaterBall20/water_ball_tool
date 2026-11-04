@@ -22,12 +22,13 @@ pub struct ResamplerEffect {
 }
 
 impl ResamplerEffect {
+    #[must_use]
     pub fn new(output_format: AudioFormat) -> Self {
         Self {
             info: PreEffectInfo {
                 name: "ResamplerEffect".to_string(),
                 enabled: true,
-                input_format: Default::default(),
+                input_format: AudioFormat::default(),
                 output_format,
                 latency_samples: 0,
                 tail_samples: 0,
@@ -49,7 +50,7 @@ impl ResamplerEffect {
 
     fn process_inner(
         in_buf: &[f32],
-        out_temp_buf: &mut Vec<f32>,
+        out_temp_buf: &mut [f32],
         out: &mut Vec<f32>,
         chunk_len: usize,
         channels: usize,
@@ -332,6 +333,7 @@ impl ResamplePlan {
     /// - `target_out_fft`：输出侧期望等效窗口，解码线程内用 32768，独立线程用 65536
     /// - `t_play_max_sec`：单次处理允许的最长播放时长，解码线程内 0.08~0.15
     /// - `n_min` / `n_max`：输入块帧数硬上下限，如 1024 / 32768
+    #[must_use]
     pub fn compute_plan(
         fin: u32,
         fout: u32,

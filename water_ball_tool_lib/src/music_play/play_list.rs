@@ -17,6 +17,7 @@ pub struct Track {
 }
 
 impl Track {
+    #[must_use]
     pub fn new(
         path: PathBuf,
         title: String,
@@ -33,15 +34,19 @@ impl Track {
         }
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
+    #[must_use]
     pub fn title(&self) -> &str {
         &self.title
     }
+    #[must_use]
     pub fn artist(&self) -> &str {
         &self.artist
     }
+    #[must_use]
     pub fn duration(&self) -> &Duration {
         &self.duration
     }
@@ -52,10 +57,12 @@ pub struct NextTrack<'t> {
     next_id: usize,
 }
 impl NextTrack<'_> {
+    #[must_use]
     pub fn track(&self) -> &Track {
         self.track
     }
 
+    #[must_use]
     pub fn next_id(&self) -> usize {
         self.next_id
     }
@@ -85,6 +92,7 @@ pub struct PlayList {
 }
 
 impl PlayList {
+    #[must_use]
     pub fn new(tracks: Vec<Track>, loop_mode: LoopMode) -> Self {
         let tracks_len = tracks.len();
         Self {
@@ -162,14 +170,11 @@ impl PlayList {
                         while !temp_list.is_empty() {
                             let r = rand::random_range(0..temp_list.len());
                             //AI=== 移除 expect：取不到项时记录 error! 并结束洗牌，避免 panic / Remove expect: log error! and stop shuffling when the item is missing, avoiding a panic
-                            match temp_list.remove(r) {
-                                Some(index) => self.rand_list.push_back(index),
-                                None => {
-                                    error!(
-                                        "shuffle temp list remove failed / 洗牌临时列表移除失败"
-                                    );
-                                    break;
-                                }
+                            if let Some(index) = temp_list.remove(r) {
+                                self.rand_list.push_back(index)
+                            } else {
+                                error!("shuffle temp list remove failed / 洗牌临时列表移除失败");
+                                break;
                             }
                             //AI_END===
                         }
@@ -192,12 +197,11 @@ impl PlayList {
             }
             //AI_END===
             //AI=== 没有当前音轨时记录 error! 并返回 None，不 panic / Log error! and return None when there is no current track instead of panicking
-            match self.get_current_track() {
-                Some(track) => Some(NextTrack { track, next_id }),
-                None => {
-                    error!("no current track / 没有当前音轨");
-                    None
-                }
+            if let Some(track) = self.get_current_track() {
+                Some(NextTrack { track, next_id })
+            } else {
+                error!("no current track / 没有当前音轨");
+                None
             }
             //AI_END===
         } else {
@@ -226,12 +230,11 @@ impl PlayList {
             _ = self.rand_list.remove(pos);
         }
         let next_id = self.update_next_id();
-        match self.get_current_track() {
-            Some(track) => Some(NextTrack { track, next_id }),
-            None => {
-                error!("no current track / 没有当前音轨");
-                None
-            }
+        if let Some(track) = self.get_current_track() {
+            Some(NextTrack { track, next_id })
+        } else {
+            error!("no current track / 没有当前音轨");
+            None
         }
     }
     //AI_END===
@@ -245,6 +248,7 @@ impl PlayList {
         self.next_id
     }
 
+    #[must_use]
     pub fn get_current_track(&self) -> Option<&Track> {
         self.tracks.get(self.current_index - 1)
     }
@@ -304,6 +308,7 @@ impl PlayList {
     }
     //AI_END===
 
+    #[must_use]
     pub fn loop_mod(&self) -> LoopMode {
         self.loop_mode
     }

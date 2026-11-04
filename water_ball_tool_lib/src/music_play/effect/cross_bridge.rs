@@ -114,7 +114,7 @@ impl CrossBridgeEffect {
             info: PreEffectInfo {
                 name: "CrossBridge".to_string(),
                 enabled: true,
-                input_format: Default::default(),
+                input_format: AudioFormat::default(),
                 output_format,
                 latency_samples: 0,
                 tail_samples: 0,

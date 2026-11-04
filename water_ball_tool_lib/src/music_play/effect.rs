@@ -22,6 +22,7 @@ impl Default for AudioFormat {
     }
 }
 impl AudioFormat {
+    #[must_use]
     pub fn new(channels: u16, sample_rate: u32) -> Self {
         Self {
             channels,
@@ -29,10 +30,12 @@ impl AudioFormat {
         }
     }
 
+    #[must_use]
     pub fn channels(&self) -> u16 {
         self.channels
     }
 
+    #[must_use]
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
     }
@@ -89,6 +92,7 @@ pub struct PostEffectChain {
 }
 
 impl PostEffectChain {
+    #[must_use]
     pub fn new(format: AudioFormat) -> Self {
         Self {
             effects: Vec::new(),
@@ -419,7 +423,6 @@ pub trait PreEffect: Send + 'static {
         output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
-        output.clear();
         match kind {
             PreEffectDiscontinuity::Skip | PreEffectDiscontinuity::Seek => 0,
             PreEffectDiscontinuity::Eof | PreEffectDiscontinuity::NoNext => {
@@ -464,6 +467,7 @@ pub struct PreEffectChain {
 }
 
 impl PreEffectChain {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             effects: Vec::new(),
@@ -475,10 +479,12 @@ impl PreEffectChain {
         }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.effects.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.effects.is_empty()
     }
@@ -495,6 +501,7 @@ impl PreEffectChain {
         Ok(())
     }
 
+    #[must_use]
     pub fn output_format(&self) -> AudioFormat {
         self.output_format
     }
