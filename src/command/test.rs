@@ -673,9 +673,10 @@ fn ff_with_symlinks_in_output() -> Result<(), Box<dyn std::error::Error>> {
     let root = setup_symlink_dir("ff_with_symlinks_in_output");
     create_file_cmd(&root, "real.txt");
     let link = root.join("link.txt");
-    if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
-        panic!("[测试]创建符号链接测试失败");
-    }
+    assert!(
+        try_create_symlink_cmd(&root.join("real.txt"), &link).is_some(),
+        "[测试]创建符号链接测试失败"
+    );
 
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
@@ -711,9 +712,10 @@ fn ff_skip_symlinks_excludes_them() -> Result<(), Box<dyn std::error::Error>> {
     let root = setup_symlink_dir("ff_skip_symlinks_excludes_them");
     create_file_cmd(&root, "real.txt");
     let link = root.join("link.txt");
-    if try_create_symlink_cmd(&root.join("real.txt"), &link).is_none() {
-        panic!("[测试]创建符号链接测试失败");
-    }
+    assert!(
+        try_create_symlink_cmd(&root.join("real.txt"), &link).is_some(),
+        "[测试]创建符号链接测试失败"
+    );
 
     let json_path = root.join("result.json");
     _ = fs::remove_file(&json_path);
@@ -751,9 +753,10 @@ fn ff_ancestor_symlink_does_not_crash() -> Result<(), Box<dyn std::error::Error>
     fs::create_dir_all(&sub).expect("创建子目录失败");
     create_file_cmd(&sub, "child.txt");
     let link_back = sub.join("back_to_root");
-    if try_create_symlink_cmd(&root, &link_back).is_none() {
-        panic!("[测试]创建符号链接测试失败");
-    }
+    assert!(
+        try_create_symlink_cmd(&root, &link_back).is_some(),
+        "[测试]创建符号链接测试失败"
+    );
 
     let r = args(FileFinderArgs::new(
         root.to_str()

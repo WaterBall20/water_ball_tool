@@ -340,6 +340,12 @@ impl PreEffectRuntime {
                                 | AudioData::NoNext
                                 | AudioData::Skip
                                 | AudioData::Seek => {
+                                    //AI=== seek 先丢弃已写出的旧位置音频，effect 线程是输出环唯一写者
+                                    // Seek drops audio already written for the old position; this thread is the ring's only writer.
+                                    if matches!(&data, AudioData::Seek) {
+                                        audio_buf.clear();
+                                    }
+                                    //AI_END===
                                     //AI=== 该转换失败只可能在逻辑不变量被破坏时发生（外层 match 已排除 Block/Reset），
                                     // 属于逻辑错误，按规范用 unreachable! 终止，而不是静默降级为 Skip 后继续。
                                     // This conversion can fail only when a logic invariant is broken (the outer match already
@@ -440,6 +446,12 @@ impl PreEffectRuntime {
     pub fn send_skip(&self) -> Result<(), PreEffectError> {
         self.send_input_and_clear_buf_inner(AudioData::Skip)
     }
+
+    //AI=== seek：清空输入环并让效果链做基本复位 / seek: clear the input ring and basic-reset the effect chain
+    pub fn send_seek(&self) -> Result<(), PreEffectError> {
+        self.send_input_and_clear_buf_inner(AudioData::Seek)
+    }
+    //AI_END===
 
     pub fn send_no_next(&self) -> Result<(), PreEffectError> {
         self.send_input_and_clear_buf_inner(AudioData::NoNext)

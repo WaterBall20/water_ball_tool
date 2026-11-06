@@ -4,3 +4,4 @@ mod blocking;
 mod drain_release;
 mod non_copy;
 mod reject;
+mod resize;

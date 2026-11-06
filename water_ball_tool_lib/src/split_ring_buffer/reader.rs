@@ -191,7 +191,7 @@ impl<T> LockedReader<T> {
             return Err(Error::invalid_range());
         }
         let _r = lock_ignore_poison(&self.inner.read.lock);
-        let Some(_flight) = self.inner.enter() else {
+        let Some(_flight) = self.inner.enter_read() else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -216,7 +216,7 @@ impl<T> LockedReader<T> {
             return Err(Error::invalid_range());
         }
         let _r = lock_ignore_poison(&self.inner.read.lock);
-        let Some(_flight) = self.inner.enter() else {
+        let Some(_flight) = self.inner.enter_read() else {
             return Ok(());
         };
         self.inner.release_prefix(range.end);
@@ -533,7 +533,7 @@ impl<T> UnlockedReader<T> {
         if range.start != 0 {
             return Err(Error::invalid_range());
         }
-        let Some(_flight) = self.inner.enter() else {
+        let Some(_flight) = self.inner.enter_read() else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -557,7 +557,7 @@ impl<T> UnlockedReader<T> {
         if range.start != 0 {
             return Err(Error::invalid_range());
         }
-        let Some(_flight) = self.inner.enter() else {
+        let Some(_flight) = self.inner.enter_read() else {
             return Ok(());
         };
         self.inner.release_prefix(range.end);

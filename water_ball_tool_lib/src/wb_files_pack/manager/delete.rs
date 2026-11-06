@@ -136,7 +136,7 @@ impl WBFPManager {
 
         let file_len = metadata.len();
 
-        self.file_gc_add(data_pos_list)?;
+        self.file_gc_add(data_pos_list);
         self.manifest.attribute_mut().sub_file_count(1);
         self.manifest.attribute_mut().sub_data_len(file_len);
         self.save_root_pack_struct()?;
@@ -187,7 +187,7 @@ impl WBFPManager {
                 .as_mut()
                 .ok_or(PackFileError::State("子目录结构未加载".into()))?;
             let (r_inner, gc_list) = self.delete_dir_contents(sub_ps, &this_path)?;
-            self.file_gc_add(gc_list)?;
+            self.file_gc_add(gc_list);
 
             let mut r = r_inner;
             r.dir_count += 1;
@@ -257,7 +257,7 @@ impl WBFPManager {
         // 覆写元数据块 / Overwrite metadata block
         self.overwrite_manifest_block(metadata_file_pos, strategy)?;
 
-        self.file_gc_add(data_pos_list)?;
+        self.file_gc_add(data_pos_list);
         self.manifest.attribute_mut().sub_file_count(1);
         self.manifest.attribute_mut().sub_data_len(file_len);
         self.save_root_pack_struct()?;
@@ -314,7 +314,7 @@ impl WBFPManager {
             // 覆写此目录的 PackStruct 数据块 / Overwrite this dir's PackStruct block
             self.overwrite_manifest_block(*struct_file_pos, strategy)?;
 
-            self.file_gc_add(gc_list)?;
+            self.file_gc_add(gc_list);
 
             let mut r = r_inner;
             r.dir_count += 1;
@@ -407,7 +407,7 @@ impl WBFPManager {
         self.manifest
             .root_struct_mut()
             .add_item(first_name.clone(), first_item);
-        self.file_gc_add(gc_list)?;
+        self.file_gc_add(gc_list);
         self.manifest.attribute_mut().sub_file_count(r.file_count);
         self.manifest.attribute_mut().sub_data_len(r.length);
         self.save_root_pack_struct()?;
@@ -486,7 +486,7 @@ impl WBFPManager {
         self.manifest
             .root_struct_mut()
             .add_item(first_name.clone(), first_item);
-        self.file_gc_add(gc_list)?;
+        self.file_gc_add(gc_list);
         self.manifest.attribute_mut().sub_file_count(r.file_count);
         self.manifest.attribute_mut().sub_dir_count(r.dir_count);
         self.manifest.attribute_mut().sub_data_len(r.length);
@@ -570,7 +570,7 @@ impl WBFPManager {
         self.manifest
             .root_struct_mut()
             .add_item(first_name.clone(), first_item);
-        self.file_gc_add(gc_list)?;
+        self.file_gc_add(gc_list);
         self.manifest.attribute_mut().sub_file_count(r.file_count);
         self.manifest.attribute_mut().sub_data_len(r.length);
         self.save_root_pack_struct()?;
@@ -653,7 +653,7 @@ impl WBFPManager {
         self.manifest
             .root_struct_mut()
             .add_item(first_name.clone(), first_item);
-        self.file_gc_add(gc_list)?;
+        self.file_gc_add(gc_list);
         self.manifest.attribute_mut().sub_file_count(r.file_count);
         self.manifest.attribute_mut().sub_dir_count(r.dir_count);
         self.manifest.attribute_mut().sub_data_len(r.length);

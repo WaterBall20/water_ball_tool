@@ -93,7 +93,9 @@ pub(crate) fn progress_style(template: &str) -> ProgressStyle {
 pub(crate) fn cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Ff(args) => ff::args(args),
-        Commands::Wbfp(commands) => wbfp::commands(commands),
+        //AI=== wbfp 终端默认 TUI，非终端/--no-tui 回退经典路径 / wbfp defaults to the TUI on a terminal
+        Commands::Wbfp(commands) => wbfp::run(commands),
+        //AI_END===
         Commands::MP(args) => music_play::args(args),
     }
 }

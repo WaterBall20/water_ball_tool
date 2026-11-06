@@ -14,6 +14,10 @@ pub struct Track {
     artist: String,
     duration: Duration, // 来自 lofty
     file_type: FileType,
+    //AI=== TUI 展示用：专辑与音频参数由扫描器从 lofty 读取 / TUI display fields filled by the scanner from lofty
+    album: Option<String>,
+    audio_info: String,
+    //AI_END===
 }
 
 impl Track {
@@ -31,6 +35,8 @@ impl Track {
             artist,
             duration,
             file_type,
+            album: None,
+            audio_info: String::new(),
         }
     }
 
@@ -50,6 +56,26 @@ impl Track {
     pub fn duration(&self) -> &Duration {
         &self.duration
     }
+
+    //AI=== 专辑与音频信息（TUI 展示用）/ album and audio info for the TUI
+    #[must_use]
+    pub fn album(&self) -> Option<&str> {
+        self.album.as_deref()
+    }
+
+    pub fn set_album(&mut self, album: Option<String>) {
+        self.album = album;
+    }
+
+    #[must_use]
+    pub fn audio_info(&self) -> &str {
+        &self.audio_info
+    }
+
+    pub fn set_audio_info(&mut self, audio_info: String) {
+        self.audio_info = audio_info;
+    }
+    //AI_END===
 }
 
 pub struct NextTrack<'t> {
@@ -93,13 +119,16 @@ pub struct PlayList {
 
 impl PlayList {
     #[must_use]
-    pub fn new(tracks: Vec<Track>, loop_mode: LoopMode) -> Self {
-        let tracks_len = tracks.len();
+    pub fn new() -> Self {
+        Self::new_inner(Vec::new(), LoopMode::SequentialLoop)
+    }
+
+    fn new_inner(tracks: Vec<Track>, loop_mode: LoopMode) -> Self {
         Self {
             tracks,
             current_index: 0,
             loop_mode,
-            rand_list: VecDeque::with_capacity(tracks_len),
+            rand_list: VecDeque::new(),
             next_id: 0,
             //AI=== 轨迹预分配容量、初始为空 / history is pre-allocated with capacity, starting empty
             history: VecDeque::with_capacity(HISTORY_CAP),
@@ -239,6 +268,41 @@ impl PlayList {
     }
     //AI_END===
 
+    //AI=== 跳到指定曲目（0-based）：与 next 一样记录轨迹并更新换曲 ID
+    // Jump to a 0-based index: record history and bump the change id like `next` does.
+    /// 点播指定曲目（0-based）。周期洗牌模式下，若目标仍在本周期待播队列中则取出；不在队列中则保持队列不变。
+    ///
+    /// Play a specific 0-based track. In periodic-shuffle mode the target is removed from the current cycle
+    /// queue when present; the queue is left untouched otherwise.
+    pub fn jump_to(&mut self, index: usize) -> Option<NextTrack<'_>> {
+        if index >= self.tracks.len() {
+            return None;
+        }
+        let target = index + 1;
+        if self.current_index != target {
+            if self.current_index != 0 {
+                self.history.push_back(self.current_index);
+                if self.history.len() > HISTORY_CAP {
+                    self.history.pop_front();
+                }
+            }
+            self.current_index = target;
+        }
+        //AI=== 周期洗牌：点播目标若还在本周期待播队列中，取出来；不在队列则无需处理（可能已播过或不在本周期）
+        // Periodic shuffle: when the requested track is still queued in this cycle, take it out; otherwise there is
+        // nothing to do (already played in this cycle, or not part of it).
+        if let LoopMode::PeriodicShuffle = self.loop_mode
+            && let Some(pos) = self.rand_list.iter().position(|&i| i == target)
+        {
+            _ = self.rand_list.remove(pos);
+        }
+        //AI_END===
+        let next_id = self.update_next_id();
+        self.get_current_track()
+            .map(|track| NextTrack { track, next_id })
+    }
+    //AI_END===
+
     fn update_next_id(&mut self) -> usize {
         if self.next_id == usize::MAX {
             self.next_id = 0;
@@ -250,8 +314,18 @@ impl PlayList {
 
     #[must_use]
     pub fn get_current_track(&self) -> Option<&Track> {
+        if self.current_index < 1 {
+            return None;
+        }
         self.tracks.get(self.current_index - 1)
     }
+
+    //AI=== 当前曲目的 0-based 索引，供 TUI 高亮 / 0-based current index for TUI highlighting
+    #[must_use]
+    pub fn current_index(&self) -> Option<usize> {
+        self.current_index.checked_sub(1)
+    }
+    //AI_END===
 
     //AI=== 追加 / 插入：单曲与批量各一对，批量是唯一实现 / append & insert: one pair each for a single track and a batch; the batch one is the only implementation
     /// 追加单曲 / Append a single track.
@@ -319,6 +393,26 @@ impl PlayList {
         //AI=== 轨迹一并清空 / clear the navigation history as well
         self.history.clear();
         //AI_END===
+    }
+    pub fn len(&self) -> usize {
+        self.tracks.len()
+    }
+    #[must_use]
+    pub fn to_vec(self) -> Vec<Track> {
+        self.tracks
+    }
+}
+
+impl Default for PlayList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl From<Vec<Track>> for PlayList {
+    /// 从Vec转换成播放列表
+    fn from(value: Vec<Track>) -> Self {
+        Self::new_inner(value, LoopMode::SequentialLoop)
     }
 }
 
@@ -390,7 +484,8 @@ mod test {
     fn sequential_loop_list(play_end: bool) {
         let list = creat_tack_list(TEST_COUNT);
         let mut next_id = 0;
-        let mut play_list = PlayList::new(list.clone(), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         for _ in 0..TEST_FOR_COUNT {
             for item in &list {
                 assert_eq!(item, {
@@ -406,7 +501,8 @@ mod test {
     fn sequential_list_play_end() {
         let list = creat_tack_list(TEST_COUNT);
         let mut next_id = 0;
-        let mut play_list = PlayList::new(list.clone(), LoopMode::Sequential);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::Sequential);
         for item in &list {
             assert_eq!(item, {
                 let r = play_list.next(true, next_id).expect("next failed");
@@ -420,7 +516,8 @@ mod test {
     fn sequential_list_no_play_end() {
         let list = creat_tack_list(TEST_COUNT);
         let mut next_id = 0;
-        let mut play_list = PlayList::new(list.clone(), LoopMode::Sequential);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::Sequential);
         for _ in 0..TEST_FOR_COUNT {
             for item in &list {
                 assert_eq!(item, {
@@ -437,7 +534,8 @@ mod test {
         let len = 10;
         let list = creat_tack_list(len);
         let mut next_id = 0;
-        let mut play_list = PlayList::new(list, LoopMode::PeriodicShuffle);
+        let mut play_list = PlayList::from(list);
+        play_list.set_loop_mod(LoopMode::PeriodicShuffle);
         let mut next_list = Vec::with_capacity(len);
         //AI=== 记录上一周期末曲，用于检查跨周期边界 / keep the previous cycle's last track to check the boundary
         let mut prev_cycle_last: Option<Track> = None;
@@ -495,7 +593,8 @@ mod test {
     #[test]
     fn shuffle_single_track_plays() {
         let list = creat_tack_list(1);
-        let mut play_list = PlayList::new(list.clone(), LoopMode::Shuffle);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::Shuffle);
         let Some(r) = play_list.next(false, 0) else {
             panic!("next failed");
         };
@@ -506,7 +605,8 @@ mod test {
     //AI=== 播放轨迹与上一曲 / navigation history and previous track
     #[test]
     fn history_records_leaving_track() {
-        let mut play_list = PlayList::new(creat_tack_list(5), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(creat_tack_list(5));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..3 {
             advance(&mut play_list, false, &mut id);
@@ -518,7 +618,8 @@ mod test {
     #[test]
     fn prev_walks_back_to_history_start() {
         let list = creat_tack_list(5);
-        let mut play_list = PlayList::new(list.clone(), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..3 {
             advance(&mut play_list, false, &mut id);
@@ -529,10 +630,24 @@ mod test {
         assert_eq!(1, play_list.current_index);
     }
 
+    //AI=== 0-based 当前索引 / 0-based current index
+    #[test]
+    fn current_index_is_zero_based_and_none_before_start() {
+        let mut play_list = PlayList::from(creat_tack_list(3));
+        assert_eq!(None, play_list.current_index());
+
+        let next_id = { play_list.next(false, 0).expect("next failed").next_id() };
+        assert_eq!(Some(0), play_list.current_index());
+        play_list.next(false, next_id).expect("next failed");
+        assert_eq!(Some(1), play_list.current_index());
+    }
+    //AI_END===
+
     #[test]
     fn repeat_one_auto_loop_does_not_record() {
         let list = creat_tack_list(3);
-        let mut play_list = PlayList::new(list.clone(), LoopMode::RepeatOne);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::RepeatOne);
         let mut id = 0;
         advance(&mut play_list, false, &mut id);
         advance(&mut play_list, false, &mut id); // 第 2 首，轨迹 [1]
@@ -544,7 +659,8 @@ mod test {
     #[test]
     fn history_is_bounded_by_cap() {
         let total = HISTORY_CAP + 76;
-        let mut play_list = PlayList::new(creat_tack_list(total), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(creat_tack_list(total));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..total {
             advance(&mut play_list, false, &mut id);
@@ -564,7 +680,8 @@ mod test {
     //AI=== 追加 / 插入 / append & insert
     #[test]
     fn add_track_appends_without_touching_history() {
-        let mut play_list = PlayList::new(creat_tack_list(5), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(creat_tack_list(5));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..3 {
             advance(&mut play_list, false, &mut id);
@@ -578,7 +695,8 @@ mod test {
 
     #[test]
     fn add_tracks_appends_without_touching_history() {
-        let mut play_list = PlayList::new(creat_tack_list(5), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(creat_tack_list(5));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..3 {
             advance(&mut play_list, false, &mut id);
@@ -592,7 +710,8 @@ mod test {
     #[test]
     fn insert_track_in_middle_updates_history() {
         let list = creat_tack_list(5);
-        let mut play_list = PlayList::new(list.clone(), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
         let mut id = 0;
         for _ in 0..5 {
             advance(&mut play_list, false, &mut id);
@@ -609,7 +728,9 @@ mod test {
 
     #[test]
     fn insert_tracks_at_end_keeps_history() {
-        let mut play_list = PlayList::new(creat_tack_list(5), LoopMode::SequentialLoop);
+        let mut play_list = PlayList::from(creat_tack_list(5));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
+        let mut id = 0;
         let mut id = 0;
         for _ in 0..5 {
             advance(&mut play_list, false, &mut id);
@@ -622,7 +743,8 @@ mod test {
 
     #[test]
     fn insert_keeps_periodic_cycle_indices_valid() {
-        let mut play_list = PlayList::new(creat_tack_list(10), LoopMode::PeriodicShuffle);
+        let mut play_list = PlayList::from(creat_tack_list(10));
+        play_list.set_loop_mod(LoopMode::PeriodicShuffle);
         let mut id = 0;
         for _ in 0..3 {
             advance(&mut play_list, false, &mut id);
@@ -638,6 +760,75 @@ mod test {
             assert!(seen.insert(index));
         }
         assert!(!seen.contains(&play_list.current_index));
+    }
+    //AI_END===
+
+    //AI=== 跳转播放 / jump to a track
+    #[test]
+    fn jump_to_sets_current_and_records_history() {
+        let list = creat_tack_list(5);
+        let mut play_list = PlayList::from(list.clone());
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
+        let mut id = 0;
+        advance(&mut play_list, false, &mut id);
+
+        let next = play_list.jump_to(3).expect("jump failed");
+        assert_eq!(&list[3], next.track());
+        assert_eq!(Some(3), play_list.current_index());
+        assert_eq!(VecDeque::from([1]), play_list.history);
+    }
+
+    #[test]
+    fn jump_to_same_track_keeps_history() {
+        let mut play_list = PlayList::from(creat_tack_list(5));
+        play_list.set_loop_mod(LoopMode::SequentialLoop);
+        let mut id = 0;
+        advance(&mut play_list, false, &mut id);
+
+        play_list.jump_to(0).expect("jump failed");
+        assert_eq!(Some(0), play_list.current_index());
+        assert!(play_list.history.is_empty());
+    }
+
+    #[test]
+    fn jump_to_out_of_range_returns_none() {
+        let mut play_list = PlayList::from(creat_tack_list(3));
+        assert!(play_list.jump_to(3).is_none());
+        assert_eq!(None, play_list.current_index());
+    }
+
+    #[test]
+    fn jump_to_removes_target_from_periodic_cycle() {
+        let mut play_list = PlayList::from(creat_tack_list(10));
+        play_list.set_loop_mod(LoopMode::PeriodicShuffle);
+        play_list.rand_list = VecDeque::from([2, 3, 4, 5]);
+
+        play_list.jump_to(4).expect("jump failed");
+        assert_eq!(Some(4), play_list.current_index());
+        assert!(!play_list.rand_list.contains(&5));
+    }
+
+    #[test]
+    fn jump_to_missing_target_keeps_periodic_cycle() {
+        let mut play_list = PlayList::from(creat_tack_list(10));
+        play_list.set_loop_mod(LoopMode::PeriodicShuffle);
+        play_list.rand_list = VecDeque::from([2, 3, 4, 5]);
+
+        play_list.jump_to(8).expect("jump failed");
+        assert_eq!(Some(8), play_list.current_index());
+        assert_eq!(VecDeque::from([2, 3, 4, 5]), play_list.rand_list);
+    }
+
+    #[test]
+    fn jump_to_current_track_still_removes_it_from_cycle() {
+        let mut play_list = PlayList::from(creat_tack_list(10));
+        play_list.set_loop_mod(LoopMode::PeriodicShuffle);
+        play_list.current_index = 4;
+        play_list.rand_list = VecDeque::from([4, 2, 3]);
+
+        play_list.jump_to(3).expect("jump failed");
+        assert_eq!(Some(3), play_list.current_index());
+        assert!(!play_list.rand_list.contains(&4));
     }
     //AI_END===
 }

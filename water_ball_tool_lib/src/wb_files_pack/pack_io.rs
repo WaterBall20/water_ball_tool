@@ -1,11 +1,12 @@
 use crate::tools;
 use crate::wb_files_pack::data::DATA_DATA_BLOCK_LEN_U64;
 use crate::wb_files_pack::error::{PackFileError, Result};
+use crate::wb_files_pack::pack_io::file::FileIo;
 use crate::wb_files_pack::{
     DATA_BLOCK_LEN, DataPosList, MANIFEST_ATTRIBUTE_BLOCK_LEN, ManifestDataBlock,
 };
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fmt::Debug;
+use std::io::{self, Read, SeekFrom, Write};
 
 /// 多段拼接结果 / Multi-segment stitching outcome
 enum MultiSegError {
@@ -15,10 +16,11 @@ enum MultiSegError {
     TooManySegments,
 }
 
-/// 虚拟文件读写器模块（`PackVirtualFile`）/ Virtual file reader-writer module (`PackVirtualFile`)
 pub mod file;
 pub mod file_handle;
 pub mod file_hash;
+/// 虚拟文件读写器模块（`PackVirtualFile`）/ Virtual file reader-writer module (`PackVirtualFile`)
+pub mod pack_file;
 
 //文件头===
 //文件头-文件名:WPFilesPack
@@ -69,7 +71,7 @@ pub(crate) struct RunData {
 
 #[derive(Debug)]
 pub(crate) struct PackIO {
-    file: File,
+    file: Box<dyn FileIo>,
     pub(crate) len: u64,
     //空数据列表
     pub(crate) empty_data_list: DataPosList,
@@ -78,7 +80,7 @@ pub(crate) struct PackIO {
 impl PackIO {
     /// 创建新的 PackIO 实例。
     /// Create a new PackIO instance.
-    pub(crate) fn new(file: File) -> Self {
+    pub(crate) fn new(file: Box<dyn FileIo>) -> Self {
         let mut empty_data_list = DataPosList::new(Vec::new());
         empty_data_list.set_data_block(Some(ManifestDataBlock::default()));
         Self {
@@ -91,7 +93,7 @@ impl PackIO {
 
     /// 创建新的 PackIO 实例并指定文件长度。
     /// Create a new PackIO instance with a specified file length.
-    pub(crate) fn new2(file: File, len: u64) -> Self {
+    pub(crate) fn new2(file: Box<dyn FileIo>, len: u64) -> Self {
         let mut empty_data_list = DataPosList::new(Vec::new());
         empty_data_list.set_data_block(Some(ManifestDataBlock::default()));
         Self {
@@ -494,8 +496,8 @@ impl PackIO /*核心*/ {
 impl PackIO /*读*/ {
     /// 从指定文件位置读取清单数据块。
     /// Read a manifest data block from the given file position.
-    pub(crate) fn manifest_data_block_read(&self, file_pos: u64) -> Result<ManifestDataBlock> {
-        let mut file = &self.file;
+    pub(crate) fn manifest_data_block_read(&mut self, file_pos: u64) -> Result<ManifestDataBlock> {
+        let file = &mut *self.file;
         let block_data_buf = vec![0; DATA_BLOCK_LEN];
         let mut block_data_buf = block_data_buf;
         //设置文件指针
@@ -539,8 +541,8 @@ impl PackIO /*读*/ {
     /// 设置文件读取指针位置。
     /// Set the file read pointer position.
     //设置文件地址
-    pub(crate) fn set_pos_read(&self, pos: u64) -> Result<()> {
-        let mut file = &self.file;
+    pub(crate) fn set_pos_read(&mut self, pos: u64) -> Result<()> {
+        let file = &mut *self.file;
         file.seek(SeekFrom::Start(pos))?;
         Ok(())
     }

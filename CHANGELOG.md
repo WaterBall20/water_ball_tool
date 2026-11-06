@@ -4,14 +4,139 @@
 
 ## [Unreleased] — 2026-11-01
 
+### WBFP TUI
+
+- `wbfp p`, `wbfp u` and `wbfp h` now run in a ratatui TUI when stdout is a terminal. The file list is read-only, shows
+  per-file status and a global task card, and the right pane is reserved for a future content preview.
+  `--no-tui` keeps the classic indicatif output; a non-TTY stdout falls back automatically.
+- Added `wbfp browse <pack>` (alias `b`) for read-only browsing without starting a job. Directories load lazily through
+  `ManagerSync`; pack mode browses the local source tree.
+- The TUI uses its own job thread and `JobEvent` channel; the UI opens a second read-only `ManagerSync` handle so manifest
+  reads do not contend with pack/unpack/verify file handles. `q` during a job quits after it finishes.
+- `wbfp.rs` was split into `classic.rs` (unchanged progress-bar path), `common.rs` (shared path/copy/extract),
+  `events.rs`, `ops.rs` and `tui/` (state, rendering, lazy directory loading).
+- The log and help popups now toggle closed with the same key that opened them (`d`/F12, `?`); `Esc` closes both.
+- Directory rows aggregate descendant states, so a parent stays `⟳` until every child is finished and turns red/yellow if a
+  child failed/was skipped. Hash verify's task card no longer shows an output field.
+- Windows TUI input is keyboard-only: crossterm splits SGR mouse reports into literal keys and floods the event loop.
+  Startup now clears stale mouse reporting; non-Windows platforms keep mouse select/double-click/wheel. TUI diagnostics
+  (route, keys, directory loads, job start/finish, per-GiB progress) are written to the debug log under `temp/logs/wbfp/`.
+- Pack no longer emits directory events, so an empty source directory no longer shows a permanent in-progress icon.
+- The preview pane now shows a live task list during jobs: active files first with per-file progress, completed files
+  below. Worker threads enqueue rate-limited progress on a non-blocking channel; the UI keeps bounded queues and never
+  reads files for the list, so task rendering cannot slow pack/unpack/verify I/O.
+- File-list and task-list columns use fixed display widths (`unicode-width`), a fixed progress bar/percent/size column,
+  and a fixed-height job summary, so fast small files no longer make the layout jump. Sizes now use separate right-aligned
+  number and fixed-width unit columns, so the one-cell `B` unit cannot shift the number.
+
+### Music Player TUI
+
+- `mp` now runs a real TUI: the new `Runtime` owns the player and playlist, a background `mp-scan` thread turns the
+  positional paths into tracks, and `tui::run` renders every 50 ms. Keys: `n` next, `←`/`→` seek 5 s per tap
+  (hold previews, release commits), space play/pause, `p` pause,
+  `P` play, `+`/`-` volume, `q`/`Esc`/`Ctrl+C` quit. Terminal setup/restore use `ratatui::try_init`/`try_restore`.
+- The old `indicatif` UI thread, stdin command loop and `--ui-preview` flag are removed. Auto advance runs on the decode
+  thread on `DecoderEventType::Eof` and switches immediately with `set_decoder_path_no_clear`: the old tail keeps
+  playing from the buffers and the next track is queued behind it, so switching adds no delay and cuts nothing. Manual
+  next clears the buffers. Track-open errors are classified as skip / retry / pause with a 5-failure cap.
+- `Track` gained `album` and `audio_info` (filled by the scanner from lofty), and `PlayList::current_index()` exposes the
+  current index for the playlist highlight.
+- `-a/--autoplay` starts playback once the first track is found. Without it the first track is only loaded and stays
+  paused; pressing play also loads the first track when none is loaded yet.
+- Startup initialization is mode-aware: sequential modes load the first track immediately; `shuffle` and
+  `periodic-shuffle` wait for 5 tracks and fall back to initializing with the available tracks when the scan ends early.
+  Manual `n`/play before that point cancels the automatic initialization.
+- `d`/F12 toggles a debug popup with the pre-effect/audio buffer lengths, the path and format currently being decoded,
+  playlist state, `lock_fail`/`underrun` counters and the `TimeMetrics` windows for decode, effect and callback stages.
+  `DecoderRuntime::decoder_path()` was added to expose the decoding path.
+- The playlist panel now renders only the visible rows and supports scrolling: `↑`/`↓` scroll one line,
+  `PageUp`/`PageDown` one page, `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left click on a
+  row plays that track. The viewport follows the current track on track changes. `PlayList::jump_to` and
+  `Runtime::play_at` were added for index jumps, and the TUI enables mouse capture while it runs.
+- Fixed mouse movement quitting the TUI on Windows/ConPTY. The terminal can deliver mouse reports as bare X10 payload
+  bytes, so a coordinate byte such as `q` was handled as the quit key. Windows now enables
+  `ENABLE_VIRTUAL_TERMINAL_INPUT`, requests SGR mouse reporting and parses the VT stream with `vtparse` (`VtInput`),
+  mapping wheel and left-click events to the playlist; motion/middle/right/release are ignored. If VT input cannot be
+  enabled, the mouse is disabled and the keyboard remains usable.
+- TUI logging: `channel_writer` installs the tracing subscriber and routes formatted lines into the panel through a
+  bounded channel (capacity 1024, `try_send` drops when full); debug builds show `debug` in the panel and also write a
+  `debug` log file under the project temp directory (`temp/logs/<module>/`), so a crashed TUI still leaves evidence;
+  release builds show `info` there and keep writing the `debug` log file to the user data directory. Panics and TUI
+  loop errors are logged to that file, and key/mouse events are logged at `debug`. `main.rs` exposes its file writer
+  and log filter to that layer, and one `write` call now splits every complete line instead of losing everything after
+  the first newline.
+- Log levels are colorized in the panel: the timestamp is dimmed and the level token is TRACE dark gray, DEBUG blue,
+  INFO green, WARN yellow, ERROR red. The level is parsed from the first 40 bytes of the formatted line, so a message
+  that happens to contain a level word cannot change the color.
+- The `mp` TUI gained `:` command mode: the footer becomes an input line (`Enter` runs, `Esc` cancels, `Backspace`
+  edits). Commands match by unique prefix: `quit`, `play`, `pause`, `toggle`, `next`, `prev`, `seek <mm:ss|+N|-N>`,
+  `vol <0-100|+N|-N>`, `mode <name>`, `goto <n>`, `debug` and `help`/`?`; unknown or ambiguous names are reported in
+  the footer. `help` opens a popup listing the command table. `Runtime::prev_track`, `Runtime::seek` and
+  `Runtime::set_loop_mode` were added.
+- Implemented `Player::try_seek` (now `&self`): clear the output ring, run the decoder's accurate seek, invalidate the
+  EOF state and rebase the progress counter. `DecoderRuntime::try_seek` clears the pre-effect input ring and sends
+  `AudioData::Seek` instead of a full effect reset; the resampler and cross-bridge effects drop their buffered state on
+  `Seek`. The reported position after a seek is approximate by one audio block.
+- `←`/`→` seek within the current track: 5 s per tap; while held, repeats only move the progress preview (yellow gauge,
+  `跳转预览`) and the final target is committed 150 ms after the last repeat. `n` still advances the track.
+  `Runtime::seek` ignores requests during a track switch or while the EOF tail/crossfade is draining, because `pos`
+  still counts the previous track in that window.
+- `CrossBridge` fills its delay line asymmetrically: while it is below the configured 1 s it emits at most half of each
+  input block (retaining at least one sample), so playback starts with low latency and the line fills over time; once
+  full it returns to 1:1. A seek clears the line, so playback resumes immediately and the latency ramps back instead of
+  a silent refill. Crossfade gains stay precomputed for the full duration, but a short tail (a track ending while the
+  line is filling) scales the table index to the actual tail, so A fades to 0 and B rises to 1 instead of the curve
+  being truncated into a volume step.
+- Fixed Windows VT input: crossterm 0.29 drops control characters (ESC, CR) from synthesized VT input, so `Enter` did
+  nothing, arrows arrived as `[C` text and mouse reports leaked `[<...M` into the command line. Under VT input the TUI
+  now reads raw stdin bytes on a dedicated reader thread and feeds `vtparse` directly; a lone ESC becomes the Esc key
+  after a 50 ms timeout, and both CR and LF map to Enter.
+- Fixed seeking before the first playback: `Player::try_seek` queued a `PlayCmd::Seek` on the capacity-1 transport
+  channel. With the stream paused nothing consumed it, so the next `Play` failed with `Full` and playback never
+  started. The seek no longer sends that command; the decoder seek and effect reset already run on the command thread.
+- Mouse: the footer hint labels are now clickable buttons (quit, next, seek back/forward, play/pause, one-line scroll,
+  volume, debug and command mode) in addition to the existing click-a-row-to-play behavior. `PlayList::jump_to` also
+  removes the requested track from the periodic-shuffle cycle even when it is already the current track; a track that
+  is not queued leaves the cycle untouched.
+
+### Ring Buffers
+
+- `split_ring_buffer` gained `resize` for `T: Copy` writers (`LockedWriter` / `UnlockedWriter`). Growing past the
+  physical allocation reallocates A/B, blocks writers, copies the live range at the same logical positions (readers keep
+  delivering data during the copy and only see "no data" in the tiny swap window), swaps the buffers and retires the old
+  one until no operation is in flight; shrink or grow within the allocation only updates the logical capacity.
+  `capacity()` exposes the current size, and `Kind::Resizing` reports a write rejected during a grow.
+
+### File Finder Queue
+
+- `file_finder` now uses a `ConcurrentRing<DirEntry>` for the directory work queue instead of `Mutex<VecDeque>` +
+  `Condvar` + a running-thread counter. Workers block in `pop_wait()` and exit on `WritersClosed` / `AllWaiting`, so the
+  manual increment/decrement/notify bookkeeping is gone. `FileFinder::new()` (plus `Default`) replaces the unit-struct
+  literal, and the public helpers gained `#[must_use]`.
+
+### Pack I/O
+
+- `PackIO` now owns a `Box<dyn FileIo>` instead of a concrete `File`. The new `FileIo` trait (`pack_io/file.rs`,
+  implemented for `File`: read/write/seek + `set_len`/`sync_data`/`lock`/`unlock`) lets the pack layer run on a non-`File`
+  backend. Operations that move the file cursor (`manifest_data_block_read`, `set_pos_read`, and the manager's
+  `load_pack_struct` / `load_pack_file_metadata`) take `&mut self`.
+- `PackVirtualFile` moved from `pack_io/file.rs` to the new `pack_io/pack_file.rs` (`pack_io::file` now holds `FileIo`).
+  `WBFilesPackManifest::file_mut()` returns `Option<&mut PackIO>`, and `file_gc_add` no longer returns a `Result`.
+
+### Build
+
+- The repository pins **nightly** in `rust-toolchain.toml` (`channel = "nightly"`), so every `cargo` command here uses
+  nightly. `build_native.ps1` runs the native release build with `-Zbuild-std="std,panic_abort"` on top of
+  `.cargo/native-config.toml`.
+
 ### Module Layout
 
 - The music player engine moved into the library crate: `player`, `decoder_runtime`, `effect` (+ `runtime`/`resampler`/
   `cross_bridge`/`fade`), `play_list`, `event_dispatch` and `tools` now live under
   `water_ball_tool_lib/src/music_play/` and are exported as `water_ball_tool_lib::music_play`.
-- The binary crate keeps only the terminal front-end: `src/command/music_play.rs` (clap arguments, stdin command loop,
-  playlist collection) and `src/command/music_play/runtime.rs` (`indicatif` UI refresh thread + orchestration), plus
-  the WIP `tui/`.
+- The binary crate keeps only the terminal front-end: `src/command/music_play.rs` (clap arguments + TUI wiring),
+  `src/command/music_play/runtime.rs` (playback runtime), `src/command/music_play/scanner.rs` (background tag scan) and
+  `src/command/music_play/tui/`.
 - `LoopMode` moved to the library with a `FromStr` implementation. The binary can no longer derive `clap::ValueEnum` for
   it (orphan rule), so `-m/--mode` is parsed via `value_parser`; accepted values are unchanged.
 - The `debug-no-audio` feature is now defined on `water_ball_tool_lib` (where the cpal callback lives) and forwarded by
@@ -19,6 +144,23 @@
 - `cpal`, `symphonia`, `rubato` and `crossbeam-channel` moved from the binary package to the library; the binary keeps
   only `lofty` for tag reading.
 - `cargo test --workspace` is now required to run the library test suite (a plain `cargo test` only covers the binary).
+
+### Logging & Debugging
+
+- Terminal log output is now asynchronous: `TerminalWriter` enqueues whole lines into a bounded channel (capacity 1024)
+  drained by the `log-writer` thread, which prints them through `MultiProgress::suspend()`. Callers only `try_send`, so
+  a paused debugger (or a stalled console) drops terminal lines instead of parking a worker thread inside logging while
+  it holds the progress-bar write lock. File logging stays synchronous.
+- Third-party `log` records are capped at `warn` (`log_filter`): `tracing-subscriber`'s default `tracing-log` bridge fed
+  lofty's per-block `log::debug!` lines into that writer, and every line cleared and redrew all progress bars.
+- `mp`: `add_track` no longer reads lofty tags, nor calls `next()`, while holding the `play_list` mutex — the first-track
+  `next()` re-locked that same mutex on the same thread (self-deadlock).
+
+### Track Collection
+
+- `mp` only picks up files whose extension `lofty` recognizes (`FileType::from_path`) when walking a directory, so a
+  library folder no longer pays a tag-read attempt per unrelated file. An explicitly passed file bypasses the filter and
+  is always tried.
 
 ### Playlist Fixes
 
@@ -43,6 +185,11 @@
 - A middle insertion shifts `current_index`, every history entry and every cycle entry at or after the insertion point;
   appending at the end touches none of them. In `PeriodicShuffle` the new tracks are queued for the current cycle when
   one is in progress.
+
+### Documentation
+
+- `AGENTS.md` now holds conventions only; the per-module architecture notes moved to `ARCHITECTURE.md`, which gained a
+  "Ring Buffer Modules" chapter (§12) covering `concurrent_ring` and `split_ring_buffer`.
 
 ## [Unreleased] — 2026-10-31 (Round 2)
 

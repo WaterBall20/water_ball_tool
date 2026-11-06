@@ -2,7 +2,7 @@
 
 > **语言**: [English](../ARCHITECTURE.md) | 简体中文
 
-> 最后更新：2026-10-31
+> 最后更新：2026-11-06
 
 ---
 
@@ -19,9 +19,10 @@
 9. [进度条系统](#9-进度条系统)
 10. [日志系统](#10-日志系统)
 11. [工具模块](#11-工具模块)
-12. [开发中模块](#12-开发中模块)
-13. [测试架构](#13-测试架构)
-14. [设计决策与权衡](#14-设计决策与权衡)
+12. [环形缓冲区模块](#12-环形缓冲区模块)
+13. [开发中模块](#13-开发中模块)
+14. [测试架构](#14-测试架构)
+15. [设计决策与权衡](#15-设计决策与权衡)
 
 ---
 
@@ -30,8 +31,8 @@
 水球工具（WaterBall Tool）是一个多用途 CLI 工具箱，使用 **Rust（edition 2024）** 编写。目前提供三个核心功能：
 
 - **`ff`**：多线程并行文件搜索器，输出 JSON 文件清单，带符号链接循环检测与可选的逐文件哈希
-- **`wbfp`**：自定义二进制归档格式（水球包文件 WaterBall Files Pack）：打包、解包、BLAKE3 哈希校验
-- **`mp`**：终端音乐播放器：音频播放、播放列表模式、stdin 交互控制，以及实时安全的音频线程架构（`tui/` 界面仍在开发中）
+- **`wbfp`**：自定义二进制归档格式（水球包文件 WaterBall Files Pack）：打包、解包、BLAKE3 哈希校验与只读 TUI 浏览器
+- **`mp`**：终端音乐播放器：音频播放、播放列表模式、交互式 ratatui TUI，以及实时安全的音频线程架构
 
 仓库是 cargo **workspace**：`water_ball_tool` 二进制 crate（CLI 入口，`src/`）依赖 `water_ball_tool_lib` 库 crate
 （`water_ball_tool_lib/src/`），后者暴露可复用模块。
@@ -55,7 +56,7 @@
 | 随机        | `rand 0.10`                                               | 随机测试数据（长时间测试：随机目录树搜索压力测试、大夹具） |
 | 测试工具    | `pretty_assertions 1.4`                                   | 可 diff 的断言输出                                         |
 | 音频        | `cpal 0.18` / `symphonia 0.6` / `rubato 5` / `lofty 0.25` | 音频输出、解码、重采样、标签读取                           |
-| 终端 UI     | `ratatui 0.30`                                            | 开发中的 `mp` TUI                                          |
+| 终端 UI     | `ratatui 0.30` / `vtparse 0.7`                            | 交互式 `mp` + `wbfp` TUI + Windows VT 输入                |
 | 线程通道    | `crossbeam-channel 0.5`                                   | 实时安全的有界通道（音频回调）                             |
 
 ---
@@ -67,11 +68,18 @@ water_ball_tool（二进制 crate，根包）
   ├── src/main.rs          ← CLI 入口；声明 `mod command;`
   ├── src/command.rs       ← CLI 路由 + 进度条辅助函数
   │   ├── command/ff.rs    ← ff 子命令（搜索 + 可选哈希）
-  │   ├── command/wbfp.rs  ← wbfp 子命令
-  │   ├── command/music_play.rs  ← clap 参数 + stdin 循环 + 播放列表收集
+  │   ├── command/wbfp.rs  ← wbfp 模块根（参数 + TUI/经典路径路由）
+  │   │   └── command/wbfp/
+  │   │       ├── classic.rs   ← 经典 indicatif 路径
+  │   │       ├── common.rs    ← 共享路径/复制/解包辅助
+  │   │       ├── events.rs    ← TUI 任务事件 + 行状态
+  │   │       ├── ops.rs       ← TUI 打包/解包/校验工作线程
+  │   │       └── tui/         ← TUI（tui.rs、app.rs、ui.rs、browse.rs）
+  │   ├── command/music_play.rs  ← clap 参数 + TUI 接线
   │   │   └── command/music_play/
-  │   │       ├── runtime.rs         ← 播放编排 + indicatif UI 线程
-  │   │       └── tui/               ← 终端 UI（开发中）
+  │   │       ├── runtime.rs         ← 播放运行时（事件 sink、快照）
+  │   │       ├── scanner.rs         ← 后台标签扫描（lofty → ScanMessage）
+  │   │       └── tui/               ← 终端 UI（tui.rs、app.rs、ui.rs、channel_writer.rs）
   │   └── command/test.rs  ← 集成测试
   └── 依赖：
       water_ball_tool_lib（库 crate，workspace 成员）
@@ -93,7 +101,8 @@ water_ball_tool（二进制 crate，根包）
         │   ├── manager_sync.rs         ← 公共 API 层（Arc<Mutex<>>）
         │   │   └── test.rs             ← 公共 API 测试
         │   ├── pack_io.rs              ← 底层文件 I/O + 空间分配 + GC 合并
-        │   │   ├── file.rs             ← PackVirtualFile（带访问模式强制）
+        │   │   ├── file.rs             ← FileIo 特征（包后端抽象）
+        │   │   ├── pack_file.rs        ← PackVirtualFile（带访问模式强制）
         │   │   ├── file_handle.rs      ← PackFileHandle（493 行，核心文件逻辑）
         │   │   └── file_hash.rs        ← PackFileHash（BLAKE3 状态机）
         │   ├── net_server.rs           ← 网络服务器（开发中，仅 debug 构建）
@@ -166,7 +175,8 @@ flowchart TD
 ```
 1. Cli::parse()        — clap derive 解析 CLI 参数
 2. command::cli(cli)   — 路由到子命令处理函数
-3. 子命令处理函数      — 调用 multi_progress_init(module) 创建 MultiProgress 并安装全局 tracing subscriber
+3. 子命令处理函数      — 经典路径调用 multi_progress_init(module) 创建 MultiProgress 并安装全局 tracing subscriber；
+                         wbfp/mp TUI 改为安装 TUI channel writer
 4. Err 包装            — 打印错误并以 -1 退出
 ```
 
@@ -202,13 +212,13 @@ Cli {
 
 ### 6.1 多线程工作队列模型
 
-架构： **共享工作队列 + 条件变量**模式。
+架构：**共享工作队列 + 阻塞弹出**模式。队列是 `ConcurrentRing<DirEntry>`（见 §12.1），没有独立的条件变量与运行线程计数。
 
 ```mermaid
 flowchart TD
-    queue["DirQueue (Mutex&lt;VecDeque&lt;DirEntry&gt;&gt;)"] -->|pop_front / push_back| w1["Worker 1"]
-    queue -->|pop_front / push_back| w2["Worker 2"]
-    queue -->|pop_front / push_back| wn["Worker N ... (max_threads)"]
+    queue["DirQueue (ConcurrentRing&lt;DirEntry&gt;)"] -->|push / pop_wait| w1["Worker 1"]
+    queue -->|push / pop_wait| w2["Worker 2"]
+    queue -->|push / pop_wait| wn["Worker N ... (max_threads)"]
     w1 --> results["Results (Mutex&lt;HashMap&lt;PathBuf, FileInfo&gt;&gt;)"]
     w2 --> results
     wn --> results
@@ -216,12 +226,10 @@ flowchart TD
 
 **工作线程生命周期**
 
-1. 生成时：`running_count` 递增
-2. 循环：从队列 `pop_front()`
-3. 队列为空：`running_count` 递减，检查是否为零
-    - `running_count == 0` → `condvar.notify_all()`，线程退出
-    - 否则 → `condvar.wait()`，唤醒后重新检查
-4. 唤醒：`running_count` 递增，处理弹出的任务
+1. 生成时：进入循环
+2. 循环：从队列 `pop_wait()`（队列为空时阻塞）
+3. 写入一个目录会唤醒一个阻塞的工作线程
+4. 队列为空且没有其他线程能再写入 → `pop_wait()` 返回 `WritersClosed` / `AllWaiting` → 线程退出
 
 **进度限频**：每 50 个文件 / 10 个目录通过 `pb.send((delta_files, delta_dirs))` 触发一次。
 
@@ -339,9 +347,15 @@ pub struct Dir {
 
 `mp` 是终端音乐播放器，命令流程：
 
-1. 从位置参数 `files...` 收集曲目（目录会递归遍历）；标签与时长由 `lofty` 读取，无法读取元数据的曲目只记日志并跳过。
-2. 按所选循环模式构建 `PlayList` 并创建 `Runtime`。
-3. 开始播放后从 stdin 读取命令直到 `exit`：`next`/`n`、`Play`/`P`、`pause`/`p`、`exit`。
+1. 校验音量参数并安装 TUI 日志 subscriber（日志进入面板，见 §7.7）。
+2. 创建 `Runtime`（播放器 + 播放列表 + 事件 sink）并启动 `mp-scan` 线程：遍历 `files...`、用 `lofty` 读取标签
+   （目录只接受 `lofty` 能识别的扩展名，显式传入的文件总是尝试），把
+   `ScanMessage::{Track, Progress, Done}` 发送给 TUI 循环。
+3. 初始化终端并运行 `tui::run`：取日志/扫描消息 → 应用运行时快照 → 每 50ms 渲染一次。初始化只加载第一首并保持暂停：
+   顺序模式在首曲到达时立即初始化；`shuffle`/`periodic-shuffle` 先等 5 首，若扫描结束时不足 5 首则用已扫描到的曲目
+   兜底初始化。只有带 `-a/--autoplay`（或用户按下播放）才真正开始播放。按键：`n` 下一曲、`←`/`→` 跳转进度
+   （点按 5 秒，长按期间预览、松开后提交）、空格 播放/暂停、`p` 暂停、`P` 播放、`+`/`-` 音量、`:` 命令模式、
+   `q`/`Esc`/`Ctrl+C` 退出。
 
 CLI 参数（`MusicPlayArgs`）：
 
@@ -350,28 +364,30 @@ CLI 参数（`MusicPlayArgs`）：
 | `files...`           | —                 | 要播放的音频文件/目录                                                        |
 | `-v, --volume <f32>` | `0.75`            | 初始音量，0.0–1.0（超出该范围会在开始播放前返回参数错误）                    |
 | `--verbose`          | 关                | 详细输出（仅长选项）                                                         |
+| `-a, --autoplay`     | 关                | 找到第一首后自动播放；不带该参数时第一首只加载并保持暂停                     |
 | `-m, --mode <MODE>`  | `sequential-loop` | `sequential-loop`、`sequential`、`repeat-one`、`shuffle`、`periodic-shuffle` |
 
 ### 7.2 模块
 
-播放引擎位于库 crate，不依赖终端 UI；只有 `runtime.rs`、clap 处理函数和 `tui/` 留在二进制包。
+播放引擎位于库 crate，不依赖终端 UI；只有 `runtime.rs`、`scanner.rs`、clap 处理函数和 `tui/` 留在二进制包。
 
-| 模块（所在 crate）           | 职责                                                                                              |
-|------------------------------|---------------------------------------------------------------------------------------------------|
-| `music_play.rs`（库）        | 引擎模块根；持有 `LoopMode`（含 `FromStr`）并声明各子模块                                         |
-| `player.rs`（库）            | cpal 输出流、`PlayCmd` transport、音量/位置原子量、事件 sink、`Player::try_stop`                  |
-| `decoder_runtime.rs`（库）   | symphonia 解码线程：探测/seek 文件，把解码音频写入前效果器环形缓冲区；持有成对的 `DecoderSession` |
-| `effect.rs`（库）            | `PostEffect`/`PreEffect` trait、`AudioFormat`、`PlayCmd`、效果器链                                |
-| `effect/runtime.rs`（库）    | 带锁的前效果器运行时线程（事件 sink、停止/拒绝写入处理）                                          |
-| `watchdog.rs`（库）          | 崩溃看门狗：`ThreadExitGuard`（Drop → 经 `Condvar` 通知）+ `Player` 持有的单一看门狗线程            |
-| `effect/resampler.rs`（库）  | rubato FFT 重采样到输出设备采样率                                                                 |
-| `effect/cross_bridge.rs`（库） | 曲目之间的交叉淡入淡出桥接                                                                      |
-| `effect/fade.rs`（库）       | 淡入淡出与暂停/恢复 transport 处理                                                                |
-| `play_list.rs`（库）         | `Track` 列表、循环模式、洗牌队列、下一曲选择、上一曲的播放轨迹、追加与插入                        |
-| `event_dispatch.rs`（库）    | 面向实时回调的事件/日志专用分发线程                                                               |
-| `tools.rs`（库）             | `TimeMetrics` / `DurationAccumulator` 性能统计                                                    |
-| `runtime.rs`（bin）          | 编排：`TrackEnded` 触发换曲、`indicatif` UI 刷新线程、事件消费、停止                              |
-| `tui/`（bin）                | 终端 UI（`app.rs`、`ui.rs`、`channel_writer.rs`）——**开发中，尚未接入命令**                       |
+| 模块（所在 crate）             | 职责                                                                                                                                                                                                |
+|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `music_play.rs`（库）          | 引擎模块根；持有 `LoopMode`（含 `FromStr`）并声明各子模块                                                                                                                                           |
+| `player.rs`（库）              | cpal 输出流、`PlayCmd` transport、音量/位置原子量、事件 sink、`Player::try_stop`                                                                                                                    |
+| `decoder_runtime.rs`（库）     | symphonia 解码线程：探测/seek 文件，把解码音频写入前效果器环形缓冲区；持有成对的 `DecoderSession`                                                                                                   |
+| `effect.rs`（库）              | `PostEffect`/`PreEffect` trait、`AudioFormat`、`PlayCmd`、效果器链                                                                                                                                  |
+| `effect/runtime.rs`（库）      | 带锁的前效果器运行时线程（事件 sink、停止/拒绝写入处理）                                                                                                                                            |
+| `watchdog.rs`（库）            | 崩溃看门狗：`ThreadExitGuard`（Drop → 经 `Condvar` 通知）+ `Player` 持有的单一看门狗线程                                                                                                            |
+| `effect/resampler.rs`（库）    | rubato FFT 重采样到输出设备采样率                                                                                                                                                                   |
+| `effect/cross_bridge.rs`（库） | 曲目之间的交叉淡入淡出桥接：延迟线未满时非对称输入/输出（低启动延迟），短尾时缩放整条增益曲线                                                                                                       |
+| `effect/fade.rs`（库）         | 淡入淡出与暂停/恢复 transport 处理                                                                                                                                                                  |
+| `play_list.rs`（库）           | `Track` 列表、循环模式、洗牌队列、下一曲选择、上一曲的播放轨迹、`jump_to`（周期洗牌中目标在待播队列时取出）、追加与插入                                                                             |
+| `event_dispatch.rs`（库）      | 面向实时回调的事件/日志专用分发线程                                                                                                                                                                 |
+| `tools.rs`（库）               | `TimeMetrics` / `DurationAccumulator` 性能统计                                                                                                                                                      |
+| `runtime.rs`（bin）            | TUI 播放运行时：播放器 + 共享播放列表，`add_track`/`play`/`pause`/`next_track`/`prev_track`/`seek`/`set_loop_mode`/`snapshot`/`stop`，解码 Eof 无缝自动换曲（`no_clear`）、启动错误策略，无 UI 线程 |
+| `scanner.rs`（bin）            | `mp-scan` 线程：经 lofty 读取标签/专辑/音频信息 → `ScanMessage::{Track, Progress, Done}`                                                                                                            |
+| `tui/`（bin）                  | 终端 UI（`tui.rs`、`app.rs`、`ui.rs`、`channel_writer.rs`）：50ms 循环、渲染、按键映射、日志通道                                                                                                    |
 
 ### 7.3 实时音频线程
 
@@ -413,18 +429,17 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
       会自动清除它，前端不可能忘记解毒，从而不会把后续播放命令变成提前换曲；
     - 单帧 `DecodeError` 可恢复：上报后跳过该帧继续；
     - 停止、切曲、寻道时的 `WriteRejected` 属于正常控制流，不是错误。
-- 二进制前端通过 `DecoderEventChannelSink` 消费解码错误事件（在通道线程上，绝不在解码线程内联）：暂停播放并唤醒 UI 线程。
-  毒化期间 `mp` 进度条前缀显示 `异常暂停中`，并在歌曲信息与时间统计块之间显示红色 `Error` 行；`Play`/`P` 在毒化时先换曲，
-  随后必定恢复播放。
+- 二进制前端通过 `DecoderEventChannelSink` 消费解码错误事件（在通道线程上，绝不在解码线程内联）并暂停播放。下一次
+  `play` 会看到 `is_poisoned()`，先换曲再恢复播放；TUI 显示 `异常暂停中` 状态，并在正在播放块中显示红色 `Error` 行。
 - `DecoderRuntime::stop()` 记录 `send_skip` 失败，始终先 join 解码线程，然后返回第一个错误；`Player::try_stop`
   记录停止失败并继续其余关闭步骤。
 - 前效果器运行时线程遇到运行期错误不退出：环错误先用 `Skip` 不连续信号复位效果链，发出
   `PreEffectRuntimeEventErrorKind::Runtime` 事件，退避 10 ms 后继续消费（写端关闭时因此改为等待而不是空转）；输出写入
   硬错误同样只上报并丢弃该块。只有 `stop` 标志才结束循环。二进制通过 `PreEffectRuntimeEventChannelSink` 记录这些事件
   （仅信息性，播放可继续）。
-- 事件通道 sink 构造器（`PlayerEventChannelSink::new`、`DecoderEventChannelSink::new`、
-  `PreEffectRuntimeEventChannelSink::new`）返回 `std::io::Result`；DirectSink 的构造不会失败。`Player::new()` 与
-  `Runtime::create()` 会传播 sink 与线程 spawn 失败。
+- 事件通道 sink 构造器（`PlayerEventChannelSink::create`、`DecoderEventChannelSink::create`、
+  `PreEffectRuntimeEventChannelSink::create`）返回 `Result`；DirectSink 的构造不会失败。`Player::new()` 与
+  `Runtime::new()` 会传播 sink 与线程 spawn 失败。
 
 ### 7.5 退出（`Player::try_stop`）
 
@@ -450,11 +465,44 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
   `JoinHandle`）。前效果器线程则在重启前用 `Player::new` 注册的工厂整条重建效果链，因为旧效果器可能已被毒化。
 - `try_stop` 在停线程之前先关停看门狗、最后 join 它，因此正常退出不会触发重启。
 
+### 7.7 TUI
+
+**文件**：`src/command/music_play/tui/`（`tui.rs`、`app.rs`、`ui.rs`、`channel_writer.rs`）
+
+- `tui::run` 每 50ms 轮询一次，取日志与扫描消息、应用 `Runtime::snapshot()`，渲染正在播放 / 进度 / 播放列表 / 日志 /
+  快捷键
+- 播放列表视口：只渲染可见行；`↑`/`↓` 滚动一行、`PageUp`/`PageDown` 滚动一页、`Home`/`End` 跳到首尾，鼠标滚轮滚动三行，
+  左键点击某行会切换并播放该曲（`Runtime::play_at` → `PlayList::jump_to`）。底栏快捷键文字本身也可点击，分别对应退出、
+  下一曲、快退/快进、播放/暂停、单行滚动、音量、Debug 与命令模式。换曲时视口跟随当前曲目，在此之前保留用户
+  手动滚动的位置。TUI 主循环期间启用鼠标捕获，恢复终端前释放。Windows 下 TUI 会打开
+  `ENABLE_VIRTUAL_TERMINAL_INPUT`、请求 SGR 鼠标上报，并用 `vtparse`（`VtInput`）解析 VT 字节流；这样可避开
+  crossterm 的控制台鼠标记录——部分 ConPTY 终端会把它拆成裸 X10 负载字节。VT 模式下键盘改为专用线程直接读取
+  stdin 字节，而不是走 `crossterm::event`：crossterm 0.29 会丢弃合成 VT 输入中的 ESC、CR 等控制字符；
+  单独的 ESC 等待短暂超时后才作为 Esc 键。若无法启用 VT 输入，则禁用鼠标，键盘输入仍然可用
+- 启动：顺序模式在首曲到达时初始化（加载第一首）；随机模式先等 5 首，扫描结束（`ScanMessage::Done`）时不足 5 首则用
+  已扫描到的曲目兜底初始化
+- 按键：`n` 下一曲、`←`/`→` 跳转进度（点按 5 秒；长按重复只移动预览，松开后提交）、空格 播放/暂停、`p` 暂停、
+  `P` 播放、`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` 滚动播放列表、
+  `+`/`-` 音量、`d`/F12 切换 Debug 弹窗、`:` 命令模式、`q`/`Esc`/`Ctrl+C` 退出。弹窗显示缓冲区长度、解码路径/格式、
+  播放列表状态、各段耗时（`TimeMetrics` 窗口）、`lock_fail` 与 `underrun`
+- 命令模式：`:` 把底栏变为输入行（`Enter` 执行、`Esc` 取消、`Backspace` 编辑）。命令按唯一前缀匹配：`quit`、`play`、
+  `pause`、`toggle`、`next`、`prev`、`seek <mm:ss|+N|-N>`、`vol <0-100|+N|-N>`、`mode <name>`、`goto <n>`、`debug` 与
+  `help`/`?`；未知或歧义命令在底栏报错。`help` 打开命令表弹窗，`prev` 沿 `PlayList::prev` 的历史回退，`goto` 复用
+  `Runtime::play_at`，`mode` 调用 `Runtime::set_loop_mode`。`:seek` 走 `Runtime::seek` → `Player::try_seek`：清空输出环、
+  用解码器准确 seek 并做 `Seek` 基本复位、作废旧 EOF 状态、重设进度基准；显示进度与真实位置可能相差一个音频块。
+  `Runtime::seek` 在换曲期间或 EOF 尾部/交叉渐变尚未播完时忽略请求，因为该窗口内 `pos` 仍包含上一曲的样本。
+- `channel_writer` 持有 tracing subscriber（有界 1024，满则 `try_send` 丢弃）；面板把时间戳压暗并按级别给级别词着色。
+  Debug 构建把 `debug` 记录写到项目的 `temp/logs/<module>/`（基于 `CARGO_MANIFEST_DIR`）；Release 构建面板保持
+  `info`，`debug` 日志文件写到用户数据目录
+- `mp` 串联 panic hook 并以 `error` 级别记录 `tui::run` 错误，崩溃后日志文件仍留有线索；按键与鼠标事件以 `debug`
+  级别记录
+
 ---
 
 ## 8. 水球包文件（`wbfp`）
 
-**文件**：`water_ball_tool_lib/src/wb_files_pack/*.rs`（共约 6,000+ 行）
+**文件**：`water_ball_tool_lib/src/wb_files_pack/*.rs`（共约 6,000+ 行），以及二进制 crate 前端
+`src/command/wbfp/*`（经典进度条路径、TUI、操作执行器）。
 
 ### 8.1 总体架构
 
@@ -462,7 +510,7 @@ WBFP 采用 **三层架构**：
 
 ```mermaid
 flowchart TD
-    L1["ManagerSync（公共 API 层）<br/>Arc&lt;Mutex&lt;WBFPManager&gt;&gt; + Arc&lt;Mutex&lt;PackIO&gt;&gt;<br/>线程安全；所有外部访问入口"] --> L2["WBFPManager（业务逻辑层）<br/>包生命周期、文件操作、目录树、锁、保存"] --> L3["PackIO（底层 I/O 层）<br/>文件读写、空间分配、GC 合并<br/>底层：File（Rust std）"] --> L4["ManifestDataBlock（原子块层）<br/>A/B 双块原子更新、BLAKE3 哈希、<br/>版本管理"]
+    L1["ManagerSync（公共 API 层）<br/>Arc&lt;Mutex&lt;WBFPManager&gt;&gt; + Arc&lt;Mutex&lt;PackIO&gt;&gt;<br/>线程安全；所有外部访问入口"] --> L2["WBFPManager（业务逻辑层）<br/>包生命周期、文件操作、目录树、锁、保存"] --> L3["PackIO（底层 I/O 层）<br/>文件读写、空间分配、GC 合并<br/>底层：Box&lt;dyn FileIo&gt;（默认 File）"] --> L4["ManifestDataBlock（原子块层）<br/>A/B 双块原子更新、BLAKE3 哈希、<br/>版本管理"]
 ```
 
 ### 8.2 二进制格式
@@ -764,7 +812,7 @@ pub struct ManagerSync {
 
 ### 8.9 虚拟文件 I/O：PackVirtualFile + PackFileHandle
 
-**PackVirtualFile**（`pack_io/file.rs`，210+ 行），由 `PackFileWR` 更名：
+**PackVirtualFile**（`pack_io/pack_file.rs`，210+ 行），由 `PackFileWR` 更名：
 
 - 实现 `Read + Write + Seek` trait，带 **访问模式强制**
 - 持有 `Arc<Mutex<PackFileHandle>>`
@@ -845,7 +893,7 @@ pub enum PackFileError {
 
 ```mermaid
 flowchart TD
-    P["wbfp_p (src/command/wbfp.rs)"] --> D["确定输出路径（.wbfp 扩展名）"]
+    P["wbfp_p (src/command/wbfp/classic.rs)"] --> D["确定输出路径（.wbfp 扩展名）"]
     D --> D1["已提供 out_pack_path → 若是目录则拼接输入文件名，否则原样使用"]
     D --> D2["未提供 → CWD + 输入文件名"]
     P --> S["separate_manifest = !args.no_separation<br/>write_optimization = !args.write_optimization（CLI 标志取反）"]
@@ -868,7 +916,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["wbfp_u (src/command/wbfp.rs)"] --> O["ManagerSync::open() 只读打开已有包（Read）"]
+    U["wbfp_u (src/command/wbfp/classic.rs)"] --> O["ManagerSync::open() 只读打开已有包（Read）"]
     O --> OD["智能推导输出目录"]
     OD --> OD1["未指定 → 去掉文件名 .wbfp 后缀，在 CWD 中使用"]
     O --> TC["线程数：-t 标志或 CPU 数"]
@@ -888,7 +936,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    H["wbfp_h (src/command/wbfp.rs)"] --> O["ManagerSync::open() 只读打开已有包（Read）"]
+    H["wbfp_h (src/command/wbfp/classic.rs)"] --> O["ManagerSync::open() 只读打开已有包（Read）"]
     O --> TC["线程数：-t 标志或 CPU 数"]
     TC --> DIS["多线程边发现边校验（同解包模式，空包提前退出）"]
     DIS --> Q["共享工作队列 (Mutex&lt;VecDeque&lt;PathBuf&gt;&gt;, Condvar)<br/>终止控制：AtomicUsize pending + AtomicBool all_done<br/>每工作线程独立 determinate 进度条（校验期间按文件）"]
@@ -917,10 +965,46 @@ flowchart TD
 
 ---
 
+### 8.16 TUI 模式
+
+**文件**：`src/command/wbfp/`（`classic.rs`、`common.rs`、`events.rs`、`ops.rs`、`tui.rs`、`tui/app.rs`、
+`tui/ui.rs`、`tui/browse.rs`）
+
+- **路由**：stdout/stdin 是终端且未传 `--no-tui` 时，`wbfp::run` 进入 TUI；否则调用经典 `indicatif` 路径。
+  `wbfp::commands` 始终走经典路径（测试使用）。`browse` 没有经典等价物，需要交互式终端。
+- **布局**：参考 yazi：标题栏/路径栏、文件列表、预留预览窗（当前显示元数据，后续接入内容预览）、状态行和按键栏。
+  宽屏左右分栏，窄屏单栏并用 `p` 切换。所有模式下文件列表只读，打包/解包/校验不提供编辑操作。
+- **导航**：`ManagerSync` 按目录懒加载（`get_struct_item_name_list` + `get_pack_struct_item`）；打包模式浏览本地源目录。
+  目录优先排序；`..` 作为导航行。键盘导航始终可用；非 Windows 平台还支持鼠标选择/双击/滚轮。Windows/ConPTY 下
+  crossterm 会把 SGR 鼠标报文拆成普通按键，因此 TUI 在 Windows 上仅启用键盘，并用
+  `MouseCapture::keyboard_only` 清除旧进程残留的鼠标上报。
+- **任务**：`ops::spawn` 在后台线程执行打包/解包/校验，通过 mpsc 发送
+  `JobEvent::{Dir, File, Start, Progress, Done, Total, Finished}`。`app::App::apply_event` 更新行状态与任务卡片。
+  解包/校验只打开一个只读 `ManagerSync`，UI 与任务共享其克隆：包的 `.lock` 会拒绝同进程第二次打开，因此无法保留
+  独立句柄。读取在管理器锁上串行，单次目录加载很短，UI 仍保持响应。
+- **状态聚合**：目录行按后代文件状态增量聚合（`failed` > `warning` > `running/pending` > `done`）；子项未完成时父目录
+  绝不会显示为完成。解包/校验的空目录收到显式 `Done` 事件；打包不复制目录，因此不发送目录事件，空源目录保持中性状态
+  而不是一直转圈。哈希校验不写磁盘，因此任务卡片没有输出字段。
+- **任务列表**：`JobEvent::{Start, Progress, Done}` 携带逐文件 `done/total`。`App` 维护两个有界队列：
+  `active_tasks`（当前文件，最新在前）与 `done_tasks`（已完成，显示在下方），预览窗先渲染活动行。工作线程只向无界通道
+  入队（进度按 4–10 MiB 限流）；UI 不会为了任务列表做文件 stat/读取，因此不会拖慢任务 IO。
+- **列对齐**：文件列表与任务行使用固定显示宽度列（`unicode-width`）、固定进度条与百分比宽度，以及固定高度的任务
+  摘要。大小拆成右对齐数字列与固定宽度单位列（`B`/`KiB`/...），单位 `B` 只有一格也不会让数字横移。小文件快速完成时，
+  列与任务区域不会跳动。
+- **进度**：TUI 在备用屏幕内绝不写 `indicatif`。`common::copy_file_into_pack` 与
+  `common::extract_pack_file_to_disk` 与经典路径共用；TUI 工作线程改为发送逐文件进度与限流的全局 `Total`。
+- **退出**：操作不可取消。任务运行中按 `q`/`Ctrl+C` 只设置 `quit_after_job`，收到 `Finished` 后才退出，避免打包写入中途
+  被丢弃。鼠标捕获由 Drop 守卫释放，终端在所有退出路径上恢复，与 `mp` 一致。
+- **日志**：TUI 安装 `music_play::tui::channel_writer::init_logging("wbfp")`，日志进入有界通道并由 `d` 弹层显示；
+  经典路径继续使用 `multi_progress_init`。
+
+---
+
 ## 9. 进度条系统
 
-**核心设计**：每个子命令通过 `multi_progress_init(module)` 创建自己的 `indicatif::MultiProgress`，该命令的所有子进度条都注册在
-其中。终端日志 writer 包装同一个 `MultiProgress`，因此 `suspend()` 不会让日志撕裂进度条。
+**核心设计**：每个非 TUI 子命令路径通过 `multi_progress_init(module)` 创建自己的 `indicatif::MultiProgress`，该命令的所有子进度条都注册在
+其中。终端日志 writer 包装同一个 `MultiProgress`，因此 `suspend()` 不会让日志撕裂进度条。`wbfp` TUI 不使用
+indicatif，而是通过 ratatui 与 `JobEvent` 绘制进度（见 §8.16）。
 
 **层级结构**
 
@@ -961,21 +1045,26 @@ flowchart TD
 flowchart TD
     MP["multi_progress_init(module) — 创建 MultiProgress"] --> INIT["init_global_logging(&mp, module) → Option&lt;PathBuf&gt;"]
     INIT --> DBG{"debug 构建?"}
-    DBG -->|是| TERM["TerminalWriter → MultiProgress::suspend() · 级别 debug"]
+    DBG -->|是| TERM["TerminalWriter → 有界通道(1024) → log-writer 线程 → MultiProgress::suspend() · 级别 debug"]
     DBG -->|否| SPLIT["终端层（级别 info）+ 文件层（级别 debug）"]
-    SPLIT --> TW["TerminalWriter → MultiProgress::suspend()"]
+    SPLIT --> TW["TerminalWriter → 有界通道 → log-writer 线程 → MultiProgress::suspend()"]
     SPLIT --> FW["FileWriter → &lt;data_local_dir&gt;/&lt;crate&gt;/logs/&lt;module&gt;/&lt;module&gt;-&lt;时间戳&gt;.log"]
     SPLIT -->|创建文件失败| TERM
 ```
 
 **关键设计**：
 
-- `TerminalWriter` 按行缓冲输出，并通过 `MultiProgress::suspend()` 打印，日志不会破坏进度条；Mutex 毒化用
-  `PoisonError::into_inner` 恢复。
+- `TerminalWriter` 按行缓冲输出，并把整行放进有界通道（容量 1024），由 `log-writer` 线程取出后通过 `MultiProgress::suspend()`
+  打印：日志不会破坏进度条，且没有任何调用线程会阻塞在终端 I/O 上——通道满则丢弃终端日志（通常发生在调试器暂停或控制台卡住时），
+  文件日志仍为同步、不丢行。
+- 所有 `EnvFilter` 由 `log_filter(level)` 构造为 `<level>,lofty=warn`：`tracing-subscriber` 默认开启的 `tracing-log` 桥接
+  会把 lofty 逐块的 `log` 记录送进这个 writer，而每条日志都会清屏并整块重绘所有进度条，因此第三方 debug 日志压到 `warn`。
 - `FileWriter`（仅 release 构建）使用方括号格式：`[UTC 时间戳] [级别] [线程名/ID] [文件:行] 消息`，并设置 `ansi(false)`。
-- Debug 构建（`#[cfg(debug_assertions)]`）仅输出到终端，级别 `debug`。Release 构建终端级别 `info`、日志文件级别 `debug`。
-- 日志文件路径：`<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`（模块名会做
-  净化处理）。若文件无法创建，回退为仅终端的 `debug` 级别输出。
+- Debug 构建（`#[cfg(debug_assertions)]`）终端级别 `debug`，同时把 `debug` 日志写到项目 temp 目录：
+  `<CARGO_MANIFEST_DIR>/temp/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`。Release 构建终端级别 `info`、
+  日志文件级别 `debug`。
+- Release 日志文件路径：`<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`
+  （模块名会做净化处理）。若日志文件无法创建，回退为仅终端的 `debug` 级别输出。
 
 
 ---
@@ -996,7 +1085,30 @@ flowchart TD
 
 ---
 
-## 12. 开发中模块
+## 12. 环形缓冲区模块
+
+**文件**：`water_ball_tool_lib/src/concurrent_ring.rs`、`water_ball_tool_lib/src/split_ring_buffer/`
+
+### 12.1 `concurrent_ring`
+
+`ConcurrentRing<T>` 是可并发初始化的环形缓冲区，用作搜索/解码线程与工作线程之间的生产者-消费者队列。阻塞操作会在
+对端消失时快速失败而不是永久阻塞：每个阻塞方法（`push_wait` / `write_wait` / `write_all` 与 `pop_wait` /
+`read_wait` / `read_exact`）登记调用句柄的方向，`Clone`/`Drop` 维护每方向句柄计数；某一方向的最后一个句柄 Drop
+后，对向阻塞调用得到 `ReadersClosed` / `WritersClosed`（对齐 `split_ring_buffer` 的「对端关闭 →
+`CannotWait`」）。没有独立的读/写端句柄类型，也没有手动 close/reopen；从未调用阻塞方法的句柄不会被判为已关闭。
+
+### 12.2 `split_ring_buffer`
+
+读写分离环形缓冲区，读端与写端可各自独立选择有锁或无锁（`locked_ring_buffer`、
+`unlocked_read_locked_write_ring_buffer` 等）；音频回调用的是无锁读端。`LockedWriter::resize` /
+`UnlockedWriter::resize`（仅 Copy）调整逻辑容量：超过物理分配时会分配新的 A/B，阻止新写端并等待在途写端退出（读端
+继续运行，只在极短的交换窗口内得到「暂无数据」），把存量数据复制到新 A 的同一逻辑位置，交换缓冲区，旧 A 延迟到
+没有在途操作后释放。缩小或在物理分配内调整只原子更新容量；超过新容量的存量数据保留，因此 `len()` 可能暂时大于
+`capacity()`，写端等待读端排空后继续。
+
+---
+
+## 13. 开发中模块
 
 ### gakumasu（游戏模拟器
 
@@ -1017,41 +1129,35 @@ flowchart TD
 - `WBFPServerClient` 骨架：单个客户端连接
 - 尚无网络监听逻辑
 
-### tui（音乐播放器终端 UI）
-
-**文件**：`src/command/music_play/tui/`（`app.rs`、`ui.rs`、`channel_writer.rs`）
-
-- 开发中， **尚未接入** `mp` 命令（当前命令使用 stdin 命令 + 进度条）
-- `App` 最多缓存 1,000 行日志用于显示；`ui.rs` / `channel_writer.rs` 是渲染侧
-
 ---
 
-## 13. 测试架构
+## 14. 测试架构
 
 | 文件                                                    | 类型     | 覆盖范围                                                                                     |
 |---------------------------------------------------------|----------|----------------------------------------------------------------------------------------------|
 | `src/command/test.rs`                                   | 集成     | ff + wbfp 命令、跨平台符号链接循环检测、合成夹具长时间测试（经 `rand` 生成 1000 个随机文件） |
 | `water_ball_tool_lib/src/file_finder/test.rs`           | 单元     | 符号链接发现、祖先循环、多层、断链、混合场景、链传播、search_stream                          |
 | `water_ball_tool_lib/src/concurrent_ring/test.rs`       | 单元     | 环形缓冲区 push/pop、容量、等待/拒绝路径                                                     |
-| `water_ball_tool_lib/src/split_ring_buffer/test/`       | 单元     | basic/blocking/non-copy/drain-release/reject 场景                                            |
+| `water_ball_tool_lib/src/split_ring_buffer/test/`       | 单元     | basic/blocking/non-copy/drain-release/reject/resize 场景                                            |
 | `water_ball_tool_lib/src/wb_files_pack/test.rs`         | 模块     | 包文件创建、读写、校验                                                                       |
 | `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | 内部 API | Manager 内部逻辑                                                                             |
 | `.../wb_files_pack/manager_sync/test.rs`                | 公共 API | 删除 + 擦除（11 个测试）、文件创建/读写/重开、cow、哈希校验、线程访问                        |
 | `water_ball_tool_lib/src/music_play/effect/test.rs`     | 单元     | 效果器链 / 重采样 / 淡入淡出行为                                                             |
 | `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | 单元 | 事件分发线程、丢弃计数、停止语义                                                             |
+| `src/command/wbfp/ops.rs` / `tui/`（`cfg(test)`）        | 单元     | TUI 打包/校验/解包往返、包目录懒加载、导航/视口、布局渲染                                      |
 
 **测试规范**
 
 - 慢速测试标记为 `#[ignore = "longtime"]`，通过 `cargo test` 跳过（
 - 测试临时目录：`./temp/test/`（gitignore）
 - 子命令入口会自行调用 `multi_progress_init(module)`，因此调用 `ff::args` / `wbfp::commands` / `music_play::args` 的测试
-  无需额外设置即可初始化日志
+  无需额外设置即可初始化日志。`wbfp` TUI 改为安装 channel writer；测试使用始终走经典路径的 `wbfp::commands`。
 - `TestTool::remove_test_pack_files(path)` 用于包文件测试清理
 - 跨平台测试使用 `#[cfg(unix)]` / `#[cfg(windows)]` 做编译门控
 
 ---
 
-## 14. 设计决策与权衡
+## 15. 设计决策与权衡
 
 ### 文件搜索器（File Finder）
 

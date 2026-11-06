@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 //AI=== 唤醒握手需要 SeqCst 屏障（见 notify_*_after_*）。
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 //AI_END===
 use std::sync::{Condvar, Mutex, MutexGuard};
 
@@ -102,17 +102,51 @@ fn make_cells<T>(cap: usize) -> Cells<T> {
         .into_boxed_slice()
 }
 
+#[inline]
+fn cells_data_ptr<T>(cells: &Cells<T>) -> *mut UnsafeCell<MaybeUninit<T>> {
+    cells.as_ptr().cast_mut()
+}
+
 pub(crate) struct Inner<T> {
     a: UnsafeCell<Cells<T>>,
+    /// 当前 A 数据区的原子指针；读端只通过它访问槽位，扩容交换时不会有数据竞争。
+    ///
+    /// Atomic pointer to the current A data area; readers access slots through it, so swapping
+    /// the A/B boxes during a grow is race-free.
+    a_ptr: AtomicPtr<UnsafeCell<MaybeUninit<T>>>,
     b: UnsafeCell<Cells<T>>,
-    cap: usize,
+    /// 实际分配长度（A/B 的槽位数）；调整大小时才改变。
+    ///
+    /// Physical allocation length (slots in A/B); only changes when growing past the allocation.
+    alloc_cap: AtomicUsize,
+    /// 当前逻辑容量；缩小/分配内增长只改这个值。
+    ///
+    /// Current logical capacity; shrink and grow-within-allocation only change this.
+    cap: AtomicUsize,
     pub(crate) read: Endpoint,
     pub(crate) write: Endpoint,
     pub(crate) wait_mutex: Mutex<()>,
     clear_pending: AtomicBool,
     truncate_pending: AtomicBool,
+    /// 扩容期间阻止新写端进入；读端不受影响。
+    ///
+    /// Blocks new writers while growing past the allocation; readers are not affected.
+    resize_pending: AtomicBool,
+    /// 扩容时的 seqlock：奇数表示 A/B 与 `alloc_cap` 正在交换。
+    ///
+    /// Grow seqlock: odd while A/B and `alloc_cap` are being swapped.
+    resize_seq: AtomicUsize,
+    /// 旧缓冲区的延迟释放队列：等所有在途操作退出后再释放。
+    ///
+    /// Retired old buffers, freed once no operation is in flight.
+    retired: Mutex<Vec<Cells<T>>>,
+    has_retired: AtomicBool,
     b_dropping: AtomicBool,
     in_flight: AtomicUsize,
+    /// 在途写端数量；扩容只需等写端退出，读端可以继续。
+    ///
+    /// In-flight writers; a grow only waits for these, readers may continue.
+    writers_in_flight: AtomicUsize,
     clear_cvar: Condvar,
     mutation_mutex: Mutex<()>,
     /// `reject_pending_writers` 代际计数。阻塞写端入口记录当前值，若后续
@@ -138,17 +172,26 @@ unsafe impl<T: Send> Sync for Inner<T> {}
 impl<T> Inner<T> {
     pub(crate) fn with_capacity(cap: usize) -> Self {
         assert!(cap > 0, "ring buffer capacity must be > 0");
+        let a = make_cells(cap);
+        let a_ptr = AtomicPtr::new(cells_data_ptr(&a));
         Self {
-            a: UnsafeCell::new(make_cells(cap)),
+            a: UnsafeCell::new(a),
+            a_ptr,
             b: UnsafeCell::new(make_cells(cap)),
-            cap,
+            alloc_cap: AtomicUsize::new(cap),
+            cap: AtomicUsize::new(cap),
             read: Endpoint::new(),
             write: Endpoint::new(),
             wait_mutex: Mutex::new(()),
             clear_pending: AtomicBool::new(false),
             truncate_pending: AtomicBool::new(false),
+            resize_pending: AtomicBool::new(false),
+            resize_seq: AtomicUsize::new(0),
+            retired: Mutex::new(Vec::new()),
+            has_retired: AtomicBool::new(false),
             b_dropping: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
+            writers_in_flight: AtomicUsize::new(0),
             clear_cvar: Condvar::new(),
             mutation_mutex: Mutex::new(()),
             rejection_epoch: AtomicUsize::new(0),
@@ -159,7 +202,18 @@ impl<T> Inner<T> {
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let used = w.wrapping_sub(r);
-        if used > self.cap { 0 } else { used }
+        // 缩小容量时允许存量数据暂时超过逻辑容量（写端会等待读端排空）
+        // After a shrink the buffered data may temporarily exceed the logical capacity (writers stall until drained).
+        if used > self.alloc_cap.load(Ordering::Acquire) {
+            0
+        } else {
+            used
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.cap.load(Ordering::Acquire)
     }
 
     #[inline]
@@ -169,7 +223,7 @@ impl<T> Inner<T> {
 
     #[inline]
     pub(crate) fn is_full(&self) -> bool {
-        self.len() == self.cap
+        self.len() >= self.cap.load(Ordering::Acquire)
     }
 
     pub(crate) fn reader_should_wait(&self) -> bool {
@@ -181,6 +235,7 @@ impl<T> Inner<T> {
     pub(crate) fn writer_should_wait(&self) -> bool {
         self.clear_pending.load(Ordering::Acquire)
             || self.truncate_pending.load(Ordering::Acquire)
+            || self.resize_pending.load(Ordering::Acquire)
             || self.is_full()
     }
 
@@ -196,22 +251,73 @@ impl<T> Inner<T> {
         self.rejection_epoch.load(Ordering::Acquire) != my_epoch
     }
 
-    pub(crate) fn enter(&self) -> Option<InFlightGuard<'_, T>> {
+    pub(crate) fn enter_read(&self) -> Option<InFlightGuard<'_, T>> {
+        self.enter_inner(false)
+    }
+
+    pub(crate) fn enter_write(&self) -> Option<InFlightGuard<'_, T>> {
+        self.enter_inner(true)
+    }
+
+    fn enter_inner(&self, writer: bool) -> Option<InFlightGuard<'_, T>> {
         if self.clear_pending.load(Ordering::Acquire)
             || self.truncate_pending.load(Ordering::Acquire)
+            || (writer && self.resize_pending.load(Ordering::Acquire))
         {
             return None;
         }
         self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if writer {
+            self.writers_in_flight.fetch_add(1, Ordering::AcqRel);
+        }
         if self.clear_pending.load(Ordering::Acquire)
             || self.truncate_pending.load(Ordering::Acquire)
+            || (writer && self.resize_pending.load(Ordering::Acquire))
         {
+            if writer && self.writers_in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.wake_clear_waiter();
+            }
             if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
                 self.wake_clear_waiter();
             }
             return None;
         }
-        Some(InFlightGuard { inner: self })
+        Some(InFlightGuard {
+            inner: self,
+            writer,
+        })
+    }
+
+    /// 取得一致的（当前 A 槽位切片，物理分配长度）对；扩容交换窗口内返回 `None`。
+    ///
+    /// 调用方必须持有 `InFlightGuard`：旧 A 在扩容后进入延迟释放队列，直到所有
+    /// 在途操作退出，因此这里返回的切片引用在本次操作期间始终有效。
+    ///
+    /// Obtain a consistent (current A cells, physical allocation) pair; `None` during the
+    /// grow swap window. The caller must hold an `InFlightGuard`: a grow retires the old A until
+    /// no operation is in flight, so the returned slice stays valid for this operation.
+    fn read_buffer(&self) -> Option<(&[UnsafeCell<MaybeUninit<T>>], usize)> {
+        let seq = self.resize_seq.load(Ordering::Acquire);
+        if seq & 1 != 0 {
+            return None;
+        }
+        let alloc = self.alloc_cap.load(Ordering::Acquire);
+        let ptr = self.a_ptr.load(Ordering::Acquire);
+        // 读取数据后、复查序号前加 Acquire 屏障，防止弱内存序下把复查提前到 ptr/alloc 之前。
+        // Acquire fence between reading the pair and re-reading the sequence, so the re-check
+        // cannot be reordered before the pointer/capacity loads on weakly ordered CPUs.
+        fence(Ordering::Acquire);
+        if self.resize_seq.load(Ordering::Acquire) != seq {
+            return None;
+        }
+        let cells = unsafe {
+            // SAFETY: `ptr` 指向当前 A 的数据区，长度 `alloc`；旧分配由 `retired`
+            // 延迟释放，本次操作持有 InFlightGuard，因此切片在操作期间有效。
+            // `ptr` points to the current A data area with `alloc` slots; the old allocation is
+            // retired until no operation is in flight, and this call holds an InFlightGuard.
+            std::slice::from_raw_parts(ptr, alloc)
+        };
+        Some((cells, alloc))
     }
 
     fn wake_clear_waiter(&self) {
@@ -220,13 +326,16 @@ impl<T> Inner<T> {
     }
 
     pub(crate) fn pop_one(&self) -> Option<T> {
-        let _guard = self.enter()?;
+        let _guard = self.enter_read()?;
+        let Some((a, alloc)) = self.read_buffer() else {
+            return None;
+        };
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         if r == w {
             return None;
         }
-        let idx = r % self.cap;
+        let idx = r % alloc;
         let val = unsafe {
             // SAFETY: `enter` 已成功，保证 `clear_pending == false` 且
             // `truncate_pending == false`，`in_flight > 0`，因此 `clear` /
@@ -235,7 +344,7 @@ impl<T> Inner<T> {
             // `idx = r % cap` 且 `r != w`，槽位位于已初始化区间 `[r, w)`。
             // `ptr::read` move 出 `MaybeUninit<T>`，`assume_init` 取出 `T`。
             // 读取后槽位回到未初始化状态，`push_one` 可覆盖。
-            std::ptr::read((*self.a.get())[idx].get()).assume_init()
+            std::ptr::read(a[idx].get()).assume_init()
         };
         self.read.pos.store(r.wrapping_add(1), Ordering::Release);
         self.notify_writer_after_read();
@@ -243,19 +352,24 @@ impl<T> Inner<T> {
     }
 
     pub(crate) fn push_one(&self, value: T) -> Result<(), Kind<T>> {
-        let Some(_guard) = self.enter() else {
+        let Some(_guard) = self.enter_write() else {
+            if self.resize_pending.load(Ordering::Acquire) {
+                return Err(Kind::Resizing(value));
+            }
             if self.clear_pending.load(Ordering::Acquire) {
                 return Err(Kind::Clearing(value));
             }
             return Err(Kind::Truncating(value));
         };
+        let alloc = self.alloc_cap.load(Ordering::Acquire);
+        let cap = self.cap.load(Ordering::Acquire);
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let used = w.wrapping_sub(r);
-        if used >= self.cap {
+        if used >= cap {
             return Err(Kind::Full(value));
         }
-        let idx = w % self.cap;
+        let idx = w % alloc;
         unsafe {
             // SAFETY: `enter` 成功保证 `clear` / `truncate_back` /
             // `reject_pending_writers` 不修改 `a` 或 `write_pos`；同端由端锁
@@ -292,6 +406,8 @@ impl<T> Inner<T> {
             // reject。`ptr::swap(a, b)` 交换两块 Cells 实例（Box 指针）；
             // `swap(0)` 取回旧位置用于后续 drop 并归零新 a 的位置。
             std::ptr::swap(self.a.get(), self.b.get());
+            self.a_ptr
+                .store(cells_data_ptr(&*self.a.get()), Ordering::Release);
             let r = self.read.pos.swap(0, Ordering::AcqRel);
             let w = self.write.pos.swap(0, Ordering::AcqRel);
             (r, w)
@@ -346,6 +462,8 @@ impl<T> Inner<T> {
             // clear。`ptr::swap(a, b)` 交换两块 Cells 实例（Box 指针）；`swap(0)`
             // 取回旧位置用于后续 drop 并归零新 a 的位置。
             std::ptr::swap(self.a.get(), self.b.get());
+            self.a_ptr
+                .store(cells_data_ptr(&*self.a.get()), Ordering::Release);
             let r = self.read.pos.swap(0, Ordering::AcqRel);
             let w = self.write.pos.swap(0, Ordering::AcqRel);
             (r, w)
@@ -408,6 +526,50 @@ impl<T> Inner<T> {
         }
     }
 
+    /// 只等写端退出；读端可以继续运行（扩容时使用）。
+    ///
+    /// Wait for writers only; readers may keep running (used by grow).
+    fn wait_writers_zero(&self) {
+        loop {
+            if self.writers_in_flight.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            let mut g = lock_ignore_poison(&self.wait_mutex);
+            if self.writers_in_flight.load(Ordering::Acquire) > 0 {
+                g = wait_ignore_poison(&self.clear_cvar, g);
+            }
+            drop(g);
+        }
+    }
+
+    fn wake_writers(&self) {
+        let _g = lock_ignore_poison(&self.wait_mutex);
+        self.write.notify_all_locked();
+    }
+
+    /// 旧缓冲区进入延迟释放队列，等在途操作全部退出后释放。
+    ///
+    /// Retire an old buffer; it is freed once no operation is in flight.
+    fn retire(&self, cells: Cells<T>) {
+        {
+            let mut retired = lock_ignore_poison(&self.retired);
+            retired.push(cells);
+        }
+        self.has_retired.store(true, Ordering::Release);
+        if self.in_flight.load(Ordering::Acquire) == 0 {
+            self.drain_retired();
+        }
+    }
+
+    fn drain_retired(&self) {
+        if !self.has_retired.load(Ordering::Acquire) {
+            return;
+        }
+        let mut retired = lock_ignore_poison(&self.retired);
+        retired.clear();
+        self.has_retired.store(false, Ordering::Release);
+    }
+
     fn set_b_range(cp_guard: &mut ClearPendingGuard<'_, T>, old_r: usize, old_w: usize) {
         cp_guard.old_r = old_r;
         cp_guard.old_w = old_w;
@@ -431,9 +593,10 @@ impl<T> Inner<T> {
             // `[old_r, old_w)` 由写端初始化。`ptr::read` 后立即
             // `ptr::write(uninit)`，即使 `T::drop` panic 也不会二次 drop。
             let b = &*self.b.get();
+            let alloc = self.alloc_cap.load(Ordering::Acquire);
             let mut idx = old_r;
             while idx != old_w {
-                let slot = idx % self.cap;
+                let slot = idx % alloc;
                 let slot_ptr = b[slot].get().cast::<T>();
                 let value = std::ptr::read(slot_ptr);
                 std::ptr::write(b[slot].get(), MaybeUninit::uninit());
@@ -493,9 +656,10 @@ impl<T> Inner<T> {
                 // `ptr::read` 后立即 `ptr::write(uninit)`，即使 `T::drop`
                 // panic 也不会二次 drop。
                 let a = &*self.a.get();
+                let alloc = self.alloc_cap.load(Ordering::Acquire);
                 let mut idx = new_w;
                 while idx != w {
-                    let slot = idx % self.cap;
+                    let slot = idx % alloc;
                     let ptr = a[slot].get().cast::<T>();
                     let val = std::ptr::read(ptr);
                     std::ptr::write(a[slot].get(), MaybeUninit::uninit());
@@ -524,15 +688,12 @@ impl<T> Inner<T> {
         if n == 0 {
             return 0;
         }
-        let a = unsafe {
-            // SAFETY: 调用方已持有 InFlightGuard，`clear` / `truncate_back` /
-            // `reject_pending_writers` 不会交换 `a`/`b` 或修改 `write_pos`；
-            // 同端由端锁或 `&mut self` 串行化，无并发读者。
-            &*self.a.get()
+        let Some((a, alloc)) = self.read_buffer() else {
+            return 0;
         };
         out.reserve(n);
-        let start = r % self.cap;
-        let first = (self.cap - start).min(n);
+        let start = r % alloc;
+        let first = (alloc - start).min(n);
         for i in 0..first {
             unsafe {
                 // SAFETY: 槽位位于 `[r, r + n)` 内，已初始化；
@@ -565,12 +726,11 @@ impl<T> Inner<T> {
         if n == 0 {
             return 0;
         }
-        let a = unsafe {
-            // SAFETY: 同 `drain_prefix`。
-            &*self.a.get()
+        let Some((a, alloc)) = self.read_buffer() else {
+            return 0;
         };
-        let start = r % self.cap;
-        let first = (self.cap - start).min(n);
+        let start = r % alloc;
+        let first = (alloc - start).min(n);
         for i in 0..first {
             unsafe {
                 // SAFETY: 槽位位于 `[r, r + n)` 内，已初始化。
@@ -636,25 +796,118 @@ impl<T> Inner<T> {
 }
 
 impl<T: Copy> Inner<T> {
+    /// 调整逻辑容量；超过物理分配时重新分配并复制存量数据。
+    ///
+    /// - 新容量大于物理分配：分配新的 A/B，阻止新写端，等待在途写端退出；
+    ///   读端继续运行。复制 `[read, write)` 到新 A（逻辑位置不变），交换 A/B，
+    ///   更新容量，旧 A 进入延迟释放队列。
+    /// - 新容量不大于物理分配：只原子更新逻辑容量。写端若已写入超过新容量的
+    ///   数据不会丢失，但会等待读端排空后才能继续写。
+    ///
+    /// Adjust the logical capacity; grow past the allocation by reallocating and copying.
+    ///
+    /// - Larger than the physical allocation: allocate new A/B, block new writers, wait for
+    ///   in-flight writers (readers keep running), copy `[read, write)` into the new A at the
+    ///   same logical positions, swap A/B, update the capacity and retire the old A.
+    /// - Otherwise only the logical capacity is updated atomically. Data already written past the
+    ///   new capacity is kept; writers wait until the reader drains below it.
+    pub(crate) fn resize(&self, new_size: usize) {
+        if new_size == 0 {
+            return;
+        }
+        let _m = lock_ignore_poison(&self.mutation_mutex);
+        if self.clear_pending.load(Ordering::Acquire)
+            || self.truncate_pending.load(Ordering::Acquire)
+        {
+            return;
+        }
+
+        let alloc = self.alloc_cap.load(Ordering::Acquire);
+        if new_size <= alloc {
+            self.cap.store(new_size, Ordering::Release);
+            // 容量可能变大，唤醒等待空位的写端 / the capacity may have grown; wake waiting writers
+            self.wake_writers();
+            return;
+        }
+
+        if self.resize_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let _resize = ResizePendingGuard::new(self);
+
+        // 先等写端退出；读端可以继续推进 read.pos
+        // Wait for writers first; readers may keep advancing read.pos.
+        self.wait_writers_zero();
+
+        // 先读 w 再读 r：r 只会增大，保证 used 不超过旧物理分配
+        // Load w before r: r only grows, so used cannot exceed the old allocation.
+        let w = self.write.pos.load(Ordering::Acquire);
+        let r = self.read.pos.load(Ordering::Acquire);
+        let used = w.wrapping_sub(r).min(alloc);
+
+        let new_a = make_cells(new_size);
+        let new_b = make_cells(new_size);
+        let old_ptr = self.a_ptr.load(Ordering::Acquire);
+
+        unsafe {
+            // SAFETY: 写端已退出；读端只读旧 A。复制 `[r, w)` 到新 A 的同一逻辑位置。
+            // SAFETY: writers have exited; readers only read the old A. Copy `[r, w)` into the
+            // new A at the same logical positions.
+            let old_a = std::slice::from_raw_parts(old_ptr, alloc);
+            for i in 0..used {
+                let logical = r.wrapping_add(i);
+                let src = logical % alloc;
+                let dst = logical % new_size;
+                let value = std::ptr::read(old_a[src].get()).assume_init();
+                std::ptr::write(new_a[dst].get(), MaybeUninit::new(value));
+            }
+        }
+
+        // seqlock：复制期间读端继续输出旧数据；只有下面这段交换窗口内读到“暂无数据”。
+        // Seqlock: readers keep delivering old data during the copy; only this swap window
+        // reports "no data".
+        self.resize_seq.fetch_add(1, Ordering::AcqRel);
+        let mut old_a = new_a;
+        let mut old_b = new_b;
+        unsafe {
+            // SAFETY: 写端已退出；读端不会访问两个 Box 头本身，旧 A 交换后立即进入
+            // `retired` 队列（在途读者退出前不释放），旧 B 全部是未初始化槽位。
+            // SAFETY: writers have exited; readers never touch the Box headers. The old A is
+            // retired (not freed until in-flight readers exit) and the old B is all uninitialized.
+            std::ptr::swap(self.a.get(), &mut old_a);
+            std::ptr::swap(self.b.get(), &mut old_b);
+            self.a_ptr
+                .store(cells_data_ptr(&*self.a.get()), Ordering::Release);
+        }
+        self.alloc_cap.store(new_size, Ordering::Release);
+        self.cap.store(new_size, Ordering::Release);
+        self.resize_seq.fetch_add(1, Ordering::AcqRel);
+
+        // 旧 A 可能仍被在途读者使用，延迟释放；旧 B 全是未初始化槽位
+        // The old A may still be read; retire it. The old B is all uninitialized slots.
+        self.retire(old_a);
+        drop(old_b);
+    }
+
     pub(crate) fn read_slice(&self, dst: &mut [T]) -> usize {
         if dst.is_empty() {
             return 0;
         }
-        let Some(_guard) = self.enter() else { return 0 };
+        let Some(_guard) = self.enter_read() else {
+            return 0;
+        };
+        let Some((a, alloc)) = self.read_buffer() else {
+            return 0;
+        };
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let avail = w.wrapping_sub(r);
-        if avail == 0 || avail > self.cap {
+        if avail == 0 || avail > alloc {
             return 0;
         }
         let n = dst.len().min(avail);
-        let start = r % self.cap;
-        let first = (self.cap - start).min(n);
-        let a = unsafe {
-            // SAFETY: InFlightGuard 保护下 clear / truncate / reject 不会修改
-            // a；同端由端锁或 &mut self 串行化。
-            &*self.a.get()
-        };
+        let start = r % alloc;
+        let first = (alloc - start).min(n);
         for i in 0..first {
             dst[i] = unsafe {
                 // SAFETY: 槽位位于 `[r, r + n)` 内，已初始化；`T: Copy` 下
@@ -677,24 +930,26 @@ impl<T: Copy> Inner<T> {
         if src.is_empty() {
             return 0;
         }
-        let Some(_guard) = self.enter() else { return 0 };
+        let Some(_guard) = self.enter_write() else {
+            return 0;
+        };
+        let Some((a, alloc)) = self.read_buffer() else {
+            return 0;
+        };
+        let cap = self.cap.load(Ordering::Acquire);
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         let used = w.wrapping_sub(r);
-        if used > self.cap {
+        if used >= cap {
             return 0;
         }
-        let free = self.cap - used;
+        let free = cap - used;
         let n = src.len().min(free);
         if n == 0 {
             return 0;
         }
-        let start = w % self.cap;
-        let first = (self.cap - start).min(n);
-        let a = unsafe {
-            // SAFETY: 同 `read_slice`。
-            &*self.a.get()
-        };
+        let start = w % alloc;
+        let first = (alloc - start).min(n);
         for i in 0..first {
             unsafe {
                 // SAFETY: 槽位位于 `[w, w + n)` 内，空闲；
@@ -716,13 +971,38 @@ impl<T: Copy> Inner<T> {
 
 pub(crate) struct InFlightGuard<'a, T> {
     inner: &'a Inner<T>,
+    writer: bool,
 }
 
 impl<T> Drop for InFlightGuard<'_, T> {
     fn drop(&mut self) {
-        if self.inner.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if self.writer && self.inner.writers_in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.inner.wake_clear_waiter();
         }
+        if self.inner.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.wake_clear_waiter();
+            self.inner.drain_retired();
+        }
+    }
+}
+
+/// 扩容期间的写端闸门：复位 `resize_pending` 并唤醒等待的写端。
+///
+/// Writer gate during a grow: clears `resize_pending` and wakes waiting writers.
+struct ResizePendingGuard<'a, T> {
+    inner: &'a Inner<T>,
+}
+
+impl<'a, T> ResizePendingGuard<'a, T> {
+    fn new(inner: &'a Inner<T>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T> Drop for ResizePendingGuard<'_, T> {
+    fn drop(&mut self) {
+        self.inner.resize_pending.store(false, Ordering::Release);
+        self.inner.wake_writers();
     }
 }
 
@@ -769,9 +1049,10 @@ impl<T> Drop for ClearPendingGuard<'_, T> {
                     // 槽位；已 drop 的槽位再次置 uninit 无副作用，未 drop 的
                     // 槽位被丢弃（泄漏资源但不破坏结构安全）。
                     let b = &*self.inner.b.get();
+                    let alloc = self.inner.alloc_cap.load(Ordering::Acquire);
                     let mut idx = self.old_r;
                     while idx != self.old_w {
-                        let slot = idx % self.inner.cap;
+                        let slot = idx % alloc;
                         std::ptr::write(b[slot].get(), MaybeUninit::uninit());
                         idx = idx.wrapping_add(1);
                     }
@@ -823,6 +1104,7 @@ impl<T> Drop for TruncatePendingGuard<'_, T> {
 
 impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
+        self.drain_retired();
         let r = self.read.pos.load(Ordering::Relaxed);
         let w = self.write.pos.load(Ordering::Relaxed);
         let a = unsafe {
@@ -831,8 +1113,9 @@ impl<T> Drop for Inner<T> {
             &*self.a.get()
         };
         let mut idx = r;
+        let alloc = self.alloc_cap.load(Ordering::Relaxed);
         while idx != w {
-            let slot = idx % self.cap;
+            let slot = idx % alloc;
             unsafe {
                 // SAFETY: 独占 `&mut self`，无并发；`idx` 位于 `[r, w)`，槽位
                 // 已初始化。`drop_in_place` 把 `*mut MaybeUninit<T>` cast 成

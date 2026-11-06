@@ -4,19 +4,135 @@
 
 ## [Unreleased] — 2026-11-01
 
+### WBFP TUI
+
+- `wbfp p`、`wbfp u`、`wbfp h` 在 stdout 为终端时默认运行 ratatui TUI。文件列表只读，逐行显示状态并有全局任务卡片，
+  右侧窗口预留内容预览。`--no-tui` 保留经典 indicatif 输出；非 TTY stdout 自动回退。
+- 新增 `wbfp browse <pack>`（别名 `b`），不启动任务即可只读浏览。目录通过 `ManagerSync` 懒加载；打包模式浏览本地源目录。
+- TUI 使用独立任务线程与 `JobEvent` 通道；UI 另开只读 `ManagerSync` 句柄，避免清单读取与打包/解包/校验文件句柄争锁。
+  任务运行中按 `q` 会在完成后退出。
+- `wbfp.rs` 拆分为 `classic.rs`（行为不变的进度条路径）、`common.rs`（共享路径/复制/解包）、`events.rs`、`ops.rs`
+  与 `tui/`（状态、渲染、目录懒加载）。
+- 日志与帮助弹层现在可用打开时的同一按键关闭（`d`/F12、`?`）；`Esc` 关闭两者。
+- 目录行聚合后代状态：子项未完成时父目录保持 `⟳`，子项失败/跳过时父目录显示红/黄。哈希校验任务卡片不再显示输出字段。
+- Windows TUI 改为仅键盘：crossterm 会把 SGR 鼠标报文拆成普通按键并淹没事件循环。启动时清理残留鼠标上报；非 Windows
+  平台保留鼠标选择/双击/滚轮。TUI 诊断日志（路由、按键、目录加载、任务开始/结束、每 GiB 进度）写入
+  `temp/logs/wbfp/` 下的 debug 日志。
+- 打包不再发送目录事件，空源目录不会一直显示进行中图标。
+- 预览窗在任务运行期间显示实时任务列表：当前文件在最前并带逐文件进度，已完成文件在下方。工作线程通过非阻塞通道入队
+  限流进度；UI 只维护有界队列，不为任务列表读取文件，因此不会拖慢打包/解包/校验 IO。
+- 文件列表与任务列表使用固定显示宽度列（`unicode-width`）、固定进度条/百分比/大小列和固定高度的任务摘要，
+  小文件快速完成时界面字段不再跳动。大小拆成右对齐数字列与固定宽度单位列，单位 `B` 只占一格也不会让数字横移。
+
+### 音乐播放器 TUI
+
+- `mp` 现在运行真正的 TUI：新的 `Runtime` 持有播放器与播放列表，后台 `mp-scan` 线程把位置参数转成曲目，
+  `tui::run` 每 50ms 渲染一次。按键：`n` 下一曲、`←`/`→` 每次 5 秒跳转（长按预览、松开提交）、空格 播放/暂停、`p` 暂停、
+  `P` 播放、`+`/`-` 音量、`q`/`Esc`/`Ctrl+C` 退出。终端初始化与还原使用 `ratatui::try_init`/`try_restore`。
+- 旧的 `indicatif` UI 线程、stdin 命令循环与 `--ui-preview` 开关已删除。自动换曲在解码线程上由
+  `DecoderEventType::Eof` 触发，立即用 `set_decoder_path_no_clear` 切换：旧曲尾音继续从缓冲区播放，新曲排在其后，
+  因此换曲没有额外延迟也不会截断。手动下一曲会清空缓冲。打开曲目失败按 skip / retry / pause 分类，连续失败上限 5 次。
+- `Track` 新增 `album` 与 `audio_info`（由扫描器从 lofty 填充），`PlayList::current_index()` 提供当前索引供播放列表高亮。
+- `-a/--autoplay` 在找到第一首后开始播放。不带该参数时第一首只加载并保持暂停；若尚未加载曲目，按下播放也会先加载第一首。
+- 启动初始化按模式区分：顺序模式立即加载第一首；`shuffle` 与 `periodic-shuffle` 先等 5 首，扫描提前结束不足 5 首时
+  用已有曲目兜底初始化。在此之前用户手动 `n`/播放会取消自动初始化。
+- `d`/F12 切换 Debug 弹窗：前效果器/音频缓冲区长度、当前解码路径与格式、播放列表状态、`lock_fail`/`underrun`
+  计数，以及解码/效果器/音频回调各段的 `TimeMetrics` 时间窗口。新增 `DecoderRuntime::decoder_path()` 暴露解码路径。
+- 播放列表面板现在只渲染可见行并支持滚动：`↑`/`↓` 滚动一行、`PageUp`/`PageDown` 滚动一页、`Home`/`End` 跳到首尾、
+  鼠标滚轮滚动三行、左键点击某行播放该曲。换曲时视口跟随当前曲目。新增 `PlayList::jump_to` 与 `Runtime::play_at`
+  用于按索引跳转，TUI 运行期间启用鼠标捕获。
+- 修复 Windows/ConPTY 下移动鼠标导致 TUI 退出的问题。终端可能把鼠标报文作为裸 X10 负载字节交付，坐标字节（例如
+  `q`）因此被当成退出键。Windows 现在打开 `ENABLE_VIRTUAL_TERMINAL_INPUT`、请求 SGR 鼠标上报，并用 `vtparse`
+  （`VtInput`）解析 VT 字节流，把滚轮与左键映射到播放列表；移动、中键、右键与释放事件忽略。若无法启用 VT 输入，
+  则禁用鼠标，键盘仍可正常使用。
+- TUI 日志：`channel_writer` 安装 tracing subscriber，把格式化后的行经有界通道（容量 1024，满则 `try_send` 丢弃）
+  送入面板；Debug 构建面板显示 `debug`，同时把 `debug` 日志文件写到项目 temp 目录（`temp/logs/<module>/`），
+  TUI 崩溃后仍可取证；Release 构建面板显示 `info` 且继续把 `debug` 日志文件写到用户数据目录。panic 与 TUI 主循环
+  错误会写入该文件，按键/鼠标事件以 `debug` 级别记录。`main.rs` 向该层
+  暴露文件 writer 与日志过滤器；一次 `write` 现在会切出全部完整行，不再丢掉第一个换行之后的内容。
+- 面板对日志级别分色：时间戳压暗，级别词 TRACE 暗灰、DEBUG 蓝、INFO 绿、WARN 黄、ERROR 红。级别只从格式化行的前
+  40 字节解析，因此消息里出现的级别词不会改变颜色。
+- `mp` TUI 新增 `:` 命令模式：底栏变为输入行（`Enter` 执行、`Esc` 取消、`Backspace` 编辑）。命令按唯一前缀匹配：
+  `quit`、`play`、`pause`、`toggle`、`next`、`prev`、`seek <mm:ss|+N|-N>`、`vol <0-100|+N|-N>`、`mode <name>`、
+  `goto <n>`、`debug` 与 `help`/`?`；未知或歧义命令在底栏报错。`help` 打开命令表弹窗。新增 `Runtime::prev_track`、
+  `Runtime::seek` 与 `Runtime::set_loop_mode`。
+- 实现 `Player::try_seek`（签名改为 `&self`）：清空输出环、执行解码器准确 seek、作废 EOF 状态并重设进度基准。
+  `DecoderRuntime::try_seek` 清空前效果器输入环并发送 `AudioData::Seek`（不再做全量效果器 reset）；重采样器与交叉桥
+  在 `Seek` 时丢弃缓冲状态。seek 后的显示进度与真实位置可能相差一个音频块。
+- `←`/`→` 在当前曲目内跳转：点按 5 秒；长按期间重复事件只移动进度预览（黄色进度条 + `跳转预览`），
+  最后一次重复后 150ms 提交目标。`n` 仍是下一曲。`Runtime::seek` 在换曲期间、或 EOF 尾部/交叉渐变尚未播完时忽略请求，
+  因为该窗口内 `pos` 仍包含上一曲。
+- `CrossBridge` 延迟线改为非对称填充：未达到配置的 1 秒时，每个输入块最多只输出一半（至少保留 1 个样本），
+  因此播放可以低延迟启动，延迟随填充逐步增加；补满后恢复 1:1。seek 清空延迟线后立即恢复输出，延迟重新爬升，
+  不再需要静音等待填充。交叉增益仍按完整时长预计算；尾长短于配置时长（延迟线未满时曲目结束）时缩放增益表索引，
+  让 A 衰减到 0、B 升到 1，而不是截断曲线造成音量阶跃。
+- 修复 Windows VT 输入：crossterm 0.29 会丢弃合成 VT 输入中的控制字符（ESC、CR），导致 `Enter` 无反应、方向键变成
+  `[C` 文本、鼠标报文把 `[<...M` 塞进命令行。VT 模式下现在由专用线程直接读取 stdin 字节并喂给 `vtparse`；
+  单独的 ESC 等待 50ms 超时后才作为 Esc 键，CR 与 LF 都映射为 Enter。
+- 修复首次播放前 seek 导致后续播放失败：`Player::try_seek` 会往容量为 1 的 transport 通道塞一条 `PlayCmd::Seek`；
+  流处于暂停时没人消费，下一次 `Play` 就返回 `Full`，播放无法开始。seek 不再发送该命令；解码器 seek 与效果链复位
+  本来就在命令线程完成。
+- 鼠标：底栏快捷键文字现在也是可点击按钮（退出、下一曲、快退/快进、播放/暂停、单行滚动、音量、Debug、命令模式），
+  与原有的“点击列表行播放”并存。`PlayList::jump_to` 在目标已是当前曲目时也会把它从周期洗牌的待播队列中取出；
+  目标不在队列中则不改动队列。
+
+### 环形缓冲区
+
+- `split_ring_buffer` 为 `T: Copy` 的写端（`LockedWriter` / `UnlockedWriter`）新增 `resize`。超过物理分配时重新分配
+  A/B、阻止写端，按相同逻辑位置复制存量（复制期间读端继续输出，只有极短的交换窗口内读到“暂无数据”），交换缓冲区，旧缓冲区
+  延迟到没有在途操作后释放；缩小或在物理分配内调整只更新逻辑容量。`capacity()` 返回当前容量，`Kind::Resizing` 表示扩容
+  期间被拒绝的写入。
+
+### 文件搜索队列
+
+- `file_finder` 的目录工作队列改为 `ConcurrentRing<DirEntry>`，不再使用 `Mutex<VecDeque>` + `Condvar` + 运行线程计数。
+  工作线程在 `pop_wait()` 上阻塞，收到 `WritersClosed` / `AllWaiting` 时退出，因此手动的计数增减与唤醒逻辑全部删除。
+  新增 `FileFinder::new()`（以及 `Default`）替代单元结构体字面量，公共辅助函数加上 `#[must_use]`。
+
+### 包 I/O
+
+- `PackIO` 现在持有 `Box<dyn FileIo>` 而非具体 `File`。新增 `FileIo` 特征（`pack_io/file.rs`，为 `File` 实现：
+  读/写/seek + `set_len`/`sync_data`/`lock`/`unlock`），使包层可以运行在非 `File` 后端上。会移动文件游标的操作
+  （`manifest_data_block_read`、`set_pos_read`，以及管理器的 `load_pack_struct` / `load_pack_file_metadata`）改为接收
+  `&mut self`。
+- `PackVirtualFile` 从 `pack_io/file.rs` 移到新的 `pack_io/pack_file.rs`（`pack_io::file` 现在只放 `FileIo`）。
+  `WBFilesPackManifest::file_mut()` 返回 `Option<&mut PackIO>`，`file_gc_add` 不再返回 `Result`。
+
+### 构建
+
+- 仓库通过 `rust-toolchain.toml` 固定 **nightly**（`channel = "nightly"`），因此此仓库中的所有 `cargo` 命令都使用
+  nightly。`build_native.ps1` 在 `.cargo/native-config.toml` 基础上使用 `-Zbuild-std="std,panic_abort"` 执行本机优化
+  release 构建。
+
 ### 模块布局
 
 - 音乐播放引擎移入库 crate：`player`、`decoder_runtime`、`effect`（含 `runtime`/`resampler`/`cross_bridge`/`fade`）、
   `play_list`、`event_dispatch` 与 `tools` 现位于 `water_ball_tool_lib/src/music_play/`，通过
   `water_ball_tool_lib::music_play` 导出。
-- 二进制 crate 只保留终端前端：`src/command/music_play.rs`（clap 参数、stdin 命令循环、播放列表收集）与
-  `src/command/music_play/runtime.rs`（`indicatif` UI 刷新线程 + 编排），以及开发中的 `tui/`。
+- 二进制 crate 只保留终端前端：`src/command/music_play.rs`（clap 参数 + TUI 接线）、
+  `src/command/music_play/runtime.rs`（播放运行时）、`src/command/music_play/scanner.rs`（后台标签扫描）与
+  `src/command/music_play/tui/`。
 - `LoopMode` 移入库包并实现 `FromStr`。二进制包无法再为它派生 `clap::ValueEnum`（orphan rule），因此 `-m/--mode`
   改用 `value_parser` 解析；可选值保持不变。
 - `debug-no-audio` feature 现定义在 `water_ball_tool_lib`（cpal 回调所在处），由二进制包转发，因此从仓库根执行
   `cargo build --features debug-no-audio` 仍然有效。
 - `cpal`、`symphonia`、`rubato`、`crossbeam-channel` 从二进制包移至库包；二进制包只保留 `lofty` 用于读取标签。
 - 运行库测试套件现在需要 `cargo test --workspace`（单独的 `cargo test` 只覆盖二进制包）。
+
+### 日志与调试
+
+- 终端日志改为异步：`TerminalWriter` 把整行放进有界通道（容量 1024），由 `log-writer` 线程取出并通过
+  `MultiProgress::suspend()` 打印。调用线程只做 `try_send`，因此调试器停在断点（或控制台卡住）时，通道满只丢弃终端日志，
+  不会让工作线程持着进度条写锁阻塞在日志里。文件日志仍为同步写。
+- 第三方 `log` 记录压到 `warn`（`log_filter`）：`tracing-subscriber` 默认开启的 `tracing-log` 桥接会把 lofty 逐块的
+  `log::debug!` 送进该 writer，而每条日志都会清屏并整块重绘所有进度条。
+- `mp`：`add_track` 不再持 `play_list` 互斥锁读取 lofty 标签或调用 `next()`——首曲的 `next()` 会在同一线程上二次加锁
+  （自死锁）。
+
+### 曲目收集
+
+- `mp` 遍历目录时只接收 `lofty` 能识别的扩展名（`FileType::from_path`），因此音乐库目录不会为每个无关文件都尝试一次标签读取。
+  显式传入的文件不受该过滤影响，始终会尝试读取。
 
 ### 播放列表修复
 
@@ -36,6 +152,11 @@
   `1..=长度+1`）。批量版本是唯一实现，单曲版本转调它。
 - 中间插入会同时后移 `current_index`、轨迹项和周期队列项；追加到末尾不涉及任何一项。周期洗牌进行中时，新曲会补进
   当前周期的待播队列。
+
+### 文档
+
+- `AGENTS.md` 只保留规范；各模块的架构说明移至 `ARCHITECTURE.md`，后者新增「环形缓冲区模块」章节（§12），涵盖
+  `concurrent_ring` 与 `split_ring_buffer`。
 
 ## [Unreleased] — 2026-10-31（第二轮）
 

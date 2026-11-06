@@ -18,6 +18,10 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 ./target/release/water_ball_tool -h
 ```
 
+- `wbfp` runs a TUI when stdout and stdin are terminals; `--no-tui` (or a non-TTY stdout/stdin) keeps the classic progress-bar output.
+  `wbfp browse <pack>` opens the read-only browser without starting a job. The TUI file list is preview-only during
+  pack/unpack/verify.
+
 ## Build options
 
 - The repository is a **workspace**: the root `Cargo.toml` defines the `water_ball_tool` binary package and lists
@@ -26,6 +30,9 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
   it explicitly: `cargo --config .cargo/native-config.toml build --release`. It compiles with
   `-C target-cpu=native` and redirects artifacts to `target/native/` (binary at
   `target/native/release/water_ball_tool`). Do not use a native build as a portable distribution.
+- The repository pins **nightly** in `rust-toolchain.toml` (`channel = "nightly"`), so every `cargo` command here runs on
+  nightly. `build_native.ps1` runs the native release build with `-Zbuild-std="std,panic_abort"` on top of
+  `.cargo/native-config.toml`.
 - The `debug-no-audio` feature is a debugging aid for the `mp` command: the cpal callback skips ring-buffer reads,
   post-effect processing, and volume scaling, so playback control can be debugged quickly without real audio. It
   produces no usable audio. The feature is defined on `water_ball_tool_lib` (the cpal callback lives there) and the
@@ -36,9 +43,11 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 - Slow tests are marked `#[ignore = "longtime"]`. Skip them with `cargo test --workspace` (skipped by default). Use
   `--include-ignored` for the full suite on main-branch CI pushes. `--workspace` is required: `water_ball_tool_lib` is
   a workspace member, so a plain `cargo test` only covers the binary crate.
-- Subcommand handlers initialize logging themselves through `crate::multi_progress_init(module)`; tests that call the
-  handler (`ff::args`, `wbfp::commands`, `music_play::args`) therefore get a working `MultiProgress` without extra
-  setup. Re-registering the subscriber is rejected by `try_init` and only logged.
+- `ff` and the classic `wbfp` path initialize logging through `crate::multi_progress_init(module)`, so tests that call
+  their handlers get a working `MultiProgress` without extra setup. The `wbfp` TUI and `mp` install the TUI channel
+  writer (`tui::channel_writer::init_logging`), so tests must not call `wbfp::run`/`music_play::args` expecting a
+  terminal. Re-registering the subscriber is rejected by `try_init` and only logged. Tests use `wbfp::commands`, which
+  always takes the classic path.
 - Test temp dirs live under `./temp/test/` (gitignored).
 - Use `TestTool::prepare_test_dir(dir)` at test start and `TestTool::cleanup_test_dir(dir)` at test end from
   `water_ball_tool_lib/src/tools.rs` (both tolerate `NotFound`; cleanup panics on unexpected errors).
@@ -147,189 +156,20 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
   cause instead (refactor the code, propagate the error, or use a non-panicking helper such as `TestTool::expect_ok` in
   tests).
 
-## Architecture notes (non-obvious from file layout)
+## Architecture
 
-### Workspace and crate layout
+Module-level design lives in [ARCHITECTURE.md](ARCHITECTURE.md); read the chapter for the module you are changing —
+`ff` §6, `mp` §7, `wbfp` §8, progress bars §9, logging §10, tools §11, ring buffers §12 — instead of duplicating it in
+this file. Binary format specifications live in `docs/en_US/` (Chinese: `docs/zh_CN/`).
 
-- Root `Cargo.toml` is a **workspace** (`resolver = "3"`) with member `water_ball_tool_lib`; the same file declares the
-  `water_ball_tool` binary package whose sources live in `src/`.
-- `water_ball_tool_lib/src/lib.rs` exports the library modules: `file_finder`, `wb_files_pack`, `tools`,
-  `concurrent_ring`, `split_ring_buffer`, `music_play`, and `gakumasu` (gated under `#[cfg(debug_assertions)]` — only
-  compiled in debug builds).
-- `src/main.rs` declares `mod command;` — `command.rs` is private to the binary crate and is **not** part of the
-  library.
-- Binary code references the library through crate-name-qualified paths — `water_ball_tool_lib::file_finder`,
-  `water_ball_tool_lib::wb_files_pack`, `water_ball_tool_lib::tools`, `water_ball_tool_lib::concurrent_ring`,
-  `water_ball_tool_lib::split_ring_buffer`, `water_ball_tool_lib::music_play` — not `crate::`.
-- `command/ff.rs` — `ff` subcommand handler: argument parsing, progress bar setup, file search orchestration, and
-  optional hashing. Calls `FileFinder::search_stream()` from the library. Command-layer worker/hash threads are created
-  with `thread::Builder` and spawn failures propagate as errors.
-    - Optional multi-value **positional** `[HASH]...` argument after `[OUT_PATH]`: `all`, `md5`, `sha256`, `sha512`,
-      `sha1`, `blake3`, `blake2b`, `crc32` (aliases `*`, `m5`, `s256`, `s512`, `s1`, `b3`, `b2b`, `crc`). Computed
-      hashes are attached to each file entry and appear in the JSON output.
-    - When hashing is enabled, file discovery is forced to a single thread (`ff_thread_count = 1`) while a separate hash
-      worker pool of `thread_count` threads (resolved from `-t/--thread-count`, defaulting to available parallelism)
-      consumes the shared ring buffer.
-- `command/wbfp.rs` — `wbfp` subcommand handler: pack/unpack/hash-verify with multi-threaded file I/O, progress bars per
-  worker thread, and streaming file discovery via `FileFinder::search_stream()`. All pack/unpack/verify workers are
-  created with `thread::Builder`, and spawn failures propagate as errors.
-- `command/music_play.rs` + `command/music_play/` — `mp` subcommand handler (module `music_play`, enum variant `MP`).
-  The binary keeps only the terminal front-end (clap arguments, stdin command loop, `indicatif` progress bar); the
-  playback engine itself lives in the library under `water_ball_tool_lib::music_play`. See below.
-- `command/test.rs` — integration tests for `ff` and `wbfp` commands, including cross-platform symlink cycle detection
-  tests.
-    - Longtime tests (`#[ignore = "longtime"]`) use `create_large_fixture()` to generate 1,000 random files (25 dirs ×
-      40 files, random content/size via `rand` crate) for stress testing. These replace old system-dir-scraping tests.
+Rules every change must respect, which module docs do not restate:
 
-### File finder API (`water_ball_tool_lib/src/file_finder.rs`)
+- `src/command.rs` is private to the binary crate; binary code reaches the library as `water_ball_tool_lib::<module>`.
+- The realtime audio callback never locks, calls sinks, or writes logs, and `Player::try_stop` keeps its fixed shutdown
+  order (ARCHITECTURE §7.3, §7.5).
+- Module details belong in ARCHITECTURE.md or the module's `//!` docs — not in this specification file.
 
-- `FileFinder::search(path, skip_symlinks, pb_tx, max_threads)` — blocking multi-threaded search returning `FilesList`
-  tree.
-- `FileFinder::search_stream(path, skip_symlinks, pb_tx, max_threads)` — non-blocking streaming search; returns
-  `(JoinHandle<io::Result<()>>, Receiver<(PathBuf, FileInfo)>)`. Workers pass `None` for results to skip HashMap
-  collection overhead. Used by `wbfp` pack and `ff` hashing for the producer-consumer pattern.
-- Symlink cycle detection uses per-thread inode chain: each worker maintains a `Vec<InodeKey>` of directories entered
-  via symlinks. When encountering a symlink→dir, the target's inode is checked against the chain.
-- Inode key: `(dev << 64) | ino` on Unix; `canonicalize()` on Windows.
-- Rate-limited progress: 50 files or 10 dirs per update.
-- Tree rebuild uses **iterative stack-based post-order traversal** (Pre/Post state machine) instead of recursion —
-  avoids stack overflow on deeply nested directories. Parent lookup uses `rposition()` backward search for correct path
-  matching.
-- Test file: `water_ball_tool_lib/src/file_finder/test.rs` — covers symlink discovery, ancestor cycle detection,
-  multi-level symlinks, skip flag, broken symlinks, mixed scenarios, chain propagation, and `search_stream`
-  correctness.
-
-### Ring buffer APIs
-
-- `concurrent_ring` (`water_ball_tool_lib/src/concurrent_ring.rs`) — concurrent initializable ring buffer
-  (`ConcurrentRing<T>`), used as the producer-consumer queue between search/decoder threads and workers. Blocking
-  operations also fail fast instead of blocking forever: each blocking method (`push_wait` / `write_wait` / `write_all`
-  vs `pop_wait` / `read_wait` / `read_exact`) registers the calling handle's direction, `Clone`/`Drop` keep a
-  per-direction handle count, and once the last handle of one direction is dropped the opposite side gets
-  `ReadersClosed` / `WritersClosed` (mirroring `split_ring_buffer`'s peer-closed `CannotWait`). There is no separate
-  reader/writer handle type and no manual close/reopen call; a ring whose handles never called a blocking method is
-  never reported closed.
-- `split_ring_buffer` (`water_ball_tool_lib/src/split_ring_buffer.rs`) — split read/write ring buffer where each end can
-  independently be locked or lock-free (`locked_ring_buffer`, `unlocked_read_locked_write_ring_buffer`, …); the audio
-  callback uses the lock-free reader.
-
-### Tools API (`water_ball_tool_lib/src/tools.rs`)
-
-- `PathTool::path_to_string_vec(path)` — split path into string segments.
-- `PathTool::path_remove_head(path, head)` — strip head prefix from path returning relative path.
-- `bytes_len_to_string(len)` — format bytes as human-readable (B/KiB/MiB/GiB).
-- `TestTool::prepare_test_dir(dir)` — remove any stale test temp dir (tolerates `NotFound`, panics on other errors) and
-  recreate it. Called at test start.
-- `TestTool::cleanup_test_dir(dir)` — remove the test temp dir at test end; only runs when the test passed (a failing
-  test panics before reaching it, keeping evidence). Panics on cleanup errors, failing the test.
-- `TestTool::remove_test_pack_files(path)` — cleanup helper for `.pack`/`.wbm`/`.lock` in tests.
-
-### WBFP public API
-
-- The public entry point is `ManagerSync` (`water_ball_tool_lib/src/wb_files_pack/manager_sync.rs`), not
-  `WBFPManager`.
-- `ManagerSync` wraps `WBFPManager` + `PackIO` behind `Arc<Mutex<>>` for thread-safe access.
-- `ManagerSync::open(path)` — opens an existing pack file in read-only mode.
-- `ManagerSync::create_new(path)` — creates a new pack file with default config (separate manifest, no COW). Fails if
-  file exists.
-- `ManagerSync::options() -> PackOpenOptions` — builder pattern for full control: `read()`, `write()`, `create()`,
-  `create_new()`, `cow()`, `separate_manifest()`.
-- `ManagerSync::open_virtual_file(path, end_pos)` — opens an existing virtual file in read-only mode.
-- `ManagerSync::create_virtual_file(path)` — creates a new virtual file in write-only mode.
-- `ManagerSync::virtual_file_options() -> VirtualFileOpenOptions` — builder for virtual file access: `read()`,
-  `write()`, `create_new()`, `end_pos()`, `alloc_size()`. `alloc_size(Some(len))` pre-allocates a known file size at
-  128B alignment; `None` (default) allocates unknown-size files as whole 4MiB blocks; ignored when opening an existing
-  file.
-- `PackVirtualFile` (renamed from `PackFileWR`) — virtual file handle implementing `Read`/`Write`/`Seek` with access
-  mode enforcement.
-    - `get_len()` returns `u64` (not `Result<u64>`); `get_modified()` returns `u128` (not `Result<u128>`).
-- Delete/erase API: `delete_file`, `delete_dir_all`, `erase_file(strategy)`, `erase_dir_all(strategy)`.
-    - Delete: removes metadata + structure, submits data blocks to GC (no overwrite).
-    - Erase: overwrites data blocks + manifest blocks to storage, then GC + remove.
-    - `OverwriteStrategy` enum: `Zero`, `Random` (rand crate), `Dod5220` (3-pass: 0x00→0xFF→random — each pass written
-      to disk). Data blocks are overwritten chunk by chunk; the write offset advances by the chunk length in every
-      strategy/pass.
-    - Root protection: empty path list rejected. `child_locked_count` on `PackStruct` prevents deleting dirs with locked
-      children.
-
-### Music player (`mp`)
-
-- `command/music_play.rs` — `mp` subcommand (module `music_play`, enum variant `MP`): collects tracks from
-  files/directories (metadata read with `lofty`), builds a `PlayList`, and drives `Runtime` from a stdin command loop
-  (`next`/`n`, `Play`/`P`, `pause`/`p`, `exit`).
-- The playback engine lives in the **library** (`water_ball_tool_lib/src/music_play/`); the binary crate keeps only the
-  terminal front-end (`command/music_play.rs` and `command/music_play/runtime.rs`).
-- Arguments: positional `files...`; `-v/--volume <f32>` initial volume as a 0.0–1.0 fraction (default `0.75`;
-  out-of-range values are rejected with an argument error before playback starts); `--verbose` (long only);
-  `-m/--mode` with `sequential-loop` (default), `sequential`, `repeat-one`, `shuffle`, `periodic-shuffle`.
-    - `LoopMode` lives in the library and implements `FromStr`; the binary cannot implement `clap::ValueEnum` for a
-      foreign type, so `-m/--mode` parses through `value_parser` instead of the derive.
-- Library modules (`water_ball_tool_lib/src/music_play/`):
-    - `player.rs` — cpal output stream, transport commands (`PlayCmd`), volume/position atomics, `PlayerEvent` sinks,
-      and `Player::try_stop()`.
-    - `watchdog.rs` — crash watchdog shared state. A watched thread owns a `ThreadExitGuard`; its `Drop` (panic
-      unwind included) sets the slot bit and wakes the single watchdog thread on a `Condvar`, so no
-      `JoinHandle::is_finished()` polling is needed. `Player` owns the watchdog thread (`player-watchdog`): on exit it
-      pauses playback (never auto-resumes), sets the decoder poison flag so `Play` recovers by changing track, and
-      restarts the dead thread; the pre-effect thread additionally has its whole effect chain rebuilt through the
-      factory registered by `Player::new` before restart.
-    - `decoder_runtime.rs` — symphonia decode thread feeding the pre-effect ring buffer. The format reader/decoder and
-      the
-      track metadata live together in one `DecoderSession` behind a single `Arc<Mutex<Option<...>>>`, so they are
-      swapped/taken as a pair. `run()` returns an error when the thread cannot be spawned. The decode loop retries
-      transient IO errors (`is_retryable_io_error`: 5 tries × 200 ms, e.g. Windows 1450 `ERROR_NO_SYSTEM_RESOURCES`);
-      an error that cannot be retried, or whose retries are exhausted, is reported as a `DecoderEvent`, then the loop
-      takes the session, clears the pending output buffer and returns to the condvar wait — the thread stays alive, so a
-      later track change still plays. Such an error also sets the atomic `poisoned` flag (`is_poisoned()`); a successful
-      `set_decoder_path` clears it automatically, so no front-end cleanup can be forgotten. Frame-level `DecodeError` is
-      reported and skipped; stop/track-change `WriteRejected` is normal control flow.
-    - `effect.rs` + `effect/runtime.rs` — effect traits and the locked pre-effect runtime thread; concrete effects are
-      `effect/resampler.rs`, `effect/cross_bridge.rs`, `effect/fade.rs`. The thread never exits on a runtime error:
-      a ring error resets the effect chain with the `Skip` discontinuity, emits
-      `PreEffectRuntimeEventErrorKind::Runtime`, backs off 10 ms and keeps consuming; a hard output-write error is
-      reported the same way and the block is dropped. Only the `stop` flag ends the loop.
-    - `play_list.rs` — track list plus loop/shuffle logic (`sequential-loop`, `sequential`, `repeat-one`, `shuffle`,
-      `periodic-shuffle`).
-    - `event_dispatch.rs` — dedicated event/log dispatch thread for the realtime audio callback.
-    - `tools.rs` — `TimeMetrics` / `DurationAccumulator` profiling helpers.
-- Binary modules (`command/music_play/`):
-    - `runtime.rs` — playback orchestration: `indicatif` UI refresh thread, automatic track advance, event consumers.
-      Decoder error events are consumed through a `DecoderEventChannelSink` (never inline on the decode thread): it
-      pauses playback and wakes the UI thread. While the decoder is poisoned the UI shows the `异常暂停中` prefix and a
-      red `Error` line between the song info and the time-metrics block; the `Play`/`P` command changes track first
-      while poisoned and always resumes playback afterwards.
-    - `tui/` (`app.rs`, `ui.rs`, `channel_writer.rs`) — **WIP**, not wired into the command yet.
-- **Realtime-thread rule**: the cpal callback MUST NOT lock, invoke sinks, or write logs. It only posts events and log
-  records with non-blocking `try_send` into a bounded channel (capacity 1024; full channel drops and counts). The
-  `player-event-dispatch` thread performs the locking, `PlayerEventSink::emit` calls, and real `tracing` output.
-- Track end is detected through an atomic EOF flag; the callback posts a `TrackEnded` event instead of invoking sinks
-  directly.
-- **Exit order (`Player::try_stop`, idempotent)**: shut the watchdog down first (so it cannot restart threads during
-  shutdown) → pause the audio stream → stop the pre-effect runtime (wakes producers blocked in `push_wait`) → stop the
-  decoder thread → stop the event dispatch thread → join the `rx_cmd` thread → join the watchdog thread.
-
-### Logging + progress bars
-
-- Each subcommand handler calls `crate::multi_progress_init(module)` (`module` = `"ff"`, `"wbfp"`, or
-  `"music_play"`). It creates that command's `MultiProgress` and installs the global tracing subscriber via
-  `init_global_logging(&mp, module) -> Option<PathBuf>`, which returns the created log-file path if any.
-- The terminal layer wraps `MultiProgress` (`suspend()` around each line) so logs never tear the progress bars.
-- Debug builds (`#[cfg(debug_assertions)]`): terminal-only output at `debug` level. Release builds: terminal at `info`
-  level plus a log file at `debug` level with the bracketed format
-  `[timestamp] [level] [thread] [file:line] message`.
-- Log file path: `<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`. If the file
-  cannot be created, logging falls back to terminal-only `debug` output.
-- `main.rs` itself only parses `Cli` and dispatches; progress/log initialization is per subcommand.
-
-### Progress bar helpers (`command.rs`)
-
-- `create_pb(mp)` — create and register an auto-ticking spinner in the `MultiProgress`; returns a `ProgressBar`.
-- `progress_style(template) -> ProgressStyle` — build a style from a template string; an invalid template logs an
-  error and falls back to the default bar style (no panic). Use this instead of `ProgressStyle::tem*().expect(...)`.
-- Constants: `BUF_LEN` = 10 MiB (read/write buffer), `PACK_PROGRESS_STYLE_TEMPLATE` (pack/unpack/hash: prefix, bar,
-  elapsed/ETA, percent, bytes), `SPINNER_TEMPLATE` (idle/suspended worker spinner).
-
-### Code change markers
+## Code change markers
 
 - `//AI===` / `//AI_END===` are code change-region markers.
 - Every modified, added, or removed code segment MUST be wrapped in paired markers (`//AI===` start, `//AI_END===` end).
@@ -337,19 +177,6 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 - Markers wrap code only, never documentation: do NOT put a marker inside or around `///` / `//!` doc comments (a plain
   `//` line between doc lines silently drops the following doc text). A doc-comment-only change needs no marker at all;
   when code and its doc comment change together, mark only the code.
-
-### gakumasu
-
-- WIP game simulator under `water_ball_tool_lib/src/gakumasu/`. Not wired into CLI yet. Data types use Chinese naming.
-
-## WBFP binary format quick reference
-
-- File extension: `.pack` (pack file), `.wbm` (separate manifest), `.lock` (PID-based write lock).
-- Uses A/B dual-block atomic writes for manifest data blocks, BLAKE3 for integrity.
-- Progressive save: auto-saves every 64MiB written or 10,000 files added.
-- Garbage collection: batch sort (`sort_unstable_by_key`) + single-pass merge of adjacent free blocks. O ((K+M) log
-  (K+M)).
-- Full spec: `docs/en_US/wb_files_pack/manifest-data.md`
 
 ## Documentation sync
 

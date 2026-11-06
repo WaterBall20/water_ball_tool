@@ -713,6 +713,18 @@ impl DecoderRuntime {
         //AI_END===
     }
 
+    //AI=== 当前正在解码的文件（TUI debug 面板用）/ file currently being decoded (used by the TUI debug panel)
+    pub fn decoder_path(&self) -> Option<PathBuf> {
+        let session = self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        session
+            .as_ref()
+            .map(|session| session.data.path_buf.clone())
+    }
+    //AI_END===
+
     pub fn add_event(&mut self, event: Box<dyn EventSink<DecoderEvent>>) {
         self.event_list
             .lock()
@@ -754,7 +766,10 @@ impl DecoderRuntime {
         Ok(())
     }
 
-    pub fn try_seek(&mut self, d: Duration) -> DecoderResult<symphonia::core::formats::SeekedTo> {
+    //AI=== 同曲跳转：先 reject 唤醒可能持锁阻塞的写端，再拿 session 锁做准确 seek；效果链用 Seek 基本复位
+    // Seek within the track: reject blocked writers first, then accurate-seek under the session lock; the effect chain
+    // gets a basic Seek reset (no format change, no rebuild).
+    pub fn try_seek(&self, d: Duration) -> DecoderResult<symphonia::core::formats::SeekedTo> {
         self.effect_runtime
             .pre_effect_ring_buffer()
             .reject_waiting_writers();
@@ -775,7 +790,11 @@ impl DecoderRuntime {
             },
         )?;
         session.engine.decoder.reset();
-        self.effect_runtime.reset(session.data.decoder_format)?;
+        //AI=== 基本复位而非全量 reset：保留格式与已分配资源，seek 后可立即处理新位置数据
+        // Basic reset instead of a full reset: keep the format and allocations so new-position data can be processed
+        // immediately. This also clears the pre-effect input ring before the Seek control block is queued.
+        self.effect_runtime.send_seek()?;
+        //AI_END===
         Ok(r)
         //AI_END===
     }

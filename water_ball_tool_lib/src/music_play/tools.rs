@@ -58,7 +58,7 @@ impl DurationStats {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct DurationStatsWindow {
     pub total_ns: u64,
     pub count: u64,

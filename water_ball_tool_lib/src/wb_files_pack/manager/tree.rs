@@ -453,12 +453,12 @@ impl WBFPManager {
         }
     }
 
-    pub(super) fn load_pack_struct(&self, file_pos: u64) -> Result<PackStruct> {
+    pub(super) fn load_pack_struct(&mut self, file_pos: u64) -> Result<PackStruct> {
         let data_block = self.manifest_data_block_read(file_pos)?;
         PackStruct::load(data_block)
     }
 
-    pub(super) fn load_pack_file_metadata(&self, file_pos: u64) -> Result<PackFileMetadata> {
+    pub(super) fn load_pack_file_metadata(&mut self, file_pos: u64) -> Result<PackFileMetadata> {
         let data_block = self.manifest_data_block_read(file_pos)?;
         PackFileMetadata::load(data_block)
     }

@@ -14,9 +14,9 @@
 
 - **文件搜索器** (`ff`) — 多线程并行扫描目录树，输出 JSON 格式文件清单。支持符号链接循环检测与可选的逐文件哈希
   （MD5/SHA-1/SHA-2/BLAKE2b/BLAKE3/CRC32）。
-- **水球包文件** (`wbfp`) — 自定义二进制归档格式，支持打包/解包/BLAKE3 哈希校验。
-- **音乐播放器** (`mp`) — 终端音乐播放器，可播放音频文件与目录：支持播放列表模式、音量控制与 stdin 交互命令循环。
-  `tui` 界面仍在开发中（尚未接入命令）。
+- **水球包文件** (`wbfp`) — 自定义二进制归档格式，支持打包/解包/BLAKE3 哈希校验，以及带预留预览窗的只读 TUI 浏览器。
+- **音乐播放器** (`mp`) — 终端音乐播放器，可播放音频文件与目录：TUI 支持播放/暂停、下一曲、音量、播放列表与实时日志；
+  播放模式通过 `-m/--mode` 选择。
 
 ---
 
@@ -90,6 +90,21 @@ water_ball_tool wbfp u -H my.pack ./output_dir
 water_ball_tool wbfp h my.pack
 ```
 
+### 浏览 `wbfp b`
+
+```bash
+# 以只读 TUI 浏览器打开包
+water_ball_tool wbfp b my.pack
+```
+
+在终端中，`p`/`u`/`h` 默认使用 TUI：文件列表只读，每行显示任务状态，右侧预留内容预览窗。任务运行期间同一窗口显示任务
+列表——当前操作的文件在最前并显示各自进度，已完成文件在下方。工作线程通过队列发送（限流的）进度事件，任务列表不会阻塞
+文件 I/O。`--no-tui` 保留经典进度条输出；stdout/stdin 不是 TTY 时会自动回退。
+
+TUI 按键：`q`/`Ctrl+C` 退出，`↑`/`↓` 移动，`⏎` 进入目录，`←` 返回上级，`PageUp`/`PageDown` 翻页，`Home`/`End` 跳首尾，
+`p` 切换预览，`d`/F12 查看日志，`?` 帮助。任务运行中按 `q` 会在完成后退出。Windows 下 TUI 目前仅支持键盘
+（crossterm 会把 SGR 鼠标报文拆成普通按键）；其他平台还支持左键选择、双击进入和滚轮滚动。
+
 ### 音乐播放器 `mp`
 
 ```bash
@@ -104,10 +119,23 @@ water_ball_tool mp ./music --mode repeat-one
 
 # 详细输出（仅长选项）
 water_ball_tool mp ./music --verbose
+
+# 找到第一首后自动开始播放
+water_ball_tool mp ./music --autoplay
 ```
 
-开始播放后，命令从 stdin 读取指令：`next`/`n`（下一曲）、`Play`/`P`（播放）、`pause`/`p`（暂停）、`exit`（停止并退出）。
-音量超出 0.0–1.0 时会在开始播放前返回参数错误。
+TUI 启动后：`n`（下一曲）、`←`/`→`（每次 5 秒跳转；长按仅预览、松开提交）、空格（播放/暂停）、`p`（暂停）、
+`P`（播放）、`↑`/`↓`（滚动播放列表）、
+`PageUp`/`PageDown`（翻页）、`Home`/`End`（首尾）、鼠标滚轮（滚动三行）、左键点击播放列表行（播放该曲）、`+`/`-`
+（音量）、`d`/`F12`（Debug 弹窗）、`:`（命令模式：`quit`、`play`、`pause`、`toggle`、`next`、`prev`、
+`seek <mm:ss|±N>`、`vol`、`mode`、`goto`、`debug`、`help`；`seek` 跳转当前曲目进度）、`q`/`Esc`/`Ctrl+C`（退出）。
+底栏的快捷键文字本身也是可点击按钮，对应同样的操作。音量超出 0.0–1.0 时会在开始播放前返回参数错误。
+播放列表只渲染可见行，并在换曲时跟随当前曲目。目录在后台线程扫描；曲目会随扫描结果出现在播放列表中。
+Debug 构建还会把 `debug` 级别记录（含按键/鼠标事件与 panic）写到项目的 `temp/logs/music_play/`，便于事后排查
+TUI 意外退出；Release 构建的日志文件位于用户数据目录。Windows 下 TUI 使用 VT 输入与 SGR 鼠标上报；若终端无法启用
+VT 输入，则禁用鼠标，键盘输入仍可用。
+顺序模式在首曲到达时立即加载；随机/周期随机模式先等 5 首，扫描提前结束不足 5 首时用已扫描到的曲目初始化。
+不带 `--autoplay` 时第一首只加载并保持暂停——按空格或 `P` 开始播放。
 
 ---
 
@@ -175,12 +203,19 @@ src/                              # 二进制 crate（water_ball_tool）
 ├── command.rs                    # CLI 命令路由 + 进度条辅助函数
 └── command/
     ├── ff.rs                     # ff 子命令实现（搜索 + 可选哈希）
-    ├── wbfp.rs                   # wbfp 子命令实现（打包/解包/哈希校验）
+    ├── wbfp.rs                   # wbfp 模块根（参数、路由、TUI/经典路径选择）
     ├── test.rs                   # 命令级集成测试（含符号链接循环检测）
-    └── music_play.rs             # mp 子命令（clap 参数 + stdin 循环 + 播放列表收集）
+    ├── wbfp/                     # wbfp 实现
+    │   ├── classic.rs            # 经典 indicatif 进度条路径
+    │   ├── common.rs             # 共享路径/复制/解包辅助
+    │   ├── events.rs             # TUI 任务事件与行状态
+    │   ├── ops.rs                # TUI 打包/解包/校验工作线程
+    │   └── tui/                  # TUI（tui.rs、app.rs、ui.rs、browse.rs）
+    └── music_play.rs             # mp 子命令（clap 参数 + TUI 接线）
         └── music_play/
-            ├── runtime.rs        # 播放编排 + indicatif UI 刷新线程
-            └── tui/              # 终端 UI（开发中：app.rs、ui.rs、channel_writer.rs）
+            ├── runtime.rs        # 播放运行时（事件 sink、快照、换曲）
+            ├── scanner.rs        # 后台标签扫描（lofty → ScanMessage）
+            └── tui/              # 终端 UI（tui.rs、app.rs、ui.rs、channel_writer.rs）
 ```
 
 **实现说明**
@@ -218,7 +253,8 @@ cargo --config .cargo/native-config.toml build --release
 cargo build --features debug-no-audio
 ```
 
-`.cargo/native-config.toml` 不会自动生效——需如上通过 `--config` 传入。
+`.cargo/native-config.toml` 不会自动生效——需如上通过 `--config` 传入。`rust-toolchain.toml` 固定 nightly 工具链，
+`./build_native.ps1` 使用 `-Zbuild-std="std,panic_abort"` 执行本机优化构建。
 
 ---
 
@@ -231,7 +267,7 @@ cargo build --features debug-no-audio
 - **日志**: tracing / tracing-subscriber
 - **进程检测**: sysinfo
 - **音频**: cpal / symphonia / rubato / lofty
-- **终端 UI**: ratatui
+- **终端 UI**: ratatui / vtparse
 - **通道**: crossbeam-channel
 
 ---

@@ -13,7 +13,8 @@ pub struct CrossBridgeEffect {
     buf_max_len: usize,
     duration: Duration,
     is_effect: bool,
-    // 预计算增益表，按 sample 索引，长度 = buf_max_len
+    // 预计算增益表，按 sample 展开；短尾交叉按实际尾长缩放索引
+    // Precomputed gain table expanded per sample; a short-tail crossfade scales the index to the actual tail.
     gain_out: Vec<f32>,
     gain_in: Vec<f32>,
 }
@@ -59,6 +60,14 @@ impl PreEffect for CrossBridgeEffect {
         output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
+        //AI=== Seek 丢弃交叉淡入的旧尾巴与延迟线 / Seek drops the old crossfade tail and delay line
+        if PreEffectDiscontinuity::Seek == kind {
+            self.is_effect = false;
+            self.b_buf.clear();
+            self.buf.clear();
+            return 0;
+        }
+        //AI_END===
         if PreEffectDiscontinuity::Skip == kind {
             self.is_effect = false;
             self.b_buf.clear();
@@ -162,7 +171,7 @@ impl CrossBridgeEffect {
         self.b_buf.clear();
         self.b_buf.reserve_exact(self.buf_max_len);
 
-        // 预计算等功率增益表，按 sample 展开
+        // 预计算等功率增益表，按 sample 展开 / precompute the equal-power gain table, one entry per sample
         self.gain_out.clear();
         self.gain_in.clear();
         self.gain_out.reserve_exact(self.buf_max_len);
@@ -181,54 +190,42 @@ impl CrossBridgeEffect {
         }
     }
 
-    /// 延迟线核心：把 input 追加到 buf，超出 buf_max_len 的部分按时间顺序写入 out。
-    /// 不清空 out，返回 output.len()。
+    //AI=== 非对称填充：未满时输出小于输入，差值逐步补满延迟线；补满后回到 1:1
+    // Asymmetric fill: while the line is not full, output less than the input so the difference fills it; once
+    // full, fall back to 1:1. The retained amount is at most half a block and at least one sample, so the line
+    // always makes progress and input never equals output while filling.
     fn process_normal(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
-        let this_len = self.buf.len();
-
-        if this_len + input.len() <= self.buf_max_len {
-            self.buf.extend(input.iter().copied());
+        if input.is_empty() {
             return output.len();
         }
 
-        let out_len = this_len + input.len() - self.buf_max_len;
-        let pop_len = out_len.min(this_len);
-        let in_to_out_len = out_len - pop_len;
+        let deficit = self.buf_max_len.saturating_sub(self.buf.len());
+        let retain = if deficit == 0 {
+            0
+        } else {
+            (input.len() / 2).clamp(1, deficit).min(input.len())
+        };
+        let out_len = input.len() - retain;
 
-        output.reserve(out_len);
-
-        // 批量从 buf 头部取出 pop_len 个，走 memcpy
-        if pop_len > 0 {
-            {
-                let (front, back) = self.buf.as_slices();
-                let n1 = front.len().min(pop_len);
-                let n2 = (pop_len - n1).min(back.len());
-                output.extend_from_slice(&front[..n1]);
-                if n2 > 0 {
-                    output.extend_from_slice(&back[..n2]);
-                }
+        self.buf.extend(input.iter().copied());
+        if out_len > 0 {
+            output.reserve(out_len);
+            let (front, back) = self.buf.as_slices();
+            let n1 = front.len().min(out_len);
+            let n2 = (out_len - n1).min(back.len());
+            output.extend_from_slice(&front[..n1]);
+            if n2 > 0 {
+                output.extend_from_slice(&back[..n2]);
             }
-            self.buf.drain(..pop_len);
+            self.buf.drain(..out_len);
         }
-
-        if in_to_out_len > 0 {
-            output.extend_from_slice(&input[..in_to_out_len]);
-        }
-
-        if in_to_out_len < input.len() {
-            self.buf.extend(input[in_to_out_len..].iter().copied());
-        }
-
-        debug_assert!(
-            !output.is_empty(),
-            "cross_bridge process_normal output is empty"
-        );
         output.len()
     }
+    //AI_END===
 
     /// 交叉：
     /// 1) 等待期间 buf 不可变，target = buf.len() 稳定；
-    /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变），查预计算增益表；
+    /// 2) 收满后原地把 A*cos + B*sin 写回 buf（长度不变）；实际尾长短于配置时长时缩放增益表索引；
     /// 3) input_rest 走与非交叉完全一致的延迟线逻辑。
     fn process_crossfade(&mut self, input: &[f32], output: &mut Vec<f32>) -> usize {
         let channels = self.info.output_format.channels as usize;
@@ -253,17 +250,33 @@ impl CrossBridgeEffect {
         self.b_buf.extend_from_slice(&input[..needed]);
         let input_rest = &input[needed..];
 
-        // 交叉计算：拉平到 sample 索引，查表 + FMA
+        //AI=== 短尾交叉：表按完整交叉时长预计算，实际尾长短于它时缩放索引，让 A 仍衰减到 0、B 升到 1
+        // Short-tail crossfade: the table covers the full duration, so scale the index to the actual tail; A still
+        // fades to 0 and B rises to 1 instead of the curve being truncated.
+        let target_frames = target / channels;
+        let table_frames = self.gain_out.len() / channels;
+        let last_table_frame = table_frames.saturating_sub(1);
         {
             let (buf, b_buf, gain_out, gain_in) =
                 (&mut self.buf, &self.b_buf, &self.gain_out, &self.gain_in);
             let buf_slice = buf.make_contiguous();
-            debug_assert!(target <= gain_out.len());
-
-            for idx in 0..target {
-                buf_slice[idx] = buf_slice[idx] * gain_out[idx] + b_buf[idx] * gain_in[idx];
+            for frame in 0..target_frames {
+                let table_frame = if target_frames > 1 && table_frames > 1 {
+                    frame * last_table_frame / (target_frames - 1)
+                } else {
+                    0
+                };
+                let table_idx = table_frame * channels;
+                let base = frame * channels;
+                for channel in 0..channels {
+                    let idx = base + channel;
+                    let gain_idx = table_idx + channel;
+                    buf_slice[idx] =
+                        buf_slice[idx] * gain_out[gain_idx] + b_buf[idx] * gain_in[gain_idx];
+                }
             }
         }
+        //AI_END===
 
         self.b_buf.clear();
         self.is_effect = false;

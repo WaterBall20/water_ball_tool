@@ -1,0 +1,2 @@
+[toolchain]
+channel = "nightly" # 或者固定具体日期，如 "nightly-2026-06-25"

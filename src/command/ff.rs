@@ -360,7 +360,7 @@ fn search_files(
     let search_end = Arc::new(AtomicBool::new(false));
 
     //搜索
-    let ff = FileFinder;
+    let ff = FileFinder::new();
     let (tx, rx) = mpsc::channel();
     let (ff_thread, event_rx) = ff.search_stream(path, skip_symlink, tx, ff_thread_count)?;
 

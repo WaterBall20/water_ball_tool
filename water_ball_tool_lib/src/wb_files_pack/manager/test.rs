@@ -5,8 +5,8 @@ use crate::wb_files_pack::manager::{
     DEFAULT_COW, DEFAULT_HASH_TYPE, DEFAULT_SEPARATE_MANIFEST, WBFPManager,
 };
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::pack_io::file::PackVirtualFile;
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
+use crate::wb_files_pack::pack_io::pack_file::PackVirtualFile;
 use pretty_assertions::assert_eq;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -36,7 +36,7 @@ fn create_manager(
             }
             _ => panic!("创建文件错误. err:{e}"),
         })?;
-    let pack_io = PackIO::new(pack_file);
+    let pack_io = PackIO::new(Box::new(pack_file));
     let pack_io = Arc::new(Mutex::new(pack_io));
     let mut manager =
         WBFPManager::create_pack_file(pack_path, pack_io.clone(), cow, separate_manifest, true)
@@ -55,7 +55,7 @@ fn open_manager<P: AsRef<Path>>(pack_path: &P) -> (WBFPManager, Arc<Mutex<PackIO
         .write(true)
         .open(pack_path)
         .expect("无法打开文件");
-    let pack_io = PackIO::new(pack_file);
+    let pack_io = PackIO::new(Box::new(pack_file));
     let pack_io = Arc::new(Mutex::new(pack_io));
     (
         WBFPManager::open_pack_file(pack_path, pack_io.clone()).expect("无法打开包文件"),

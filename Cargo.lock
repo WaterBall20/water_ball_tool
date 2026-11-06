@@ -2689,7 +2689,7 @@ dependencies = [
  "thiserror 1.0.69",
  "ucd-trie",
  "unicode-segmentation",
- "vtparse",
+ "vtparse 0.6.2",
  "wezterm-bidi",
  "wezterm-blob-leases",
  "wezterm-color-types",
@@ -2987,6 +2987,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vtparse"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1726b5dabcf18909219a11c1ae3b85fff931b6e5ccf7321d998fc7665f52661b"
+dependencies = [
+ "utf8parse",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3122,7 +3131,10 @@ dependencies = [
  "thread-priority",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
+ "vtparse 0.7.0",
  "water_ball_tool_lib",
+ "windows-sys",
 ]
 
 [[package]]

@@ -16,18 +16,18 @@
 //!    Tree rebuilding uses explicit stack-based post-order traversal (Pre/Post state machine),
 //!    avoiding stack overflow risk on deeply nested directory hierarchies
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::Metadata;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use std::{io, thread};
 
+use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 use serde;
 use serde::{Deserialize, Serialize};
-
 // === 平台相关的 inode 标识 / Platform-specific inode key ===
 
 /// 文件/目录的唯一标识，用于符号链接循环检测。
@@ -355,10 +355,16 @@ impl FileFinder {
         path_buf.file_name().and_then(|n| n.to_str())
     }
 
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
     /// 获取文件的修改时间（毫秒）/ Get file modification time in milliseconds
     ///
     /// 返回自 UNIX 纪元以来的毫秒数。如果无法获取则返回 0。
     /// Returns milliseconds since UNIX epoch. Returns 0 if unavailable.
+    #[must_use]
     pub fn get_file_modified(metadata: &Metadata) -> u128 {
         metadata
             .modified()
@@ -378,6 +384,7 @@ impl FileFinder {
     /// # 步骤 / Steps
     /// 1. 按父路径分组所有条目 / Group all entries by parent path
     /// 2. 用显式栈进行后序遍历（避免递归栈溢出）/ Post-order traversal with explicit stack (avoid recursion stack overflow)
+    #[must_use]
     pub fn build_tree(flat: &HashMap<PathBuf, FileInfo>, root: &Path) -> FilesList {
         // 栈帧状态 / Stack frame state
         enum St {
@@ -535,14 +542,13 @@ impl FileFinder {
         path_buf: &Path,
         skip_symlink: bool,
         chain: &[InodeKey],
-        dir_queue: &Arc<Mutex<VecDeque<DirEntry>>>,
+        dir_queue: &ConcurrentRing<DirEntry>,
         results: Option<&Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: &Sender<(u64, u64)>,
         stream_tx: Option<&Sender<SearchEvent>>,
         warnings: Option<&Arc<Mutex<Vec<SearchWarning>>>>,
         thread_file_count: &mut u64,
         thread_dir_count: &mut u64,
-        condver: &Arc<Condvar>,
     ) {
         if skip_symlink {
             return;
@@ -606,15 +612,12 @@ impl FileFinder {
                 // Append new inode to chain; subdirectories carry the extended chain
                 let mut new_chain = chain.to_vec();
                 new_chain.push(inode_key);
-                dir_queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push_back(DirEntry {
-                        path: path_buf.to_path_buf(),
-                        symlink_chain: new_chain,
-                    });
-                //唤起一个线程
-                condver.notify_one();
+                if let Err(e) = dir_queue.push(DirEntry {
+                    path: path_buf.to_path_buf(),
+                    symlink_chain: new_chain,
+                }) {
+                    unreachable!("{}", e)
+                };
             }
         } else if path_buf.is_file() {
             // 符号链接指向文件 / Symlink points to a file
@@ -727,77 +730,33 @@ impl FileFinder {
     ///
     /// Thread exits when queue is empty. Multiple threads pull from queue for parallel scanning.
     fn run_worker(
-        dir_queue: Arc<Mutex<VecDeque<DirEntry>>>,
+        dir_queue: ConcurrentRing<DirEntry>,
         results: Option<Arc<Mutex<HashMap<PathBuf, FileInfo>>>>,
         pb: Sender<(u64, u64)>,
         stream_tx: Option<Sender<SearchEvent>>,
         warnings: Option<Arc<Mutex<Vec<SearchWarning>>>>,
         skip_symlink: bool,
-        running_count: Arc<Mutex<i32>>,
-        condver: Arc<Condvar>,
     ) {
-        let fn_running_count_add = || -> i32 {
-            let mut lock = running_count
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *lock += 1;
-            *lock
-        };
-
-        let fn_running_count_sub = || -> i32 {
-            let mut lock = running_count
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *lock -= 1;
-            *lock
-        };
-
         let mut thread_file_count = 0;
         let mut thread_dir_count = 0;
 
-        fn_running_count_add();
-        'worker: loop {
-            let entry = {
-                let mut queue = dir_queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                queue.pop_front()
-            };
-
-            let entry = if let Some(d) = entry {
+        loop {
+            let entry = if let Some(d) = dir_queue.pop() {
                 d
             } else {
                 //如果是空的
-                let mut dir_queue = dir_queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                //当前线程计数
-                let this_running_count = fn_running_count_sub();
-                if this_running_count == 0 {
-                    //如果没有其他在运行中的线程，则说明搜索结束，唤醒所有线程并退出
-                    condver.notify_all();
-                    break;
-                }
-                loop {
-                    dir_queue = condver
-                        .wait(dir_queue)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match dir_queue.pop_front() {
-                        Some(d) => {
-                            //添加线程计数
-                            fn_running_count_add();
-                            break d;
+                match dir_queue.pop_wait() {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        if matches!(
+                            e.kind,
+                            ConcurrentRingErrorKind::WritersClosed
+                                | ConcurrentRingErrorKind::AllWaiting
+                                | ConcurrentRingErrorKind::SingleInstance
+                        ) {
+                            break;
                         }
-                        None => {
-                            //如果队列是空的，且运行中的线程数为0
-                            if *running_count
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                == 0
-                            {
-                                break 'worker;
-                            }
-                        }
+                        unreachable!("{}", e)
                     }
                 }
             };
@@ -857,7 +816,6 @@ impl FileFinder {
                         warnings.as_ref(),
                         &mut thread_file_count,
                         &mut thread_dir_count,
-                        &condver,
                     );
                 } else if ft.is_dir() {
                     // 普通目录：不检测循环，链不变
@@ -893,15 +851,12 @@ impl FileFinder {
                             .insert(path_buf.clone(), info);
                     }
                     //添加队列
-                    dir_queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push_back(DirEntry {
-                            path: path_buf,
-                            symlink_chain: entry.symlink_chain.clone(),
-                        });
-                    //唤起一个线程
-                    condver.notify_one();
+                    if let Err(e) = dir_queue.push(DirEntry {
+                        path: path_buf,
+                        symlink_chain: entry.symlink_chain.clone(),
+                    }) {
+                        unreachable!("{}", e)
+                    };
                 } else if ft.is_file() {
                     // 普通文件：不检测循环
                     // Regular file: no cycle detection
@@ -991,59 +946,51 @@ impl FileFinder {
 
         let num_threads = max_thread_count.max(1);
 
-        // 工作队列：存放待扫描的目录任务（路径 + inode 链）
-        // Work queue: holds directory tasks to scan (path + inode chain)
-        let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
-        dir_queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(DirEntry {
-                path: path.to_path_buf(),
-                symlink_chain: Vec::new(), // 根目录无符号链接链 / root has no symlink chain
-            });
-
         //搜索结果
         let results = Arc::new(Mutex::new(HashMap::<PathBuf, FileInfo>::new()));
         //搜索警告
         let warnings: Arc<Mutex<Vec<SearchWarning>>> = Arc::new(Mutex::new(Vec::new()));
-        //线程工作计数
-        let running_count = Arc::new(Mutex::new(0));
-        //控制线程的条件变量
-        let condver = Arc::new(Condvar::new());
         //线程池
         let mut handles = Vec::with_capacity(num_threads);
         //AI=== 线程创建失败必须返回错误（禁止会 panic 的 thread::spawn）/ spawn failures must be returned (no panicking thread::spawn)
         // 线程创建失败时：已创建的 worker 会因工作队列耗尽而退出，先 join 它们再返回错误。
         // On spawn failure, already-spawned workers exit once the queue drains; join them, then return the error.
-        let mut spawn_error: Option<io::Error> = None;
+        let mut spawn_error: Option<Error> = None;
         //线程接收器
-        for _ in 0..num_threads {
-            let dir_queue = Arc::clone(&dir_queue);
-            let results = Arc::clone(&results);
-            let warnings = Arc::clone(&warnings);
-            let condver = condver.clone();
-            let running_count = running_count.clone();
+        {
+            // 工作队列：存放待扫描的目录任务（路径 + inode 链）
+            // Work queue: holds directory tasks to scan (path + inode chain)
+            let dir_queue = ConcurrentRing::new();
+            if let Err(e) = dir_queue.push(DirEntry {
+                path: path.to_path_buf(),
+                symlink_chain: Vec::new(), // 根目录无符号链接链 / root has no symlink chain
+            }) {
+                unreachable!("{}", e)
+            }
+            for _ in 0..num_threads {
+                let dir_queue = dir_queue.clone();
+                let results = Arc::clone(&results);
+                let warnings = Arc::clone(&warnings);
 
-            let pb = pb.clone();
+                let pb = pb.clone();
 
-            match thread::Builder::new()
-                .name("file-finder-worker".to_string())
-                .spawn(move || {
-                    Self::run_worker(
-                        dir_queue,
-                        Some(results),
-                        pb,
-                        None,
-                        Some(warnings),
-                        skip_symlink,
-                        running_count,
-                        condver,
-                    );
-                }) {
-                Ok(handle) => handles.push(handle),
-                Err(e) => {
-                    spawn_error = Some(e);
-                    break;
+                match thread::Builder::new()
+                    .name("file-finder-worker".to_string())
+                    .spawn(move || {
+                        Self::run_worker(
+                            dir_queue,
+                            Some(results),
+                            pb,
+                            None,
+                            Some(warnings),
+                            skip_symlink,
+                        );
+                    }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(e) => {
+                        spawn_error = Some(e);
+                        break;
+                    }
                 }
             }
         }
@@ -1172,46 +1119,39 @@ impl FileFinder {
         // 任务体先定义为闭包，再用 Builder 启动；spawn 失败通过 `?` 返回给调用方。
         // The task body is defined first and started with Builder so spawn failures propagate via `?`.
         let stream_task = move || -> io::Result<()> {
-            let dir_queue = Arc::new(Mutex::new(VecDeque::<DirEntry>::new()));
-            dir_queue
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push_back(DirEntry {
-                    path: path.clone(),
-                    symlink_chain: Vec::new(),
-                });
-
-            let running_count = Arc::new(Mutex::new(0));
-            let condver = Arc::new(Condvar::new());
-
             let mut handles = Vec::with_capacity(num_threads);
             //AI=== 工作线程创建失败返回错误；已派发线程先 join / return worker spawn failures after joining dispatched workers
-            let mut spawn_error: Option<io::Error> = None;
-            for _ in 0..num_threads {
-                let dir_queue = Arc::clone(&dir_queue);
-                let condver = condver.clone();
-                let running_count = running_count.clone();
-                let pb = pb_tx.clone();
-                let stream_tx = stream_tx.clone();
+            let mut spawn_error: Option<Error> = None;
+            {
+                let dir_queue = ConcurrentRing::<DirEntry>::new();
+                if let Err(e) = dir_queue.push(DirEntry {
+                    path: path.clone(),
+                    symlink_chain: Vec::new(),
+                }) {
+                    unreachable!("{}", e)
+                }
+                for i in 0..num_threads {
+                    let dir_queue = dir_queue.clone();
+                    let pb = pb_tx.clone();
+                    let stream_tx = stream_tx.clone();
 
-                match thread::Builder::new()
-                    .name("file-finder-worker".to_string())
-                    .spawn(move || {
-                        Self::run_worker(
-                            dir_queue,
-                            None, // 不收集 HashMap 结果 / Don't collect HashMap results
-                            pb,
-                            Some(stream_tx),
-                            None, // 流式模式不用 Vec 收集警告
-                            skip_symlink,
-                            running_count,
-                            condver,
-                        );
-                    }) {
-                    Ok(handle) => handles.push(handle),
-                    Err(e) => {
-                        spawn_error = Some(e);
-                        break;
+                    match thread::Builder::new()
+                        .name(format!("file-finder-worker-{i}"))
+                        .spawn(move || {
+                            Self::run_worker(
+                                dir_queue,
+                                None, // 不收集 HashMap 结果 / Don't collect HashMap results
+                                pb,
+                                Some(stream_tx),
+                                None, // 流式模式不用 Vec 收集警告
+                                skip_symlink,
+                            );
+                        }) {
+                        Ok(handle) => handles.push(handle),
+                        Err(e) => {
+                            spawn_error = Some(e);
+                            break;
+                        }
                     }
                 }
             }
@@ -1246,6 +1186,12 @@ impl FileFinder {
         //AI_END===
 
         Ok((handle, stream_rx))
+    }
+}
+
+impl Default for FileFinder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

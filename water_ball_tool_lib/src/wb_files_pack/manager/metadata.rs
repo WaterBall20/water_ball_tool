@@ -379,10 +379,10 @@ impl WBFPManager {
             }
         } else {
             //AI=== 运行期错误：路径解析到目录（用户可能把目录路径传给 open/create virtual file），必须返回错误 / runtime error: path resolves to a directory (user may pass a dir path)
-            return Err(PackFileError::Other(format!(
+            Err(PackFileError::Other(format!(
                 r#"虚拟路径"{}"是目录不是文件 / path is a directory, not a file"#,
                 s_path.display()
-            )));
+            )))
             //AI_END===
         }
     }

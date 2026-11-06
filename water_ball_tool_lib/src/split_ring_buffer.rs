@@ -15,6 +15,16 @@
 //! 中。否则“发布方读到 0 个等待者而跳过唤醒”与“等待方读到旧位置而睡下”可能同时发生，
 //! 之后无人再唤醒（永久阻塞）。屏障不取锁，热路径（含实时音频回调的无锁读端）仍可安全使用。
 //!
+//! # 调整大小（仅 `T: Copy`）
+//!
+//! `LockedWriter::resize` / `UnlockedWriter::resize` 调整逻辑容量：
+//!
+//! - 超过物理分配时分配新的 A/B，阻止新写端并等待在途写端退出（读端在复制期间继续运行，
+//!   只在极短的交换窗口内读到“暂无数据”），把存量数据复制到新 A 的同一逻辑位置，交换缓冲区，
+//!   旧 A 延迟到没有在途操作后释放。
+//! - 缩小或在物理分配内调整只更新逻辑容量；超过新容量的存量数据保留，写端等待读端
+//!   排空后继续。此时 `len()` 可能暂时大于 `capacity()`。
+//!
 //! # 示例
 //!
 //! ```
@@ -65,6 +75,7 @@ fn make_inner<T>(capacity: usize) -> Arc<Inner<T>> {
 /// assert!(reader.is_locked());
 /// assert!(writer.is_unlocked());
 /// ```
+#[must_use]
 pub fn ring_buffer<T: Copy>(
     capacity: usize,
     read_mode: ReadMode,
@@ -97,6 +108,7 @@ pub fn ring_buffer<T: Copy>(
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
+#[must_use]
 pub fn locked_ring_buffer<T>(capacity: usize) -> (LockedReader<T>, LockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
     (
@@ -120,6 +132,7 @@ pub fn locked_ring_buffer<T>(capacity: usize) -> (LockedReader<T>, LockedWriter<
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
+#[must_use]
 pub fn unlocked_ring_buffer<T>(capacity: usize) -> (UnlockedReader<T>, UnlockedWriter<T>) {
     let inner = make_inner::<T>(capacity);
     (
@@ -143,6 +156,7 @@ pub fn unlocked_ring_buffer<T>(capacity: usize) -> (UnlockedReader<T>, UnlockedW
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
+#[must_use]
 pub fn locked_read_unlocked_write_ring_buffer<T>(
     capacity: usize,
 ) -> (LockedReader<T>, UnlockedWriter<T>) {
@@ -168,6 +182,7 @@ pub fn locked_read_unlocked_write_ring_buffer<T>(
 /// assert!(writer.push(1).is_ok());
 /// assert_eq!(reader.pop(), Some(1));
 /// ```
+#[must_use]
 pub fn unlocked_read_locked_write_ring_buffer<T>(
     capacity: usize,
 ) -> (UnlockedReader<T>, LockedWriter<T>) {

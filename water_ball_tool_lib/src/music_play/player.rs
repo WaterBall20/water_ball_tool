@@ -302,8 +302,10 @@ impl Player {
                             }
                         }
                         PlayCmd::Seek(_) => {
-                            // C3: 不 panic
-                            error!("Seek is not implemented");
+                            //AI=== 当前没有发送方：seek 在命令线程完成，保留分支兼容 transport API
+                            // No sender today: seek runs on the command thread; keep the arm for the transport API.
+                            debug!("Seek transport ignored / 忽略 Seek transport");
+                            //AI_END===
                         }
                         PlayCmd::ClearEofBuf => {}
                     }
@@ -747,9 +749,52 @@ impl Player {
         self.sound_engine.decoder_runtime.set_decoder_path(path)
     }
 
-    pub fn try_seek(&mut self, pos: Duration) -> Result<(), Box<dyn Error>> {
-        Err("Seek is not implemented".into())
+    //AI=== 同曲跳转：清已生成的旧音频 → 解码器 seek（内部清输入环并基本复位效果链）→ 作废 EOF 并归位进度
+    // Seek within the track: drop produced audio, seek in the decoder (it clears the input ring and basic-resets the
+    // effect chain), then invalidate EOF state and rebase the progress counter.
+    /// 跳到同曲指定位置。进度为近似值：回调增量与归位之间可能相差一个音频块。
+    ///
+    /// Seek within the current track. The reported position is approximate: the callback may add one audio block
+    /// between the reset and the rebase.
+    pub fn try_seek(&self, pos: Duration) -> Result<(), Box<dyn Error>> {
+        if self.sound_engine.decoder_runtime.decoder_format().is_none() {
+            return Err("no decoder / 尚未加载曲目".into());
+        }
+        if self.sound_engine.decoder_runtime.is_poisoned() {
+            return Err("decoder poisoned / 解码器异常，无法跳转".into());
+        }
+
+        // 先清输出环，效果线程可能卡在写满的环上，清空后它才能处理 Seek 控制块
+        // Clear the output ring first: the effect thread may be blocked on a full ring and must drain to handle Seek.
+        self.sound_engine.audio_ring_buffer.reject_pending_writers();
+        // 先作废一次 EOF 状态，缩小回调在 seek 过程中误发 TrackEnded 的窗口
+        // Invalidate EOF once up front to narrow the window where the callback may emit TrackEnded mid-seek.
+        self.event_content
+            .pre_effect_item_eof
+            .store(false, Ordering::Release);
+        self.event_content
+            .pre_effect_item_eof_pos
+            .store(0, Ordering::Release);
+        self.sound_engine.decoder_runtime.try_seek(pos)?;
+
+        // seek 期间效果线程可能又处理了队列里的旧 Eof，返回后再清一次
+        // The effect thread may still process a queued old Eof during the seek, so clear again after it returns.
+        self.event_content
+            .pre_effect_item_eof
+            .store(false, Ordering::Release);
+        self.event_content
+            .pre_effect_item_eof_pos
+            .store(0, Ordering::Release);
+
+        // pos 按输出（重采样后）的交错样本数计数，必须用设备格式而不是解码格式
+        // pos counts interleaved output (post-resampler) samples, so use the device format, not the decode format.
+        let channels = f64::from(self.sound_engine.stream_config.channels);
+        let rate = f64::from(self.sound_engine.stream_config.sample_rate);
+        let samples = (pos.as_secs_f64() * rate * channels).round() as u64;
+        self.pos.store(samples, Ordering::Release);
+        Ok(())
     }
+    //AI_END===
 
     pub fn get_sample_rate(&self) -> u32 {
         self.sound_engine.stream_config.sample_rate

@@ -2,7 +2,7 @@
 
 > **Language**: English | [简体中文](docs/zh_CN/ARCHITECTURE.md)
 
-> Last Updated: 2026-10-31
+> Last Updated: 2026-11-06
 
 ---
 
@@ -19,9 +19,10 @@
 9. [Progress Bar System](#9-progress-bar-system)
 10. [Logging System](#10-logging-system)
 11. [Tools Module](#11-tools-module)
-12. [Work-in-Progress Modules](#12-work-in-progress-modules)
-13. [Test Architecture](#13-test-architecture)
-14. [Design Decisions & Tradeoffs](#14-design-decisions--tradeoffs)
+12. [Ring Buffer Modules](#12-ring-buffer-modules)
+13. [Work-in-Progress Modules](#13-work-in-progress-modules)
+14. [Test Architecture](#14-test-architecture)
+15. [Design Decisions & Tradeoffs](#15-design-decisions--tradeoffs)
 
 ---
 
@@ -32,9 +33,10 @@ features:
 
 - **`ff`** — Multi-threaded parallel file finder, emits a JSON file manifest with symlink cycle detection and optional
   per-file hashing
-- **`wbfp`** — Custom binary archive format (WaterBall Files Pack): pack, unpack, and BLAKE3 hash verification
-- **`mp`** — Terminal music player: audio playback with playlist modes, stdin controls, and a realtime-safe audio
-  thread architecture (`tui/` interface is still WIP)
+- **`wbfp`** — Custom binary archive format (WaterBall Files Pack): pack, unpack, BLAKE3 hash verification, and a
+  read-only TUI browser
+- **`mp`** — Terminal music player: audio playback with playlist modes, an interactive ratatui TUI, and a realtime-safe
+  audio thread architecture
 
 The repository is a cargo **workspace**: the `water_ball_tool` binary crate (CLI entry, `src/`) depends on the
 `water_ball_tool_lib` library crate (`water_ball_tool_lib/src/`), which exposes the reusable modules.
@@ -58,7 +60,7 @@ The repository is a cargo **workspace**: the `water_ball_tool` binary crate (CLI
 | Random            | `rand 0.10`                                               | Randomized test data (longtime tests: random tree search stress, large fixtures) |
 | Test utils        | `pretty_assertions 1.4`                                   | Diffable assertion output                                                        |
 | Audio             | `cpal 0.18` / `symphonia 0.6` / `rubato 5` / `lofty 0.25` | Audio output, decoding, resampling, tag reading                                  |
-| Terminal UI       | `ratatui 0.30`                                            | WIP `mp` TUI                                                                     |
+| Terminal UI       | `ratatui 0.30` / `vtparse 0.7`                            | Interactive `mp` + `wbfp` TUIs + Windows VT input                                |
 | Thread channels   | `crossbeam-channel 0.5`                                   | Realtime-safe bounded channels (audio callbacks)                                 |
 
 ---
@@ -70,11 +72,18 @@ water_ball_tool (binary crate, root package)
   ├── src/main.rs          ← CLI entry; declares `mod command;`
   ├── src/command.rs       ← CLI routing + progress bar helpers
   │   ├── command/ff.rs    ← ff subcommand (search + optional hashing)
-  │   ├── command/wbfp.rs  ← wbfp subcommand
-  │   ├── command/music_play.rs  ← clap args + stdin loop + playlist collection
+  │   ├── command/wbfp.rs  ← wbfp module root (args + TUI/classic routing)
+  │   │   └── command/wbfp/
+  │   │       ├── classic.rs   ← classic indicatif path
+  │   │       ├── common.rs    ← shared path/copy/extract helpers
+  │   │       ├── events.rs    ← TUI job events + row status
+  │   │       ├── ops.rs       ← TUI pack/unpack/verify workers
+  │   │       └── tui/         ← TUI (tui.rs, app.rs, ui.rs, browse.rs)
+  │   ├── command/music_play.rs  ← clap args + TUI wiring
   │   │   └── command/music_play/
-  │   │       ├── runtime.rs         ← playback orchestration + indicatif UI thread
-  │   │       └── tui/               ← terminal UI (WIP)
+  │   │       ├── runtime.rs         ← playback runtime (event sinks, snapshot)
+  │   │       ├── scanner.rs         ← background tag scan (lofty → ScanMessage)
+  │   │       └── tui/               ← terminal UI (tui.rs, app.rs, ui.rs, channel_writer.rs)
   │   └── command/test.rs  ← integration tests
   └── depends on:
       water_ball_tool_lib (library crate, workspace member)
@@ -96,7 +105,8 @@ water_ball_tool (binary crate, root package)
         │   ├── manager_sync.rs         ← public API layer (Arc<Mutex<>>)
         │   │   └── test.rs             ← public API tests
         │   ├── pack_io.rs              ← low-level file I/O + space allocation + GC merging
-        │   │   ├── file.rs             ← PackVirtualFile (access mode enforcement)
+        │   │   ├── file.rs             ← FileIo trait (pack backend abstraction)
+        │   │   ├── pack_file.rs        ← PackVirtualFile (access mode enforcement)
         │   │   ├── file_handle.rs      ← PackFileHandle (493 lines, core file logic)
         │   │   └── file_hash.rs        ← PackFileHash (BLAKE3 state machine)
         │   ├── net_server.rs           ← network server (WIP, debug builds only)
@@ -172,8 +182,8 @@ flowchart TD
 ```
 1. Cli::parse()        — clap derive parses CLI args
 2. command::cli(cli)   — routes to the subcommand handler
-3. subcommand handler  — calls multi_progress_init(module) to build the MultiProgress and install
-                         the global tracing subscriber
+3. subcommand handler  — classic paths call multi_progress_init(module) to build the MultiProgress and install
+                         the global tracing subscriber; the wbfp/mp TUIs install the TUI channel writer instead
 4. Err wrapper         — prints the error and exits with code -1
 ```
 
@@ -209,17 +219,18 @@ Constants
 
 ### 6.1 Multi-Threaded Work Queue Model
 
-Architecture: **shared work queue + condition variable** pattern.
+Architecture: **shared work queue + blocking pop** pattern. The queue is a `ConcurrentRing<DirEntry>` (see §12.1);
+there is no separate condition variable or running-thread counter.
 
 ```mermaid
 flowchart TD
-    queue["DirQueue (Mutex<VecDeque<DirEntry>>)"]
+    queue["DirQueue (ConcurrentRing<DirEntry>)"]
     w1["Worker 1"]
     w2["Worker 2"]
     wn["Worker N ... (max_threads)"]
     results["Results (Mutex<HashMap<PathBuf, FileInfo>>)"]
 
-    queue -->|pop_front / push_back| w1
+    queue -->|push / pop_wait| w1
     queue --> w2
     queue --> wn
     w1 --> results
@@ -229,12 +240,10 @@ flowchart TD
 
 **Worker lifecycle**
 
-1. On spawn: `running_count` incremented
-2. Loop: `pop_front()` from queue
-3. Queue empty: `running_count` decremented, check if zero
-    - `running_count == 0` → `condvar.notify_all()`, thread exits
-    - Otherwise → `condvar.wait()`, recheck on wake
-4. Woken: `running_count` incremented, process popped task
+1. On spawn: enter the loop
+2. Loop: `pop_wait()` from the queue (blocks while it is empty)
+3. A pushed directory wakes one blocked worker
+4. Queue empty and no other worker can push → `pop_wait()` returns `WritersClosed` / `AllWaiting` → thread exits
 
 **Progress rate limiting**: fires every 50 files / 10 dirs via `pb.send((delta_files, delta_dirs))`.
 
@@ -356,10 +365,16 @@ Parallel scan produces a flat `HashMap<PathBuf, FileInfo>`. `build_tree()` recon
 
 `mp` is a terminal music player. The command:
 
-1. Collects tracks from the positional `files...` paths (directories are walked recursively); tags and duration come
-   from `lofty`, and tracks whose metadata cannot be read are logged and skipped.
-2. Builds a `PlayList` with the selected loop mode and creates a `Runtime`.
-3. Starts playback and then reads commands from stdin until `exit`: `next`/`n`, `Play`/`P`, `pause`/`p`, `exit`.
+1. Validates the volume argument and installs the TUI logging subscriber (records go into the panel, see §7.7).
+2. Creates `Runtime` (player + playlist + event sinks) and spawns the `mp-scan` thread, which walks `files...`, reads tags
+   with `lofty` (directories only accept extensions `lofty` recognizes; an explicitly passed file is always tried) and
+   sends `ScanMessage::{Track, Progress, Done}` to the TUI loop.
+3. Initializes the terminal and runs `tui::run`: drain logs/scan messages → apply the runtime snapshot → render every
+   50 ms. Initialization loads the first track paused: sequential modes do it as soon as the first track arrives,
+   `shuffle`/`periodic-shuffle` wait for 5 tracks and fall back to initializing with whatever was found when the scan
+   ends. Playback starts only with `-a/--autoplay` (or when the user presses play). Keys: `n` next, `←`/`→` seek
+   (5 s per tap; a hold previews and commits on release), space play/pause, `p` pause, `P` play, `+`/`-` volume,
+   `:` command mode, `q`/`Esc`/`Ctrl+C` quit.
 
 CLI arguments (`MusicPlayArgs`):
 
@@ -368,29 +383,31 @@ CLI arguments (`MusicPlayArgs`):
 | `files...`           | —                 | Audio files and/or directories to play                                                  |
 | `-v, --volume <f32>` | `0.75`            | Initial volume, 0.0–1.0 (values outside this range are rejected with an argument error) |
 | `--verbose`          | off               | Verbose output (long option only)                                                       |
+| `-a, --autoplay`     | off               | Start playing once the first track is found; without it the first track is loaded paused |
 | `-m, --mode <MODE>`  | `sequential-loop` | `sequential-loop`, `sequential`, `repeat-one`, `shuffle`, `periodic-shuffle`            |
 
 ### 7.2 Modules
 
-The playback engine lives in the library crate and has no dependency on the terminal UI; only `runtime.rs`, the clap
-handler and `tui/` stay in the binary.
+The playback engine lives in the library crate and has no dependency on the terminal UI; only `runtime.rs`, `scanner.rs`,
+the clap handler and `tui/` stay in the binary.
 
-| Module (crate)                   | Responsibility                                                                                                                  |
-|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `music_play.rs` (lib)            | Engine module root; owns `LoopMode` (with `FromStr`) and declares the submodules                                                 |
-| `player.rs` (lib)                | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`                               |
-| `decoder_runtime.rs` (lib)       | symphonia decode thread: probes/seeks the file, decodes audio into the pre-effect ring buffer; owns the paired `DecoderSession` |
-| `effect.rs` (lib)                | `PostEffect`/`PreEffect` traits, `AudioFormat`, `PlayCmd`, effect chain                                                         |
-| `effect/runtime.rs` (lib)        | Locked pre-effect runtime thread (event sinks, stop/reject handling)                                                            |
-| `watchdog.rs` (lib)              | Crash watchdog: `ThreadExitGuard` (Drop → notify on a `Condvar`) + single watchdog thread owned by `Player`                     |
-| `effect/resampler.rs` (lib)      | rubato FFT resampler to the output device sample rate                                                                           |
-| `effect/cross_bridge.rs` (lib)   | Crossfade bridging between tracks                                                                                               |
-| `effect/fade.rs` (lib)           | Fade in/out and pause/resume transport handling                                                                                 |
-| `play_list.rs` (lib)             | `Track` list, loop modes, shuffle queues, next-track selection, navigation history for the previous track, add/insert |
-| `event_dispatch.rs` (lib)        | Dedicated dispatch thread for realtime-callback events and logs                                                                 |
-| `tools.rs` (lib)                 | `TimeMetrics` / `DurationAccumulator` profiling counters                                                                        |
-| `runtime.rs` (bin)               | Orchestration: track advance on `TrackEnded`, `indicatif` UI refresh thread, event consumers, stop                              |
-| `tui/` (bin)                     | Terminal UI (`app.rs`, `ui.rs`, `channel_writer.rs`) — **WIP, not wired into the command**                                      |
+| Module (crate)                 | Responsibility                                                                                                                                                                                                                    |
+|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `music_play.rs` (lib)          | Engine module root; owns `LoopMode` (with `FromStr`) and declares the submodules                                                                                                                                                  |
+| `player.rs` (lib)              | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`                                                                                                                                 |
+| `decoder_runtime.rs` (lib)     | symphonia decode thread: probes/seeks the file, decodes audio into the pre-effect ring buffer; owns the paired `DecoderSession`                                                                                                   |
+| `effect.rs` (lib)              | `PostEffect`/`PreEffect` traits, `AudioFormat`, `PlayCmd`, effect chain                                                                                                                                                           |
+| `effect/runtime.rs` (lib)      | Locked pre-effect runtime thread (event sinks, stop/reject handling)                                                                                                                                                              |
+| `watchdog.rs` (lib)            | Crash watchdog: `ThreadExitGuard` (Drop → notify on a `Condvar`) + single watchdog thread owned by `Player`                                                                                                                       |
+| `effect/resampler.rs` (lib)    | rubato FFT resampler to the output device sample rate                                                                                                                                                                             |
+| `effect/cross_bridge.rs` (lib) | Crossfade bridging between tracks: asymmetric delay-line fill (low startup latency) and full-curve gain scaling for short tails                                                                                                   |
+| `effect/fade.rs` (lib)         | Fade in/out and pause/resume transport handling                                                                                                                                                                                   |
+| `play_list.rs` (lib)           | `Track` list, loop modes, shuffle queues, next-track selection, navigation history for the previous track, `jump_to` (periodic shuffle removes the target from the current cycle when queued), add/insert                         |
+| `event_dispatch.rs` (lib)      | Dedicated dispatch thread for realtime-callback events and logs                                                                                                                                                                   |
+| `tools.rs` (lib)               | `TimeMetrics` / `DurationAccumulator` profiling counters                                                                                                                                                                          |
+| `runtime.rs` (bin)             | TUI playback runtime: player + shared playlist, `add_track`/`play`/`pause`/`next_track`/`prev_track`/`seek`/`set_loop_mode`/`snapshot`/`stop`, seamless auto advance on decode Eof (`no_clear`), start-error policy, no UI thread |
+| `scanner.rs` (bin)             | `mp-scan` thread: tags/album/audio info via lofty → `ScanMessage::{Track, Progress, Done}`                                                                                                                                        |
+| `tui/` (bin)                   | Terminal UI (`tui.rs`, `app.rs`, `ui.rs`, `channel_writer.rs`): 50 ms loop, rendering, key map, log channel                                                                                                                       |
 
 ### 7.3 Realtime Audio Thread
 
@@ -440,9 +457,8 @@ drives `stream.play()` / `stream.pause()`.
     - a single-frame `DecodeError` is recoverable: it is reported and the frame is skipped;
     - `WriteRejected` during stop, track change, or seek is normal control flow, not an error.
 - The binary front-end consumes decoder error events through a `DecoderEventChannelSink` (channel thread, never inline
-  on the decode thread): it pauses playback and wakes the UI thread. While poisoned, the `mp` progress bar shows the
-  `异常暂停中` prefix and a red `Error` line between the song info and the time-metrics block, and `Play`/`P` changes
-  track first while poisoned, then always resumes playback.
+  on the decode thread) and pauses playback. The next `play` sees `is_poisoned()` and changes track first, then starts
+  playback; the TUI shows the `异常暂停中` state and a red `Error` line in the now-playing block.
 - `DecoderRuntime::stop()` records a `send_skip` failure, always joins the decode thread, then returns the first error;
   `Player::try_stop` logs stop failures and continues the remaining shutdown steps.
 - The pre-effect runtime thread never exits on a runtime error: a ring error resets the effect chain with the `Skip`
@@ -450,9 +466,9 @@ drives `stream.play()` / `stream.pause()`.
   side therefore parks instead of spinning); a hard output-write error is reported the same way and the block is
   dropped. Only the `stop` flag ends the loop. The binary logs these events through a
   `PreEffectRuntimeEventChannelSink` (informational — playback may continue).
-- Event-channel sink constructors (`PlayerEventChannelSink::new`, `DecoderEventChannelSink::new`,
-  `PreEffectRuntimeEventChannelSink::new`) return `std::io::Result`; direct sinks construct infallibly. `Player::new()`
-  and `Runtime::create()` propagate sink and thread spawn failures.
+- Event-channel sink constructors (`PlayerEventChannelSink::create`, `DecoderEventChannelSink::create`,
+  `PreEffectRuntimeEventChannelSink::create`) return `Result`; direct sinks construct infallibly. `Player::new()` and
+  `Runtime::new()` propagate sink and thread spawn failures.
 
 ### 7.5 Shutdown (`Player::try_stop`)
 
@@ -482,11 +498,51 @@ Failures at any step are logged, not propagated; `Runtime::run_stop` additionall
 - `try_stop` shuts the watchdog down before stopping the threads and joins it last, so a normal shutdown never triggers
   a restart.
 
+### 7.7 TUI
+
+**Files**: `src/command/music_play/tui/` (`tui.rs`, `app.rs`, `ui.rs`, `channel_writer.rs`)
+
+- `tui::run` polls every 50 ms, drains log and scan messages, applies `Runtime::snapshot()` and renders now playing /
+  progress / playlist / logs / key hints
+- Playlist viewport: only the visible rows are rendered; `↑`/`↓` scroll one line, `PageUp`/`PageDown` one page,
+  `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left click on a row switches to and plays
+  that track (`Runtime::play_at` → `PlayList::jump_to`). The footer hint labels are clickable buttons for quit, next,
+  seek, play/pause, one-line scroll, volume, debug and command mode. The viewport follows the current track when the
+  track changes; manual scrolling is kept until then. Mouse capture is enabled around the TUI loop and released before
+  the terminal is restored. On Windows the TUI enables `ENABLE_VIRTUAL_TERMINAL_INPUT`, requests SGR mouse reporting and
+  parses the VT byte stream with `vtparse` (`VtInput`); this avoids crossterm's console mouse records, which some
+  ConPTY terminals deliver as bare X10 payload bytes. Under VT input the TUI reads stdin bytes directly (a dedicated
+  reader thread) instead of `crossterm::event`, because crossterm 0.29 drops control characters such as ESC and CR
+  from synthesized VT input; a lone ESC becomes the Esc key only after a short timeout. If VT input cannot be enabled,
+  the mouse is disabled and keyboard input keeps working
+- Startup: sequential modes initialize (load the first track) on the first track; shuffle modes wait for 5 tracks, with
+  a `ScanMessage::Done` fallback that initializes with fewer tracks when the scan ends
+- Key map: `n` next, `←`/`→` seek (5 s per tap; repeats during a hold only move the preview and the target is
+  committed on release), space play/pause, `p` pause, `P` play, `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the
+  playlist, `+`/`-` volume, `d`/F12 toggle the debug popup, `:` command mode, `q`/`Esc`/`Ctrl+C` quit. The popup shows
+  buffer lengths, the decoding path/format, playlist state, per-stage timings (`TimeMetrics` windows), `lock_fail` and `underrun`
+- Command mode: `:` turns the footer into an input line (`Enter` runs, `Esc` cancels, `Backspace` edits). Commands match
+  by unique prefix: `quit`, `play`, `pause`, `toggle`, `next`, `prev`, `seek <mm:ss|+N|-N>`, `vol <0-100|+N|-N>`,
+  `mode <name>`, `goto <n>`, `debug` and `help`/`?`; an unknown or ambiguous name is reported in the footer. `help` opens
+  a popup listing the command table, `prev` steps back through `PlayList::prev`'s history, `goto` reuses
+  `Runtime::play_at` and `mode` calls `Runtime::set_loop_mode`. `:seek` calls `Runtime::seek` → `Player::try_seek`,
+  which clears the output ring, runs the decoder's accurate seek with a basic `Seek` effect reset, invalidates the EOF
+  state and rebases the progress counter; the reported position is approximate by one audio block. `Runtime::seek`
+  ignores requests during a track switch or while the EOF tail/crossfade is draining, because `pos` still counts the
+  previous track in that window.
+- `channel_writer` owns the tracing subscriber (bounded 1024, `try_send` drops when full); the panel dims the timestamp
+  and colors the level token by severity. Debug builds write `debug` records to `temp/logs/<module>/` under the project
+  (from `CARGO_MANIFEST_DIR`); release builds keep the panel at `info` and write the `debug` file to the user data
+  directory
+- `mp` chains a panic hook and logs `tui::run` errors at `error` level so a crash leaves a trace in the log file; key
+  and mouse events are logged at `debug`
+
 ---
 
 ## 8. WaterBall Files Pack (`wbfp`)
 
-**Files**: `water_ball_tool_lib/src/wb_files_pack/*.rs` (~6,000+ lines total)
+**Files**: `water_ball_tool_lib/src/wb_files_pack/*.rs` (~6,000+ lines total) plus the binary-crate front end
+`src/command/wbfp/*` (classic progress-bar path, TUI, operations).
 
 ### 8.1 Overall Architecture
 
@@ -496,7 +552,7 @@ WBFP uses a **three-layer architecture**
 flowchart TD
     L1["ManagerSync (public API layer)<br/>Arc&lt;Mutex&lt;WBFPManager&gt;&gt; + Arc&lt;Mutex&lt;PackIO&gt;&gt;<br/>Thread-safe; all external access here"]
     L2["WBFPManager (business logic layer)<br/>Pack lifecycle, file ops, tree, locks, save"]
-    L3["PackIO (low-level I/O layer)<br/>File read/write, space allocation, GC merging<br/>Underlying: File (Rust std)"]
+    L3["PackIO (low-level I/O layer)<br/>File read/write, space allocation, GC merging<br/>Underlying: Box&lt;dyn FileIo&gt; (File by default)"]
     L4["ManifestDataBlock (atomic block layer)<br/>A/B dual-block atomic updates, BLAKE3 hash,<br/>version management"]
     L1 --> L2 --> L3 --> L4
 ```
@@ -810,7 +866,7 @@ pub struct ManagerSync {
 
 ### 8.9 Virtual File I/O — PackVirtualFile + PackFileHandle
 
-**PackVirtualFile** (`pack_io/file.rs`, 210+ lines) — renamed from `PackFileWR`:
+**PackVirtualFile** (`pack_io/pack_file.rs`, 210+ lines) — renamed from `PackFileWR`:
 
 - Implements `Read + Write + Seek` traits with **access mode enforcement**
 - Holds `Arc<Mutex<PackFileHandle>>`
@@ -894,7 +950,7 @@ pub enum PackFileError {
 
 ```mermaid
 flowchart TD
-    P["wbfp_p (src/command/wbfp.rs)"]
+    P["wbfp_p (src/command/wbfp/classic.rs)"]
     P --> D["Determine output path (.wbfp extension)"]
     D -->|" out_pack_path provided "| D1["dir? join with input filename : use as-is"]
     D -->|" not provided "| D2["CWD + input filename"]
@@ -920,7 +976,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    U["wbfp_u (src/command/wbfp.rs)"]
+    U["wbfp_u (src/command/wbfp/classic.rs)"]
     U --> O["ManagerSync::open() → open existing pack in read-only mode (Read)"]
     O --> OD["Smart output dir deduction"]
     OD -->|" not specified "| OD1["strip .wbfp suffix from filename, use in CWD"]
@@ -941,7 +997,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    H["wbfp_h (src/command/wbfp.rs)"]
+    H["wbfp_h (src/command/wbfp/classic.rs)"]
     H --> O["ManagerSync::open() → open existing pack in read-only mode (Read)"]
     O --> TC["Thread count: from -t flag or CPU count"]
     TC --> DIS["Multi-threaded discover-as-you-verify (same pattern as unpack, with empty-pack early exit)"]
@@ -971,12 +1027,56 @@ flowchart TD
 
 ---
 
+### 8.16 TUI Mode
+
+**Files**: `src/command/wbfp/` (`classic.rs`, `common.rs`, `events.rs`, `ops.rs`, `tui.rs`, `tui/app.rs`,
+`tui/ui.rs`, `tui/browse.rs`)
+
+- **Routing**: `wbfp::run` selects the TUI when stdout and stdin are terminals and `--no-tui` is absent; otherwise it calls the
+  classic `indicatif` path. `wbfp::commands` always takes the classic path (tests use it). `browse` has no classic
+  equivalent and requires an interactive terminal.
+- **Layout**: yazi-inspired header/path line, file list, reserved preview pane (metadata now, file content later), status
+  line and key hints. Wide terminals split list/preview; narrow terminals show one pane and `p` toggles it. The list is
+  read-only in every mode — pack/unpack/verify add no edit actions.
+- **Navigation**: `ManagerSync` lazily loads one directory at a time (`get_struct_item_name_list` +
+  `get_pack_struct_item`); pack mode browses the local source directory instead. Directories sort first; `..` is a
+  navigation row. Keyboard navigation is always available; non-Windows platforms also enable mouse select/double-click/
+  wheel. On Windows/ConPTY crossterm splits SGR mouse reports into literal keys, so the TUI starts keyboard-only and
+  clears stale mouse reporting with `MouseCapture::keyboard_only`.
+- **Jobs**: `ops::spawn` runs pack/unpack/verify on a background thread and sends `JobEvent::{Dir, File, Start,
+  Progress, Done, Total, Finished}` over a bounded mpsc channel. `app::App::apply_event` updates row statuses and the task
+  card. Unpack/verify open one read-only `ManagerSync` and share a clone with the job: the pack's `.lock` rejects a second
+  open in the same process, so the UI cannot keep a separate handle. Reads serialize on the manager lock; the UI stays
+  responsive because each directory load is short.
+- **Status aggregation**: directory rows aggregate descendant file states incrementally (`failed` > `warning` >
+  `running/pending` > `done`); a parent is never shown done while a child is unfinished. Unpack/verify empty directories
+  receive an explicit `Done` event; pack does not emit directory events because it never copies directories, so an empty
+  source directory stays neutral instead of spinning. Hash verify writes nothing, so its task card has no output field.
+- **Task list**: `JobEvent::{Start, Progress, Done}` carries per-file `done/total`. `App` keeps two bounded queues:
+  `active_tasks` (current files, newest first) and `done_tasks` (finished, below active). The preview pane renders active
+  rows first. Workers only enqueue events on an unbounded channel (progress is rate-limited to 4–10 MiB); the UI never
+  stats or reads files for the task list, so it cannot slow the job.
+- **Column alignment**: file-list and task rows use fixed display-width columns (`unicode-width`), fixed progress-bar
+  and percent widths, and a fixed-height job summary. Sizes split into a right-aligned numeric column and a fixed-width
+  unit column (`B`/`KiB`/...), so the one-cell `B` cannot shift the number. Small files completing quickly cannot make
+  columns or the task area jump.
+- **Progress**: the TUI never writes `indicatif` output while in the alternate screen. `common::copy_file_into_pack` and
+  `common::extract_pack_file_to_disk` are shared with the classic path; TUI workers report per-file progress and a
+  rate-limited global `Total` instead.
+- **Shutdown**: operations are not cancellable. `q`/`Ctrl+C` during a job sets `quit_after_job`; the loop exits only after
+  `Finished`, so a pack write is never abandoned mid-flight. Mouse capture is released by a Drop guard and the terminal
+  is restored on every exit path, matching `mp`.
+- **Logging**: the TUI installs `music_play::tui::channel_writer::init_logging("wbfp")`; logs go to a bounded channel and
+  the `d` popup. The classic path keeps `multi_progress_init`.
+
+---
+
 ## 9. Progress Bar System
 
-**Core design**: every subcommand creates its own `indicatif::MultiProgress` via `multi_progress_init(module)`; all
-child
-bars of that command are registered in it. The terminal log writer wraps the same `MultiProgress`, so `suspend()` keeps
-log lines from tearing the bars.
+**Core design**: every non-TUI subcommand path creates its own `indicatif::MultiProgress` via
+`multi_progress_init(module)`; all child bars of that command are registered in it. The terminal log writer wraps the same
+`MultiProgress`, so `suspend()` keeps log lines from tearing the bars. The `wbfp` TUI does not use indicatif; it draws
+progress through ratatui and `JobEvent` (see §8.16).
 
 **Hierarchy**
 
@@ -1018,24 +1118,29 @@ refresh; the file finder additionally reports every 50 files / 10 dirs.
 flowchart TD
     MP["multi_progress_init(module) — creates MultiProgress"] --> INIT["init_global_logging(&mp, module) → Option&lt;PathBuf&gt;"]
     INIT --> DBG{"debug build?"}
-    DBG -->|yes| TERM["TerminalWriter → MultiProgress::suspend() · level debug"]
+    DBG -->|yes| TERM["TerminalWriter → bounded channel (1024) → log-writer thread → MultiProgress::suspend() · level debug"]
     DBG -->|no| SPLIT["terminal layer (level info) + file layer (level debug)"]
-    SPLIT --> TW["TerminalWriter → MultiProgress::suspend()"]
+    SPLIT --> TW["TerminalWriter → bounded channel → log-writer thread → MultiProgress::suspend()"]
     SPLIT --> FW["FileWriter → &lt;data_local_dir&gt;/&lt;crate&gt;/logs/&lt;module&gt;/&lt;module&gt;-&lt;timestamp&gt;.log"]
     SPLIT -->|file creation fails| TERM
 ```
 
 **Key design**:
 
-- `TerminalWriter` buffers output per line and prints it through `MultiProgress::suspend()`, so log output never
-  corrupts the progress bars; mutex poisoning is recovered with `PoisonError::into_inner`.
+- `TerminalWriter` buffers output per line and enqueues it into a bounded channel (capacity 1024) drained by the
+  `log-writer` thread, which prints it through `MultiProgress::suspend()`; log output never corrupts the progress bars,
+  and no caller thread blocks on terminal I/O — a full channel drops terminal lines (typically while a debugger is
+  paused or the console is stalled), while file logging stays synchronous and lossless.
+- Every `EnvFilter` is built by `log_filter(level)` = `<level>,lofty=warn`: `tracing-subscriber`'s default
+  `tracing-log` bridge feeds lofty's per-block `log` records into this writer, and each line clears and redraws every
+  bar, so third-party debug records are capped at `warn`.
 - `FileWriter` (release builds only) uses a bracketed format:
   `[UTC timestamp] [level] [thread name/id] [file:line] message`, with `ansi(false)`.
-- Debug builds (`#[cfg(debug_assertions)]`) log to the terminal only at `debug` level. Release builds log to the
-  terminal
-  at `info` level and to the log file at `debug` level.
-- Log file path: `<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log` (module names
-  sanitized). If the file cannot be created, logging falls back to terminal-only `debug` output.
+- Debug builds (`#[cfg(debug_assertions)]`) log to the terminal at `debug` level and also write a `debug` log file under
+  the project temp directory: `<CARGO_MANIFEST_DIR>/temp/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log`. Release
+  builds log to the terminal at `info` level and to the log file at `debug` level.
+- Release log file path: `<ProjectDirs data_local_dir>/<crate>/logs/<module>/<module>-<YYYY-MM-DD_HH-MM-SS>.log` (module
+  names sanitized). If a log file cannot be created, logging falls back to terminal-only `debug` output.
 
 
 ---
@@ -1056,7 +1161,34 @@ flowchart TD
 
 ---
 
-## 12. Work-in-Progress Modules
+## 12. Ring Buffer Modules
+
+**Files**: `water_ball_tool_lib/src/concurrent_ring.rs`, `water_ball_tool_lib/src/split_ring_buffer/`
+
+### 12.1 `concurrent_ring`
+
+`ConcurrentRing<T>` is a concurrent, initializable ring buffer used as the producer-consumer queue between
+search/decoder threads and worker threads. Blocking operations fail fast instead of blocking forever: every blocking
+method (`push_wait` / `write_wait` / `write_all` vs `pop_wait` / `read_wait` / `read_exact`) registers the calling
+handle's direction, `Clone`/`Drop` keep a per-direction handle count, and once the last handle of one direction is
+dropped the opposite side gets `ReadersClosed` / `WritersClosed` (mirroring `split_ring_buffer`'s peer-closed
+`CannotWait`). There is no separate reader/writer handle type and no manual close/reopen call; a ring whose handles
+never called a blocking method is never reported closed.
+
+### 12.2 `split_ring_buffer`
+
+A split read/write ring buffer where each end can independently be locked or lock-free (`locked_ring_buffer`,
+`unlocked_read_locked_write_ring_buffer`, …); the audio callback uses the lock-free reader. `LockedWriter::resize` /
+`UnlockedWriter::resize` (Copy only) change the logical capacity: growing past the physical allocation allocates new
+A/B buffers, blocks new writers and waits for in-flight writers (readers keep running and only see "no data" during
+the tiny swap window), copies the live range into the new A at the same logical positions, swaps the buffers and
+retires the old A until no operation is in flight. Shrink or grow-within-allocation only updates the capacity
+atomically; data already written past the new capacity is kept, so `len()` may temporarily exceed `capacity()` and
+writers stall until the reader drains.
+
+---
+
+## 13. Work-in-Progress Modules
 
 ### gakumasu (Game Simulator
 
@@ -1078,41 +1210,36 @@ flowchart TD
 - `WBFPServerClient` skeleton: single client connection
 - No network listener logic yet
 
-### tui (Music Player Terminal UI)
-
-**Files**: `src/command/music_play/tui/` (`app.rs`, `ui.rs`, `channel_writer.rs`)
-
-- WIP and **not wired into** the `mp` command yet (the command currently uses stdin commands + progress bars)
-- `App` buffers up to 1,000 log lines for display; `ui.rs` / `channel_writer.rs` are the rendering side
-
 ---
 
-## 13. Test Architecture
+## 14. Test Architecture
 
 | File                                                    | Type         | Coverage                                                                                                                    |
 |---------------------------------------------------------|--------------|-----------------------------------------------------------------------------------------------------------------------------|
 | `src/command/test.rs`                                   | Integration  | ff + wbfp commands, cross-platform symlink cycle detection, synthetic fixture longtime tests (1000 random files via `rand`) |
 | `water_ball_tool_lib/src/file_finder/test.rs`           | Unit         | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream                            |
 | `water_ball_tool_lib/src/concurrent_ring/test.rs`       | Unit         | Ring buffer push/pop, capacity, wait/reject paths                                                                           |
-| `water_ball_tool_lib/src/split_ring_buffer/test/`       | Unit         | Basic/blocking/non-copy/drain-release/reject scenarios                                                                      |
+| `water_ball_tool_lib/src/split_ring_buffer/test/`       | Unit         | Basic/blocking/non-copy/drain-release/reject/resize scenarios                                                                  |
 | `water_ball_tool_lib/src/wb_files_pack/test.rs`         | Module       | Pack file create, read/write, verify                                                                                        |
 | `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | Internal API | Manager internal logic                                                                                                      |
 | `.../wb_files_pack/manager_sync/test.rs`                | Public API   | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access                                         |
 | `water_ball_tool_lib/src/music_play/effect/test.rs`     | Unit         | Effect chain / resampler / fade behavior                                                                                    |
 | `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | Unit     | Event dispatch thread, drop counting, stop semantics                                                                        |
+| `src/command/wbfp/ops.rs` / `tui/` (`cfg(test)`)        | Unit         | TUI pack/verify/unpack roundtrip, lazy pack browsing, navigation/viewport, layout rendering                                  |
 
 **Testing conventions**
 
 - Slow tests marked `#[ignore = "longtime"]`, skipped via `cargo test` (
 - Test temp dir: `./temp/test/` (gitignored)
 - Subcommand entries call `multi_progress_init(module)` themselves, so tests that invoke `ff::args` / `wbfp::commands` /
-  `music_play::args` get logging initialized without extra setup
+  `music_play::args` get logging initialized without extra setup. The `wbfp` TUI installs the channel writer instead;
+  tests use `wbfp::commands`, which always takes the classic path.
 - `TestTool::remove_test_pack_files(path)` for pack file test cleanup
 - Cross-platform tests use `#[cfg(unix)]` / `#[cfg(windows)]` for compilation gating
 
 ---
 
-## 14. Design Decisions & Tradeoffs
+## 15. Design Decisions & Tradeoffs
 
 ### File Finder
 

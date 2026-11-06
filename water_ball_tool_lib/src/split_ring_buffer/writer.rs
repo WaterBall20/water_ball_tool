@@ -10,9 +10,10 @@ fn kind_to_error<T>(k: Kind<T>) -> Error<T> {
         Kind::Full(v) => Error::full(v),
         Kind::Clearing(v) => Error::clearing(v),
         Kind::Truncating(v) => Error::truncating(v),
+        Kind::Resizing(v) => Error::resizing(v),
         Kind::WriteRejectedValue(v) => Error::write_rejected_value(v),
         Kind::WriteRejected => Error::write_rejected(),
-        _ => unreachable!("push_one only returns Full / Clearing / Truncating"),
+        _ => unreachable!("push_one only returns Full / Clearing / Truncating / Resizing"),
     }
 }
 
@@ -88,7 +89,9 @@ impl<T> LockedWriter<T> {
                 let _g = lock_ignore_poison(&self.inner.write.lock);
                 match self.inner.push_one(value) {
                     Ok(()) => return Ok(()),
-                    Err(Kind::Full(v) | Kind::Clearing(v) | Kind::Truncating(v)) => {
+                    Err(
+                        Kind::Full(v) | Kind::Clearing(v) | Kind::Truncating(v) | Kind::Resizing(v),
+                    ) => {
                         value = v;
                     }
                     Err(_) => unreachable!(),
@@ -264,6 +267,25 @@ impl<T> LockedWriter<T> {
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
+
+    //AI=== 当前逻辑容量（resize 后可变化）/ current logical capacity (may change after resize)
+    /// 当前逻辑容量；`resize` 后可能变化。
+    ///
+    /// Current logical capacity; may change after [`LockedWriter::resize`].
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    ///
+    /// let (_reader, writer) = locked_ring_buffer::<u8>(4);
+    /// assert_eq!(writer.capacity(), 4);
+    /// ```
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+    //AI_END===
 }
 
 impl<T: Copy> LockedWriter<T> {
@@ -424,6 +446,40 @@ impl<T: Copy> LockedWriter<T> {
             .map_err(|_| Error::locked())?;
         Ok(self.inner.write_slice(src))
     }
+
+    //AI=== 调整缓冲区大小 / resize the buffer
+    /// 调整逻辑容量；超过物理分配时重新分配并复制存量数据。仅 `T: Copy` 可用。
+    ///
+    /// - 扩容：阻止新写端并等待在途写端退出，读端在复制期间可继续读取，只在极短的交换窗口内
+    ///   读到“暂无数据”；分配新 A/B、复制存量、交换缓冲区，旧缓冲区延迟释放。
+    /// - 缩小或在物理分配内调整：只更新逻辑容量。已写入超过新容量的数据会保留，
+    ///   写端等待读端排空后继续。
+    ///
+    /// Resize the logical capacity; grow past the allocation by reallocating and copying the
+    /// live data. Only `T: Copy` is supported.
+    ///
+    /// - Grow: block new writers, wait for in-flight writers (readers keep running), allocate
+    ///   new A/B, copy live data, swap the buffers and retire the old one.
+    /// - Shrink / grow within the allocation: only the logical capacity changes. Data already
+    ///   written past the new capacity is kept; writers wait until the reader drains.
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::locked_ring_buffer;
+    ///
+    /// let (reader, writer) = locked_ring_buffer::<u8>(4);
+    /// writer.write(&[1, 2, 3]);
+    /// writer.resize(8);
+    /// assert_eq!(writer.capacity(), 8);
+    /// let mut buf = [0u8; 3];
+    /// assert_eq!(reader.read(&mut buf), 3);
+    /// assert_eq!(buf, [1, 2, 3]);
+    /// ```
+    pub fn resize(&self, size: usize) {
+        self.inner.resize(size);
+    }
+    //AI_END===
 }
 
 impl<T> Clone for LockedWriter<T> {
@@ -504,7 +560,10 @@ impl<T> UnlockedWriter<T> {
             }
             match self.inner.push_one(value) {
                 Ok(()) => return Ok(()),
-                Err(Kind::Full(v)) | Err(Kind::Clearing(v)) | Err(Kind::Truncating(v)) => value = v,
+                Err(Kind::Full(v))
+                | Err(Kind::Clearing(v))
+                | Err(Kind::Truncating(v))
+                | Err(Kind::Resizing(v)) => value = v,
                 Err(_) => unreachable!(),
             }
             if self.inner.read.is_closed() {
@@ -628,6 +687,25 @@ impl<T> UnlockedWriter<T> {
     pub fn is_full(&self) -> bool {
         self.inner.is_full()
     }
+
+    //AI=== 当前逻辑容量（resize 后可变化）/ current logical capacity (may change after resize)
+    /// 当前逻辑容量；`resize` 后可能变化。
+    ///
+    /// Current logical capacity; may change after [`UnlockedWriter::resize`].
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (_reader, writer) = unlocked_ring_buffer::<u8>(4);
+    /// assert_eq!(writer.capacity(), 4);
+    /// ```
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+    //AI_END===
 }
 
 impl<T: Copy> UnlockedWriter<T> {
@@ -750,6 +828,32 @@ impl<T: Copy> UnlockedWriter<T> {
         }
         Ok(())
     }
+
+    //AI=== 调整缓冲区大小 / resize the buffer
+    /// 调整逻辑容量；超过物理分配时重新分配并复制存量数据。仅 `T: Copy` 可用。
+    ///
+    /// 语义与 [`LockedWriter::resize`] 相同。
+    ///
+    /// Resize the logical capacity; grow past the allocation by reallocating and copying the
+    /// live data. Only `T: Copy` is supported; semantics match [`LockedWriter::resize`].
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::unlocked_ring_buffer;
+    ///
+    /// let (mut reader, mut writer) = unlocked_ring_buffer::<u8>(4);
+    /// writer.write(&[1, 2, 3]);
+    /// writer.resize(8);
+    /// assert_eq!(writer.capacity(), 8);
+    /// let mut buf = [0u8; 3];
+    /// assert_eq!(reader.read(&mut buf), 3);
+    /// assert_eq!(buf, [1, 2, 3]);
+    /// ```
+    pub fn resize(&mut self, size: usize) {
+        self.inner.resize(size);
+    }
+    //AI_END===
 }
 
 impl<T> Drop for UnlockedWriter<T> {

@@ -87,6 +87,15 @@ impl ResamplerEffect {
     }
 }
 
+//AI=== 测试用：当前缓冲的样本数 / test-only: number of buffered samples
+#[cfg(test)]
+impl ResamplerEffect {
+    pub(crate) fn buffered_len(&self) -> usize {
+        self.in_buf.len()
+    }
+}
+//AI_END===
+
 impl PreEffect for ResamplerEffect {
     fn init(
         &mut self,
@@ -233,7 +242,17 @@ impl PreEffect for ResamplerEffect {
         output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
-        if PreEffectDiscontinuity::Skip == kind || PreEffectDiscontinuity::Seek == kind {
+        //AI=== Seek 同时清内部输入并复位重采样器，避免旧位置的延迟线样本混入新位置
+        // Seek also drops buffered input and resets the resampler so old-position delay-line samples cannot leak.
+        if PreEffectDiscontinuity::Seek == kind {
+            self.in_buf.clear();
+            if let Some(resampler) = &mut self.resampler {
+                resampler.reset();
+            }
+            return 0;
+        }
+        //AI_END===
+        if PreEffectDiscontinuity::Skip == kind {
             return 0;
         }
         if self.is_passthrough() {

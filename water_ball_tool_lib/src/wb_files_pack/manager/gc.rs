@@ -33,16 +33,15 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(pack_file.get_data_file_pos_multi(length, current_seg, max_seg)?)
+        pack_file.get_data_file_pos_multi(length, current_seg, max_seg)
     }
 
-    pub(crate) fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) -> Result<()> {
+    pub(crate) fn file_gc_add(&mut self, gc_pos_list: Vec<(u64, u64)>) {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pack_file.file_gc_add(gc_pos_list);
-        Ok(())
     }
 
     pub(super) fn file_gc(&mut self) -> Result<()> {

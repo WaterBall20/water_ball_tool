@@ -14,10 +14,10 @@ An all-in-one command-line toolkit written in **Rust**. Currently provides three
 
 - **File Finder** (`ff`) — Multi-threaded parallel directory-tree scanner that emits a JSON file manifest. Supports
   symlink cycle detection and optional per-file hashing (MD5/SHA-1/SHA-2/BLAKE2b/BLAKE3/CRC32).
-- **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, and BLAKE3 hash
-  verification.
-- **Music Player** (`mp`) — Terminal music player for audio files and directories: playlist modes, volume control, and
-  an interactive stdin command loop. The `tui` interface is still WIP (not wired into the command).
+- **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, BLAKE3 hash verification,
+  and a read-only TUI browser with a reserved preview pane.
+- **Music Player** (`mp`) — Terminal music player for audio files and directories: interactive TUI with play/pause,
+  next track, volume, playlist view and live logs; playlist modes are selectable with `-m/--mode`.
 
 ---
 
@@ -92,6 +92,24 @@ water_ball_tool wbfp u -H my.pack ./output_dir
 water_ball_tool wbfp h my.pack
 ```
 
+### Browse `wbfp b`
+
+```bash
+# Open a pack in the read-only TUI browser
+water_ball_tool wbfp b my.pack
+```
+
+`p`, `u` and `h` run in the TUI on a terminal: the file list is read-only, per-file status is shown beside each row, and
+the right pane is reserved for a future content preview. While a job runs, the same pane shows a task list — active files
+first with their own progress, completed files below. Worker threads enqueue progress events (rate-limited) so the task
+list never blocks file I/O. `--no-tui` keeps the classic progress-bar output; a non-TTY stdout/stdin falls back to it
+automatically.
+
+TUI keys: `q`/`Ctrl+C` quit, `↑`/`↓` move, `⏎` enter a directory, `←` go to the parent, `PageUp`/`PageDown` page,
+`Home`/`End` jump, `p` toggle the preview, `d`/F12 show logs, `?` help. While a job runs, `q` quits after it finishes.
+On Windows the TUI is keyboard-only for now (crossterm delivers SGR mouse reports as literal keys); other platforms also
+support left-click select, double-click open and wheel scroll.
+
 ### Music player `mp`
 
 ```bash
@@ -106,11 +124,27 @@ water_ball_tool mp ./music --mode repeat-one
 
 # Verbose output (long option only)
 water_ball_tool mp ./music --verbose
+
+# Start playing automatically once the first track is found
+water_ball_tool mp ./music --autoplay
 ```
 
-After playback starts, the command reads commands from stdin: `next`/`n` (next track), `Play`/`P` (play),
-`pause`/`p` (pause), `exit` (stop and quit). Volume values outside 0.0–1.0 are rejected with an argument error before
-playback starts.
+After the TUI starts: `n` (next track), `←`/`→` (seek 5 s per tap; hold to preview and release to jump), space
+(play/pause), `p` (pause), `P` (play), `↑`/`↓` (scroll the playlist),
+`PageUp`/`PageDown` (page), `Home`/`End` (ends), mouse wheel (scroll three lines), left click on a playlist row (play that
+track), `+`/`-` (volume), `d`/`F12` (debug popup), `:` (command mode: `quit`, `play`, `pause`, `toggle`, `next`,
+`prev`, `seek <mm:ss|±N>`, `vol`, `mode`, `goto`, `debug`, `help`; `seek` jumps within the current track),
+`q`/`Esc`/`Ctrl+C` (quit). The footer hint labels are clickable buttons for the same actions. Volume values outside
+0.0–1.0 are
+rejected with an argument error before playback starts. The playlist shows only the visible rows and follows the current
+track on a track change. Debug builds also write `debug`-level records (including key/mouse events and panics) to
+`temp/logs/music_play/` inside the project, so an unexpected TUI exit can be inspected afterwards; release builds keep
+the log file in the user data directory. On Windows the TUI uses VT input and SGR mouse reports; if the terminal cannot
+enable VT input, the mouse is disabled and keyboard input keeps working.
+Directories are scanned in a background thread; tracks appear in the playlist as they are found. Sequential modes load
+the first track as soon as it arrives; shuffle and periodic-shuffle wait for 5 tracks (or initialize with fewer when the
+scan finishes early). Without `--autoplay` the first track is only loaded and stays paused — press space or `P` to
+start.
 
 ---
 
@@ -178,12 +212,19 @@ src/                              # binary crate (water_ball_tool)
 ├── command.rs                    # CLI command routing + progress bar helpers
 └── command/
     ├── ff.rs                     # ff subcommand implementation (search + optional hashing)
-    ├── wbfp.rs                   # wbfp subcommand (pack/unpack/hash-verify)
+    ├── wbfp.rs                   # wbfp module root (args, routing, TUI/classic selection)
     ├── test.rs                   # Command-level integration tests (incl. symlink cycle detection)
-    └── music_play.rs             # mp subcommand (clap args + stdin loop + playlist collection)
+    ├── wbfp/                     # wbfp implementation
+    │   ├── classic.rs            # Classic indicatif progress-bar path
+    │   ├── common.rs             # Shared path/copy/extract helpers
+    │   ├── events.rs             # TUI job events and row status
+    │   ├── ops.rs                # TUI pack/unpack/verify workers
+    │   └── tui/                  # TUI (tui.rs, app.rs, ui.rs, browse.rs)
+    └── music_play.rs             # mp subcommand (clap args + TUI wiring)
         └── music_play/
-            ├── runtime.rs        # Playback orchestration + indicatif UI refresh thread
-            └── tui/              # Terminal UI (WIP: app.rs, ui.rs, channel_writer.rs)
+            ├── runtime.rs        # Playback runtime (event sinks, snapshot, track advance)
+            ├── scanner.rs        # Background tag scan (lofty → ScanMessage)
+            └── tui/              # Terminal UI (tui.rs, app.rs, ui.rs, channel_writer.rs)
 ```
 
 **Implementation notes**
@@ -223,6 +264,8 @@ cargo build --features debug-no-audio
 ```
 
 `.cargo/native-config.toml` is not applied automatically — pass it with `--config` as shown above.
+`rust-toolchain.toml` pins the nightly toolchain, and `./build_native.ps1` runs the native build with
+`-Zbuild-std="std,panic_abort"`.
 
 ---
 
@@ -235,7 +278,7 @@ cargo build --features debug-no-audio
 - **Logging**: tracing / tracing-subscriber
 - **Process detection**: sysinfo
 - **Audio**: cpal / symphonia / rubato / lofty
-- **Terminal UI**: ratatui
+- **Terminal UI**: ratatui / vtparse
 - **Channels**: crossbeam-channel
 
 ---

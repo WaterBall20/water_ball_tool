@@ -155,7 +155,8 @@ impl WBFPManager {
         let mut manifest_path = pack_path.clone();
         manifest_path.push_str(".wbm");
         let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
-        let mut manifest_file = PackIO::new2(manifest_file, attribute.manifest_file_len());
+        let mut manifest_file =
+            PackIO::new2(Box::new(manifest_file), attribute.manifest_file_len());
         let empty_pos_data_block =
             manifest_file.manifest_data_block_read(attribute.empty_data_pos_list_pos())?;
         let empty_pos_data = empty_pos_data_block.get_this_data()?.to_vec();
@@ -214,7 +215,7 @@ impl WBFPManager {
                 .truncate(true)
                 .create_new(create_new)
                 .open(manifest_path)?;
-            Some(PackIO::new(manifest_pack_file))
+            Some(PackIO::new(Box::new(manifest_pack_file)))
         } else {
             None
         };

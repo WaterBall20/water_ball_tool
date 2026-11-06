@@ -12,6 +12,7 @@ use std::fmt;
 /// - [`Kind::Full`]：缓冲区满，归还未写入的元素。
 /// - [`Kind::Clearing`]：`clear` 进行中，读写不可用，归还元素。
 /// - [`Kind::Truncating`]：`truncate_back` 进行中，写入被拒绝，归还元素。
+/// - [`Kind::Resizing`]：扩容（重新分配）进行中，写入被拒绝，归还元素。
 /// - [`Kind::InvalidRange`]：`drain` / `release` 区间非法。
 ///
 /// # 示例
@@ -40,6 +41,8 @@ pub enum Kind<T> {
     Clearing(T),
     /// `truncate_back` 进行中，写入被拒绝，归还元素。
     Truncating(T),
+    /// 扩容（重新分配）进行中，写入被拒绝，归还元素。
+    Resizing(T),
     /// 区间非法：`drain` / `release` 只接受 `0..k` 或 `0..len`。
     InvalidRange,
 }
@@ -198,6 +201,23 @@ impl<T> Error<T> {
         Self::new("truncate in progress", Kind::Truncating(value))
     }
 
+    /// 构造“扩容中”错误，重新分配进行时写入被拒绝，归还元素。
+    ///
+    /// # 示例
+    ///
+    /// ```
+    /// use water_ball_tool_lib::split_ring_buffer::{Error, Kind};
+    ///
+    /// let err = Error::resizing(5u8);
+    /// match err.kind {
+    ///     Kind::Resizing(v) => assert_eq!(v, 5),
+    ///     _ => panic!("expected Resizing"),
+    /// }
+    /// ```
+    pub fn resizing(value: T) -> Self {
+        Self::new("resize in progress", Kind::Resizing(value))
+    }
+
     /// 构造“区间非法”错误。`drain` / `release` 只接受 `0..k` 或 `0..len`。
     ///
     /// # 示例
@@ -226,6 +246,7 @@ impl<T: fmt::Debug> fmt::Debug for Kind<T> {
             Kind::Full(v) => f.debug_tuple("Full").field(v).finish(),
             Kind::Clearing(v) => f.debug_tuple("Clearing").field(v).finish(),
             Kind::Truncating(v) => f.debug_tuple("Truncating").field(v).finish(),
+            Kind::Resizing(v) => f.debug_tuple("Resizing").field(v).finish(),
             Kind::InvalidRange => f.write_str("InvalidRange"),
         }
     }

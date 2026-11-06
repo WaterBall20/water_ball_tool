@@ -1,4 +1,4 @@
-use crate::wb_files_pack::pack_io::file::PackVirtualFile;
+use crate::wb_files_pack::pack_io::pack_file::PackVirtualFile;
 use crate::wb_files_pack::{OverwriteStrategy, PackFileError};
 use crate::{tools::TestTool, wb_files_pack::manager_sync::ManagerSync};
 use std::fs;

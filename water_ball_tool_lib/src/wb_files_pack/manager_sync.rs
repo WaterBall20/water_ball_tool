@@ -2,8 +2,8 @@ use crate::tools::PathTool;
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::manager::{DEFAULT_COW, DEFAULT_SEPARATE_MANIFEST, WBFPManager};
 use crate::wb_files_pack::pack_io::PackIO;
-use crate::wb_files_pack::pack_io::file::{PackVirtualFile, VirtualFileOpenOptions};
 use crate::wb_files_pack::pack_io::file_handle::PackFileHandle;
+use crate::wb_files_pack::pack_io::pack_file::{PackVirtualFile, VirtualFileOpenOptions};
 use crate::wb_files_pack::{
     Attribute, OverwriteStrategy, PackStruct, PackStructItem, PackStructItemType,
 };
@@ -189,7 +189,7 @@ impl PackOpenOptions {
                 .truncate(true)
                 .create_new(true)
                 .open(path)?;
-            let pack_io = PackIO::new(pack_file);
+            let pack_io = PackIO::new(Box::new(pack_file));
             let pack_io = Arc::new(Mutex::new(pack_io));
             let mut manager = WBFPManager::create_pack_file(
                 &path_buf,
@@ -214,7 +214,7 @@ impl PackOpenOptions {
                 .open(path)?;
             let metadata = pack_file.metadata()?;
             let is_new = metadata.len() == 0;
-            let pack_io = PackIO::new(pack_file);
+            let pack_io = PackIO::new(Box::new(pack_file));
             let pack_io = Arc::new(Mutex::new(pack_io));
 
             if is_new {
@@ -244,7 +244,7 @@ impl PackOpenOptions {
         } else {
             // 打开已存在的文件 / Open existing file
             let pack_file = File::options().read(true).write(true).open(path)?;
-            let pack_io = PackIO::new(pack_file);
+            let pack_io = PackIO::new(Box::new(pack_file));
             let pack_io = Arc::new(Mutex::new(pack_io));
             let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;
             let manager = Arc::new(Mutex::new(manager));

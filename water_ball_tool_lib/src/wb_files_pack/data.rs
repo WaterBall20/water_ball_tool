@@ -1729,14 +1729,11 @@ impl WBFilesPackManifest {
     }
 
     pub(crate) fn file(&self) -> Option<&PackIO> {
-        match &self.file {
-            Some(v) => Some(v),
-            None => None,
-        }
+        self.file.as_ref()
     }
 
-    pub(crate) fn file_mut(&mut self) -> &mut Option<PackIO> {
-        &mut self.file
+    pub(crate) fn file_mut(&mut self) -> Option<&mut PackIO> {
+        self.file.as_mut()
     }
 
     pub(crate) fn new(attribute: Attribute, root_struct: PackStruct, file: Option<PackIO>) -> Self {

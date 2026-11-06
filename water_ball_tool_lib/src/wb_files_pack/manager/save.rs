@@ -183,14 +183,14 @@ impl WBFPManager {
         Ok((new_block, pos))
     }
 
-    pub(super) fn manifest_data_block_read(&self, file_pos: u64) -> Result<ManifestDataBlock> {
+    pub(super) fn manifest_data_block_read(&mut self, file_pos: u64) -> Result<ManifestDataBlock> {
         if !self.separate_manifest {
             let pack_file = self.pack_file.clone();
-            let pack_file = pack_file
+            let mut pack_file = pack_file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             pack_file.manifest_data_block_read(file_pos)
-        } else if let Some(manifest_file) = self.manifest.file() {
+        } else if let Some(manifest_file) = self.manifest.file_mut() {
             manifest_file.manifest_data_block_read(file_pos)
         } else {
             Err(PackFileError::State(
