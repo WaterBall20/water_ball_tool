@@ -74,7 +74,7 @@ impl WBFPManager {
         let data_pos = if data_alloc_4mib {
             self.get_data_file_pos(len, 0, MAX_DATA_SEGMENTS)?
         } else {
-            vec![self.get_file_pos(len)?]
+            vec![self.get_file_pos(len)]
         };
         let metadata = PackFileMetadata::new(
             cow,

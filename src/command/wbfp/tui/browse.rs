@@ -26,6 +26,9 @@ pub(crate) struct Entry {
     pub modified: u128,
     /// 文件哈希（类型，值）/ file hash (type, value)
     pub hash: Option<(u8, Vec<u8>)>,
+    /// 本地文件的包格式版本；`Some` 表示文件头探测为水球包。
+    /// Pack format version for a local file; `Some` means the header probe recognized a pack.
+    pub pack_version: Option<u16>,
     /// `..` 行 / the `..` row
     pub synthetic: bool,
 }
@@ -39,6 +42,7 @@ impl Entry {
             size: 0,
             modified: 0,
             hash: None,
+            pack_version: None,
             synthetic: true,
         }
     }
@@ -120,6 +124,7 @@ fn pack_entry(name: String, path: PathBuf, item: &PackStructItem) -> Entry {
         size,
         modified,
         hash,
+        pack_version: None,
         synthetic: false,
     }
 }
@@ -155,11 +160,22 @@ pub(crate) fn local_dir(cwd: &Path) -> Result<Vec<Entry>, String> {
             .unwrap_or(0);
         entries.push(Entry {
             name,
-            path,
+            path: path.clone(),
             is_dir: file_type.is_dir(),
             size: metadata.len(),
             modified,
             hash: None,
+            //AI=== 本地文件按格式探测包，不使用扩展名 / probe local files by format, not extension
+            // shortcut: one short header read per file; add a cache/background probe if huge directories become slow.
+            pack_version: if file_type.is_file() {
+                water_ball_tool_lib::wb_files_pack::probe_pack(&path)
+                    .ok()
+                    .flatten()
+                    .map(|probe| probe.format_version)
+            } else {
+                None
+            },
+            //AI_END===
             synthetic: false,
         });
     }
@@ -188,6 +204,12 @@ pub(crate) fn local_file(path: &Path) -> Result<Entry, String> {
         size: metadata.len(),
         modified,
         hash: None,
+        //AI=== 单个本地文件也做包探测 / probe a single local file too
+        pack_version: water_ball_tool_lib::wb_files_pack::probe_pack(path)
+            .ok()
+            .flatten()
+            .map(|probe| probe.format_version),
+        //AI_END===
         synthetic: false,
     })
 }

@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug tests library 'water_ball_tool'",
+      "name": "Debug tests 'water_ball_tool'",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -12,81 +12,64 @@
       }
     },
     {
-      "name": "Debug tests all library 'water_ball_tool'",
+      "name": "Debug tests all",
       "type": "lldb",
       "request": "launch",
       "cargo": {
         "args": [
           "test",
+          "--workspace",
+          "--all-features",
           "--",
           "--include-ignored"
         ]
       }
     },
     {
-      "name": "Debug bin 'water_ball_tool' wbfp h",
+      "name": "Debug 'water_ball_tool'",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": [
+          "--bin=water_ball_tool"
+        ]
+      }
+    },
+    {
+      "name": "Debug 'water_ball_tool' mp",
       "type": "lldb",
       "request": "launch",
       "cargo": {
         "args": [
           "run",
-          "--bin=water_ball_tool"
+          "--",
+          "mp",
+          "-v",
+          "0.15",
+          "-m",
+          "periodic-shuffle",
+          "D:\\WaterBall\\Music\\欧美"
         ]
-      },
-      "args": [
-        "wbfp",
-        "h",
-        "/home/waterball/BF/Apps.wbfp",
-        "-t",
-        "1"
-      ]
+      }
     },
     {
-      "name": "Debug bin 'water_ball_tool' wbfp u",
+      "name": "Debug Release 'water_ball_tool' mp",
       "type": "lldb",
       "request": "launch",
+      "env": {
+        "LLDB_USE_NATIVE_PDB_READER": "yes"
+      },
       "cargo": {
         "args": [
           "run",
-          "--bin=water_ball_tool"
-        ]
-      },
-      "args": [
-        "wbfp",
-        "u",
-        "/home/waterball/BF/Apps.wbfp",
-        "/home/waterball/BF/Apps",
-        "-t",
-        "1"
-      ]
-    },
-    {
-      "name": "Debug bin 'water_ball_tool' wbfp p",
-      "type": "lldb",
-      "request": "launch",
-      "cargo": {
-        "args": [
-          "run",
-          "--bin=water_ball_tool"
-        ]
-      },
-      "args": [
-        "wbfp",
-        "p",
-        "/home/waterball/Apps",
-        "/home/waterball/BF/Apps",
-        "-t",
-        "1"
-      ]
-    },
-    {
-      "name": "Debug unit tests in executable 'water_ball_tool'",
-      "type": "lldb",
-      "request": "launch",
-      "cargo": {
-        "args": [
-          "test",
-          "--bin=water_ball_tool"
+          "--release",
+          "--",
+          "mp",
+          "-v",
+          "0.15",
+          "-m",
+          "periodic-shuffle",
+          "D:\\WaterBall\\Music\\欧美"
         ]
       }
     }

@@ -124,6 +124,12 @@ mod file_ops;
 mod gc;
 mod lock;
 mod metadata;
+//AI=== 包内跨目录移动 / in-pack cross-directory move
+mod move_entry;
+//AI_END===
 mod open;
+//AI=== 包内同目录重命名 / in-pack same-directory rename
+mod rename;
+//AI_END===
 mod save;
 mod tree;

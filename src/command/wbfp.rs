@@ -1,11 +1,13 @@
 //! wbfp 子命令模块 / wbfp subcommand module
 //!
-//! 水球包文件（WBFP）的打包、解包、哈希校验与只读浏览。
+//! 水球包文件（WBFP）的打包、解包、哈希校验、只读浏览与文件管理。
 //! 终端默认进入 TUI；`--no-tui` 或非 TTY 环境回退到经典进度条输出。
+//! 省略子命令时进入文件管理器：左侧文件系统、右侧包视图、最右预览；包路径可选。
 //!
-//! WaterBall Files Pack (WBFP) pack, unpack, hash-verify and read-only browsing.
+//! WaterBall Files Pack (WBFP) pack, unpack, hash-verify, read-only browsing and file management.
 //! A terminal defaults to the TUI; `--no-tui` or a non-TTY environment falls back
-//! to the classic progress-bar output.
+//! to the classic progress-bar output. Without a subcommand the file manager opens:
+//! filesystem on the left, pack in the middle, preview on the right; the pack path is optional.
 
 //AI=== 模块根：参数、路由与 TUI/经典路径选择 / module root: arguments, routing and TUI/classic selection
 use clap::{Args, Subcommand};
@@ -20,9 +22,12 @@ mod tui;
 
 /// 水球包文件操作 / WaterBall Files Pack operations.
 #[derive(Args, Debug)]
+#[command(subcommand_negates_reqs = true)]
 pub(crate) struct WaterBallFilePackCommand {
     #[command(subcommand)]
-    pub(crate) commands: WaterBallFilePackCommands,
+    pub(crate) commands: Option<WaterBallFilePackCommands>,
+    /// 包文件路径；省略子命令时可选，提供则直接打开该包 / Pack file path; optional without a subcommand, and opens the pack when provided
+    pub(crate) pack_path: Option<String>,
     /// 禁用 TUI，使用经典进度条输出 / Disable the TUI and use the classic progress-bar output
     #[arg(long, global = true)]
     pub(crate) no_tui: bool,
@@ -33,7 +38,8 @@ impl WaterBallFilePackCommand {
     pub(crate) fn new(commands: WaterBallFilePackCommands) -> Self {
         // 测试默认走经典路径，避免依赖终端 / tests default to the classic path, never a terminal
         Self {
-            commands,
+            commands: Some(commands),
+            pack_path: None,
             no_tui: true,
         }
     }
@@ -155,21 +161,29 @@ pub(crate) struct WaterBallFilePackCommandsBrowse {
     pub(crate) pack_path: String,
 }
 
-/// wbfp 命令路由入口：终端默认 TUI，非终端或 `--no-tui` 走经典路径。
+/// wbfp 命令路由入口：终端默认 TUI，非终端或 `--no-tui` 走经典路径；
+/// 无子命令时进入文件管理器，包路径可选。
 ///
 /// wbfp entry point: a terminal defaults to the TUI; a non-terminal or `--no-tui`
-/// uses the classic path.
+/// uses the classic path. Without a subcommand the file manager opens, with an
+/// optional pack path.
 pub fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let browse = matches!(&args.commands, WaterBallFilePackCommands::Browse(_));
+    // 无子命令直接进入文件管理器；包路径可选，由 TUI 决定是否打开。
+    // No subcommand opens the file manager directly; the optional pack path is handled by the TUI.
+    let manager = args.commands.is_none();
+    let browse = matches!(&args.commands, Some(WaterBallFilePackCommands::Browse(_)));
     let stdout_tty = std::io::stdout().is_terminal();
     let stdin_tty = std::io::stdin().is_terminal();
     debug!(
-        "wbfp route: no_tui={}, stdout_tty={stdout_tty}, stdin_tty={stdin_tty}, browse={browse}",
+        "wbfp route: no_tui={}, stdout_tty={stdout_tty}, stdin_tty={stdin_tty}, browse={browse}, manager={manager}",
         args.no_tui
     );
     let use_tui = !args.no_tui && stdout_tty && stdin_tty;
-    if browse && !use_tui {
-        return Err("browse 需要交互式终端 / browse requires an interactive terminal".into());
+    if (browse || manager) && !use_tui {
+        return Err(
+            "浏览/文件管理需要交互式终端 / browse and file management require an interactive terminal"
+                .into(),
+        );
     }
     if use_tui {
         tui::run(args)
@@ -184,4 +198,7 @@ pub fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std::error::Err
 pub fn commands(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std::error::Error>> {
     classic::commands(args)
 }
+
+#[cfg(test)]
+mod test;
 //AI_END===

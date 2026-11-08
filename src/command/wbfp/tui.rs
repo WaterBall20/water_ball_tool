@@ -12,20 +12,21 @@ mod app;
 mod browse;
 mod ui;
 
-use crate::command::music_play::MouseCapture;
 use crate::command::music_play::tui::channel_writer;
-use crate::command::music_play::tui::{VtEvent, VtInput};
+use crate::command::tui_input::{
+    ESC_PENDING_TIMEOUT, MouseCapture, VtEvent, VtInput, WHEEL_STEP, spawn_stdin_reader,
+};
 use crate::command::wbfp::WaterBallFilePackCommand;
-use app::App;
+use app::{App, Focus, Window};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use std::error::Error;
 use std::io;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::{Duration, Instant};
-use tracing::{debug, error, info};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 const TICK: Duration = Duration::from_millis(50);
 
@@ -41,9 +42,9 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     };
     info!(
         "wbfp TUI: 打开 {} / opening, mode={:?}, entries={}",
-        app.title,
-        app.mode,
-        app.entries.len()
+        app.ui.title,
+        app.ui.mode,
+        app.nav.entries.len()
     );
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
@@ -54,26 +55,27 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     };
     // 宽屏默认显示预览，窄屏默认只显示列表；`p` 随时切换 / wide screens show the preview, narrow ones the list
     if let Ok(size) = terminal.size() {
-        app.show_preview = size.width >= 80;
+        app.nav.show_preview = size.width >= 80;
     }
-    // Windows/ConPTY 下 crossterm 会把 SGR 鼠标序列拆成普通字符，导致列表被鼠标洪流淹没；
-    // 暂时只启用键盘，并在启动时清除旧进程残留的鼠标上报。非 Windows 仍启用鼠标。
-    // On Windows/ConPTY crossterm splits SGR mouse reports into literal keys and floods the list;
-    // keyboard-only for now, clearing stale mouse reporting left by an older process. Other platforms keep the mouse.
-    #[cfg(windows)]
-    let mouse = MouseCapture::keyboard_only();
-    #[cfg(not(windows))]
+    // 与 mp 共用鼠标捕获：Windows 走 VT 输入，避免 crossterm 把 SGR 报文拆成普通按键。
+    // Shared with mp: Windows uses VT input so crossterm cannot split SGR reports into literal keys.
     let mouse = match MouseCapture::enable() {
         Ok(mouse) => mouse,
         Err(e) => {
-            error!("wbfp TUI: 鼠标初始化失败 / mouse setup failed: {e}");
-            if let Err(restore) = ratatui::try_restore() {
-                eprintln!("恢复终端失败 / failed to restore terminal: {restore}");
-            }
-            return Err(e.into());
+            warn!(
+                "wbfp TUI: 鼠标初始化失败，继续无鼠标运行 / mouse setup failed, continuing without mouse: {e}"
+            );
+            MouseCapture::disabled()
         }
     };
     let vt_input = mouse.vt_input();
+    // VT 模式直接读原始 stdin 字节；crossterm 会丢弃 ESC/CR 等控制字符。
+    // VT mode reads raw stdin bytes; crossterm drops control characters such as ESC/CR.
+    let stdin_rx = if vt_input {
+        Some(spawn_stdin_reader()?)
+    } else {
+        None
+    };
     info!(
         "wbfp TUI: ready, width={}, vt_input={vt_input}",
         terminal.size().map(|s| s.width).unwrap_or(0)
@@ -82,7 +84,7 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     // 任务事件队列不阻塞 IO：工作线程只做入队，进度事件按 4 MiB 限流；UI 侧对任务列表设上限。
     // shortcut: unbounded queue + rate-limited progress; switch to a bounded lock-free queue if a job can outpace the UI by millions of events.
     let (tx, rx) = mpsc::channel();
-    let job = match app.job_spec.take() {
+    let job = match app.jobs.spec.take() {
         Some(spec) => match super::ops::spawn(spec, tx) {
             Ok(handle) => {
                 info!("wbfp TUI: 后台任务已启动 / background job started");
@@ -100,7 +102,7 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
         None => None,
     };
 
-    let mut result = event_loop(&mut terminal, &mut app, &logs, &rx, vt_input);
+    let mut result = event_loop(&mut terminal, &mut app, &logs, &rx, &stdin_rx);
     if let Err(e) = &result {
         error!("wbfp TUI: 主循环退出 / main loop failed: {e}");
     }
@@ -130,7 +132,7 @@ fn event_loop(
     app: &mut App,
     logs: &Receiver<channel_writer::LogLine>,
     events: &Receiver<super::events::JobEvent>,
-    vt_input: bool,
+    stdin_rx: &Option<Receiver<Vec<u8>>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut vt = VtInput::new();
     loop {
@@ -141,23 +143,34 @@ fn event_loop(
 
         terminal.draw(|frame| ui::render(app, frame))?;
 
-        if event::poll(TICK)? {
-            if vt_input {
-                drain_vt_input(app, &mut vt)?;
-            } else {
-                match event::read()? {
-                    Event::Key(key)
-                        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                    {
-                        handle_key(key.code, key.modifiers, app);
+        if let Some(stdin) = stdin_rx {
+            match stdin.recv_timeout(TICK) {
+                Ok(bytes) => {
+                    vt.feed(&bytes);
+                    while let Ok(more) = stdin.try_recv() {
+                        vt.feed(&more);
                     }
-                    Event::Mouse(mouse) => handle_mouse(mouse, app),
-                    _ => {}
                 }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            dispatch_vt(&mut vt, app);
+            if vt.take_lone_esc(ESC_PENDING_TIMEOUT) {
+                dispatch_vt(&mut vt, app);
+            }
+        } else if event::poll(TICK)? {
+            match event::read()? {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    handle_key(key.code, key.modifiers, app);
+                }
+                Event::Mouse(mouse) => handle_mouse(mouse, app),
+                _ => {}
             }
         }
 
-        if app.should_quit && !app.job_running {
+        if app.ui.should_quit && !app.jobs.running {
             break;
         }
     }
@@ -170,10 +183,10 @@ fn drain_events(app: &mut App, events: &Receiver<super::events::JobEvent>) {
             Ok(event) => app.apply_event(event),
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                if app.job_running {
+                if app.jobs.running {
                     error!("wbfp TUI: 任务事件通道断开 / job event channel disconnected");
-                    app.job_running = false;
-                    if let Some(job) = app.job.as_mut() {
+                    app.jobs.running = false;
+                    if let Some(job) = app.jobs.state.as_mut() {
                         job.finished = true;
                         job.error =
                             Some("任务线程异常退出 / job thread exited unexpectedly".to_string());
@@ -188,57 +201,86 @@ fn drain_events(app: &mut App, events: &Receiver<super::events::JobEvent>) {
 fn request_quit(app: &mut App) {
     debug!(
         "quit requested: job_running={}, selected={}/{}",
-        app.job_running,
-        app.selected,
-        app.entries.len()
+        app.jobs.running,
+        app.active_nav().selected,
+        app.active_nav().entries.len()
     );
-    app.should_quit = true;
-    if app.job_running {
-        app.quit_after_job = true;
+    app.ui.should_quit = true;
+    if app.jobs.running {
+        app.ui.quit_after_job = true;
     }
 }
 
 fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
     debug!(
-        "key: {code:?} mods={modifiers:?}, popup(help={}, logs={}), selected={}/{}, cwd={}",
-        app.show_help,
-        app.show_logs,
-        app.selected,
-        app.entries.len(),
+        "key: {code:?} mods={modifiers:?}, window={:?}, selected={}/{}, cwd={}",
+        app.ui.window,
+        app.active_nav().selected,
+        app.active_nav().entries.len(),
         app.display_cwd()
     );
-    if app.show_help || app.show_logs {
-        match code {
-            KeyCode::Esc => {
-                app.show_help = false;
-                app.show_logs = false;
-            }
-            // 弹层打开时再次按 d / ? 也要能关闭 / d and ? must close their own popups too
-            KeyCode::Char('d') | KeyCode::F(12) => app.show_logs = !app.show_logs,
-            KeyCode::Char('?') => app.show_help = !app.show_help,
-            KeyCode::Char('q') => request_quit(app),
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => request_quit(app),
-            _ => {}
-        }
+    // Esc 与退出键对所有窗口通用；其余按键按窗口枚举分发，避免互相串键。
+    // Esc and the quit keys are common to every window; other keys dispatch by the window enum.
+    if code == KeyCode::Esc && app.ui.window != Window::None {
+        app.ui.window = Window::None;
+        return;
+    }
+    if code == KeyCode::Char('q')
+        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+    {
+        request_quit(app);
         return;
     }
 
-    match code {
-        KeyCode::Char('q') => request_quit(app),
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => request_quit(app),
-        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => app.back(),
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.enter(),
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::PageUp => app.page_selection(-1),
-        KeyCode::PageDown => app.page_selection(1),
-        KeyCode::Home => app.select_first(),
-        KeyCode::End => app.select_last(),
-        KeyCode::Char('p') => app.show_preview = !app.show_preview,
-        KeyCode::Char('d') | KeyCode::F(12) => app.show_logs = !app.show_logs,
-        KeyCode::Char('?') => app.show_help = !app.show_help,
-        _ => {}
+    match app.ui.window {
+        Window::Help => {
+            if code == KeyCode::Char('?') {
+                app.ui.window = Window::None;
+            }
+        }
+        Window::Debug => {
+            if code == KeyCode::F(12) {
+                app.ui.window = Window::None;
+            }
+        }
+        Window::None => match code {
+            KeyCode::Tab => app.switch_focus(),
+            KeyCode::BackTab => app.switch_focus(),
+            KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => app.close_pack(),
+            KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => app.back(),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.enter(),
+            KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+            KeyCode::PageUp => app.page_selection(-1),
+            KeyCode::PageDown => app.page_selection(1),
+            KeyCode::Home => app.select_first(),
+            KeyCode::End => app.select_last(),
+            KeyCode::Char('p') => app.nav.show_preview = !app.nav.show_preview,
+            //AI=== 跨面板复制/移动 / cross-pane copy and move
+            KeyCode::Char('c') => app.copy_to_other_pane(),
+            KeyCode::Char('m') => app.move_to_other_pane(),
+            //AI_END===
+            KeyCode::F(12) => app.ui.window = Window::Debug,
+            KeyCode::Char('?') => app.ui.window = Window::Help,
+            _ => {}
+        },
     }
+}
+
+fn focus_pane_at(app: &mut App, column: u16, row: u16) -> bool {
+    if !app.is_manager() {
+        return true;
+    }
+    let position = ratatui::layout::Position::new(column, row);
+    if app.local_nav.list_area.contains(position) {
+        app.focus = Focus::Local;
+        return true;
+    }
+    if app.pack.is_some() && app.nav.list_area.contains(position) {
+        app.focus = Focus::Pack;
+        return true;
+    }
+    false
 }
 
 fn handle_mouse(mouse: MouseEvent, app: &mut App) {
@@ -246,11 +288,20 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
 }
 
 fn handle_mouse_kind(kind: MouseEventKind, column: u16, row: u16, app: &mut App) {
+    // 弹层是模态的：打开时鼠标不再操作背后的列表 / popups are modal; the list behind them ignores the mouse
+    if app.ui.window != Window::None {
+        return;
+    }
     debug!(
-        "mouse: {kind:?} at ({column},{row}), list_area={:?}",
-        app.list_area
+        "mouse: {kind:?} at ({column},{row}), active_area={:?}",
+        app.active_nav().list_area
     );
+    if !focus_pane_at(app, column, row) {
+        debug!("mouse ignored: outside navigable panes");
+        return;
+    }
     if !app
+        .active_nav()
         .list_area
         .contains(ratatui::layout::Position::new(column, row))
     {
@@ -258,96 +309,20 @@ fn handle_mouse_kind(kind: MouseEventKind, column: u16, row: u16, app: &mut App)
         return;
     }
     match kind {
-        MouseEventKind::ScrollUp => app.scroll(-3),
-        MouseEventKind::ScrollDown => app.scroll(3),
+        MouseEventKind::ScrollUp => app.scroll(-WHEEL_STEP),
+        MouseEventKind::ScrollDown => app.scroll(WHEEL_STEP),
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(index) = app.list_index_at(column, row) {
-                let double_click = app.last_click.take().is_some_and(|(at, previous)| {
-                    previous == index && at.elapsed() < Duration::from_millis(500)
-                });
                 app.select_index(index);
-                if double_click {
-                    // 双击进入目录 / double-click enters the directory
+                // 双击进入目录 / double-click enters the directory
+                let double = app.active_nav_mut().mouse.register_click(index);
+                if double {
                     app.enter();
-                } else {
-                    app.last_click = Some((Instant::now(), index));
                 }
             }
         }
         _ => {}
     }
-}
-
-// 复用 `mp` 的 VT 解析器与输入模式：ConPTY 把方向键/鼠标作为 ANSI 字节流交付。
-// shortcut: reusing mp's VT input avoids a second copy; extract it to a shared TUI module if a third TUI appears.
-fn key_bytes(code: KeyCode) -> Option<Vec<u8>> {
-    match code {
-        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
-        KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Tab => Some(vec![b'\t']),
-        KeyCode::Enter => Some(vec![b'\r']),
-        KeyCode::Backspace => Some(vec![0x7f]),
-        _ => None,
-    }
-}
-
-fn drain_vt_input(app: &mut App, vt: &mut VtInput) -> io::Result<()> {
-    let mut bytes = Vec::new();
-    loop {
-        match event::read()? {
-            Event::Key(key) if key.code == KeyCode::Esc => {
-                // Esc 的 press/release 都保留为 VT 起始字节，否则 SGR 鼠标序列会被拆成普通字符。
-                // Keep Esc bytes for both press and release; otherwise SGR mouse reports become literal keys.
-                debug!("vt: Esc kind={:?} modifiers={:?}", key.kind, key.modifiers);
-                bytes.push(0x1b);
-            }
-            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                {
-                    flush_vt(vt, &mut bytes, app);
-                    handle_key(key.code, key.modifiers, app);
-                } else if let Some(encoded) = key_bytes(key.code) {
-                    bytes.extend_from_slice(&encoded);
-                } else {
-                    flush_vt(vt, &mut bytes, app);
-                    handle_key(key.code, key.modifiers, app);
-                }
-            }
-            Event::Mouse(mouse) => {
-                flush_vt(vt, &mut bytes, app);
-                handle_mouse(mouse, app);
-            }
-            _ => {}
-        }
-
-        let more = if bytes.as_slice() == [0x1b] {
-            event::poll(Duration::from_millis(2))?
-        } else {
-            event::poll(Duration::ZERO)?
-        };
-        if !more {
-            break;
-        }
-    }
-
-    if bytes.as_slice() == [0x1b] {
-        handle_key(KeyCode::Esc, KeyModifiers::empty(), app);
-    } else {
-        vt.feed(&bytes);
-        dispatch_vt(vt, app);
-    }
-    Ok(())
-}
-
-fn flush_vt(vt: &mut VtInput, bytes: &mut Vec<u8>, app: &mut App) {
-    if bytes.is_empty() {
-        return;
-    }
-    vt.feed(bytes);
-    bytes.clear();
-    dispatch_vt(vt, app);
 }
 
 fn dispatch_vt(vt: &mut VtInput, app: &mut App) {
@@ -361,86 +336,4 @@ fn dispatch_vt(vt: &mut VtInput, app: &mut App) {
 //AI_END===
 
 #[cfg(test)]
-mod test {
-    use super::app::{App, TaskItem};
-    use super::handle_key;
-    use super::ui;
-    use crate::command::wbfp::events::RowStatus;
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
-
-    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let width = usize::from(buffer.area.width);
-        buffer
-            .content
-            .chunks(width)
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    #[test]
-    fn renders_yazi_layout() -> Result<(), Box<dyn std::error::Error>> {
-        let mut app = App::preview();
-        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
-        terminal.draw(|frame| ui::render(&mut app, frame))?;
-        let text = buffer_text(terminal.backend().buffer()).replace(' ', "");
-        assert!(text.contains("预览"));
-        assert!(text.contains("hero_idle.png"));
-        assert!(text.contains("READONLY"));
-        assert!(text.contains("q退出"));
-        assert!(text.contains("✓"));
-        Ok(())
-    }
-
-    #[test]
-    fn task_list_renders_active_file_and_progress() -> Result<(), Box<dyn std::error::Error>> {
-        let mut app = App::preview_verify();
-        app.active_tasks.push_back(TaskItem {
-            path: std::path::PathBuf::from("assets/hero.png"),
-            name: "hero.png".to_string(),
-            done: 50,
-            total: 100,
-            status: RowStatus::Running,
-        });
-        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
-        terminal.draw(|frame| ui::render(&mut app, frame))?;
-        let text = buffer_text(terminal.backend().buffer()).replace(' ', "");
-        assert!(text.contains("任务/Tasks"));
-        assert!(text.contains("hero.png"));
-        assert!(text.contains("50%"));
-        Ok(())
-    }
-
-    #[test]
-    fn verify_job_card_has_no_output_field() -> Result<(), Box<dyn std::error::Error>> {
-        let mut app = App::preview_verify();
-        let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
-        terminal.draw(|frame| ui::render(&mut app, frame))?;
-        let text = buffer_text(terminal.backend().buffer()).replace(' ', "");
-        assert!(text.contains("校验/verify"));
-        assert!(!text.contains("输出/Output"));
-        Ok(())
-    }
-
-    #[test]
-    fn log_and_help_popups_toggle_closed() {
-        let mut app = App::preview();
-
-        handle_key(KeyCode::Char('d'), KeyModifiers::NONE, &mut app);
-        assert!(app.show_logs);
-        handle_key(KeyCode::Char('d'), KeyModifiers::NONE, &mut app);
-        assert!(!app.show_logs);
-
-        handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &mut app);
-        assert!(app.show_help);
-        handle_key(KeyCode::Char('?'), KeyModifiers::NONE, &mut app);
-        assert!(!app.show_help);
-
-        app.show_logs = true;
-        app.show_help = true;
-        handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
-        assert!(!app.show_logs);
-        assert!(!app.show_help);
-    }
-}
+mod test;

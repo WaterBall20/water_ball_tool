@@ -17,7 +17,7 @@ An all-in-one command-line toolkit written in **Rust**. Currently provides three
 - **WaterBall Files Pack** (`wbfp`) — Custom binary archive format supporting pack, unpack, BLAKE3 hash verification,
   and a read-only TUI browser with a reserved preview pane.
 - **Music Player** (`mp`) — Terminal music player for audio files and directories: interactive TUI with play/pause,
-  next track, volume, playlist view and live logs; playlist modes are selectable with `-m/--mode`.
+  next track, volume, playlist view and a debug window with live logs; playlist modes are selectable with `-m/--mode`.
 
 ---
 
@@ -78,6 +78,9 @@ water_ball_tool wbfp p ./src my.pack
 water_ball_tool wbfp p ./src my.pack -n
 ```
 
+Packing into an existing pack opens and updates it. With write optimization on (default), files whose size and mtime
+match the pack are skipped and reported as done; `-w`/`--no-write-optimization` rewrites them.
+
 ### Unpack `wbfp u`
 
 ```bash
@@ -99,16 +102,40 @@ water_ball_tool wbfp h my.pack
 water_ball_tool wbfp b my.pack
 ```
 
-`p`, `u` and `h` run in the TUI on a terminal: the file list is read-only, per-file status is shown beside each row, and
-the right pane is reserved for a future content preview. While a job runs, the same pane shows a task list — active files
-first with their own progress, completed files below. Worker threads enqueue progress events (rate-limited) so the task
-list never blocks file I/O. `--no-tui` keeps the classic progress-bar output; a non-TTY stdout/stdin falls back to it
-automatically.
+### File management (no subcommand)
 
-TUI keys: `q`/`Ctrl+C` quit, `↑`/`↓` move, `⏎` enter a directory, `←` go to the parent, `PageUp`/`PageDown` page,
-`Home`/`End` jump, `p` toggle the preview, `d`/F12 show logs, `?` help. While a job runs, `q` quits after it finishes.
-On Windows the TUI is keyboard-only for now (crossterm delivers SGR mouse reports as literal keys); other platforms also
-support left-click select, double-click open and wheel scroll.
+```bash
+# Open the file manager without a pack
+water_ball_tool wbfp
+
+# Open a pack directly in the manager
+water_ball_tool wbfp my.pack
+```
+
+Without a subcommand, `wbfp` is a TUI-only file manager: local filesystem on the left, an optional pack in the middle
+and
+preview on the right. A pack path is optional; bare `wbfp` starts with the middle pane hidden. Preview folds first when
+the terminal is narrow, then the local pane; the pack pane stays visible. Local files are probed by their WBFilesPack
+header (not by extension) and valid packs are marked with `◆`; pressing `⏎` on one opens it. `c` copies and `m` moves
+the
+selected entry to the other pane. In-pack rename/move is available through the library; the remaining TUI actions
+(delete/mkdir) are planned. `--no-tui` and non-TTY stdout/stdin are rejected for this form.
+
+`p`, `u` and `h` keep their existing single-pane layout: the file list is read-only, per-file status is shown beside
+each
+row, and the right pane is reserved for a future content preview. While a job runs, the same pane shows a task list —
+active files first with their own progress, completed files below. Worker threads enqueue progress events (rate-limited)
+so the task list never blocks file I/O. `--no-tui` keeps the classic progress-bar output; a non-TTY stdout/stdin falls
+back
+to it automatically.
+
+TUI keys: `q`/`Ctrl+C` quit, `↑`/`↓` move, `⏎` enter a directory or open a probed pack, `←` go to the parent,
+`PageUp`/`PageDown` page, `Home`/`End` jump, `Tab` switch panes in the manager, `c`/`m` copy/move to the other pane,
+`Ctrl+W` close the pack, `p` toggle the preview, `F12` opens the debug popup, `?` help. While a job runs, `q` quits
+after
+it finishes.
+Windows uses the same VT mouse input as `mp`; all platforms support left-click select, double-click open and wheel
+scroll. If mouse capture cannot start, the TUI stays keyboard-only.
 
 ### Music player `mp`
 
@@ -131,11 +158,14 @@ water_ball_tool mp ./music --autoplay
 
 After the TUI starts: `n` (next track), `←`/`→` (seek 5 s per tap; hold to preview and release to jump), space
 (play/pause), `p` (pause), `P` (play), `↑`/`↓` (scroll the playlist),
-`PageUp`/`PageDown` (page), `Home`/`End` (ends), mouse wheel (scroll three lines), left click on a playlist row (play that
-track), `+`/`-` (volume), `d`/`F12` (debug popup), `:` (command mode: `quit`, `play`, `pause`, `toggle`, `next`,
-`prev`, `seek <mm:ss|±N>`, `vol`, `mode`, `goto`, `debug`, `help`; `seek` jumps within the current track),
-`q`/`Esc`/`Ctrl+C` (quit). The footer hint labels are clickable buttons for the same actions. Volume values outside
-0.0–1.0 are
+`PageUp`/`PageDown` (page), `Home`/`End` (ends), mouse wheel (scroll three lines), left double-click on a playlist row
+(play that track), `+`/`-` (volume), `F12` (debug popup, logs in its right pane), `e` (effects window; `↑`/`↓` select,
+`Space` toggle; format-changing effects such as the resampler are fixed), `:` (command mode: `quit`, `play`,
+`pause`, `toggle`, `next`, `prev`, `seek <mm:ss|±N>`, `vol`, `mode`, `goto`, `debug`, `effects`, `help`; `seek` jumps
+within the current track),
+`q`/`Esc`/`Ctrl+C` (quit). Volume has a compact percentage gauge to the right of the progress bar; the footer keeps only
+quit, next, play/pause, debug (F12), effects and command buttons. The main page's right side is reserved for later use;
+logs appear in the right pane of the Debug window. Volume values outside 0.0–1.0 are
 rejected with an argument error before playback starts. The playlist shows only the visible rows and follows the current
 track on a track change. Debug builds also write `debug`-level records (including key/mouse events and panics) to
 `temp/logs/music_play/` inside the project, so an unexpected TUI exit can be inspected afterwards; release builds keep
@@ -159,6 +189,10 @@ A custom binary archive format with the following key features:
 | **Incremental save**        | Dirty-flag tracking; only changed parts are written                                                                                                                                                                                                                        |
 | **Garbage collection**      | Auto-merges adjacent free blocks and reuses freed space                                                                                                                                                                                                                    |
 | **Virtual file add/delete** | `create_dir_all`/`create_file` to create; `delete_file`/`delete_dir_all`/`erase_file`/`erase_dir_all` to delete/erase: delete removes metadata only (data blocks are GC'd, not overwritten), erase overwrites to disk first (Zero/Random/DoD 5220 strategies) then removes |
+| **TUI file manager**        | No-subcommand TUI: local filesystem left, optional pack middle, preview right; preview folds first, then the local pane; pack files are probed by header and marked `◆`                                                                                                    |
+| **Header probe**            | `probe_pack(path)` reads only the file header and does not acquire `.lock`; used by the manager to mark pack files before opening                                                                                                                                          |
+| **Same-directory rename**   | `rename(from, to)` changes the leaf name in place and rewrites only the containing `PackStruct` block; cross-directory moves require a separate API; rejected while a handle is open                                                                                       |
+| **Move + rename**           | `move_entry(from, to)` relocates to an existing parent and may also change the leaf name; updates ancestor directory counts; no data copy or hash recompute                                                                                                                |
 | **Progressive save**        | Auto-saves periodically while data or files are written                                                                                                                                                                                                                    |
 | **Process write lock**      | `.lock` file + PID for process-level mutual exclusion                                                                                                                                                                                                                      |
 | **Manifest separation**     | Optionally split index data into a `.wbm` file                                                                                                                                                                                                                             |

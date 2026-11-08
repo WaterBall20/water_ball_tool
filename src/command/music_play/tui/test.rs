@@ -1,13 +1,14 @@
 //AI=== seek 手势测试的导入 / imports for the seek gesture tests
-use super::app::{App, FooterAction, SeekGesture};
+use super::app::{App, FooterAction, SeekGesture, Window};
 //AI_END===
 use super::channel_writer::{LogLevel, LogLine};
 use super::ui;
 use super::{
-    SHUFFLE_INIT_TRACKS, VtEvent, VtInput, parse_time, parse_volume, resolve_command, seek_by,
-    seek_target, should_start,
+    SHUFFLE_INIT_TRACKS, parse_time, parse_volume, resolve_command, seek_by, seek_target,
+    should_start,
 };
 use crate::command::music_play::runtime::{DebugInfo, Snapshot};
+use crate::command::tui_input::{VtEvent, VtInput};
 use lofty::file::FileType;
 //AI=== 鼠标报文重组与视口测试所需导入 / imports for mouse reassembly and viewport tests
 use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -17,8 +18,47 @@ use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use water_ball_tool_lib::music_play::LoopMode;
+use water_ball_tool_lib::music_play::effect::{EffectChainKind, EffectSummary};
 use water_ball_tool_lib::music_play::play_list::Track;
 use water_ball_tool_lib::music_play::tools::DurationStatsWindow;
+
+//AI=== 八分块进度（共享实现）/ eighth-block progress, shared implementation
+#[test]
+fn progress_bar_uses_eighth_blocks() {
+    assert_eq!("██████████", crate::command::eighth_block_bar(10, 1.0));
+    assert_eq!("          ", crate::command::eighth_block_bar(10, 0.0));
+    // 0.5 格 → 半个整块 / half a cell
+    assert_eq!("▌         ", crate::command::eighth_block_bar(10, 0.05));
+    // 1/8 格 → 最细的一级 / the thinnest eighth
+    assert_eq!("▏        ", crate::command::eighth_block_bar(9, 1.0 / 72.0));
+}
+//AI_END===
+
+//AI=== 标签在进度条右侧，进度条保持连续 / the label sits right of the bar so the bar stays contiguous
+#[test]
+fn progress_label_keeps_bar_contiguous() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(TestBackend::new(20, 1))?;
+    terminal.draw(|frame| {
+        crate::command::render_eighth_block_bar(
+            frame,
+            Rect::new(0, 0, 20, 1),
+            1.0,
+            Color::Cyan,
+            "50%",
+            ratatui::style::Style::new(),
+        );
+    })?;
+    let buf = terminal.backend().buffer();
+    // 20 格 = 进度条 16 + 间隔 1 + 标签 3 / 20 cells = 16 bar + 1 gap + 3 label
+    for x in 0..16u16 {
+        assert_eq!("█", buf[(x, 0u16)].symbol(), "cell {x} broke the bar");
+    }
+    assert_eq!(" ", buf[(16u16, 0u16)].symbol());
+    assert_eq!("5", buf[(17u16, 0u16)].symbol());
+    assert_eq!("%", buf[(19u16, 0u16)].symbol());
+    Ok(())
+}
+//AI_END===
 
 #[test]
 fn preview_renders_all_panels() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,16 +76,209 @@ fn preview_renders_all_panels() -> Result<(), Box<dyn std::error::Error>> {
     assert!(compact.contains("示例专辑"));
     assert!(compact.contains("FLAC44.1kHz/2ch"));
     assert!(compact.contains("播放列表(8)"));
-    assert!(compact.contains("日志"));
-    assert!(compact.contains("01:23/04:56"));
+    //AI=== 日志已移入 Debug，右侧保留 / logs moved to Debug, right side reserved
+    assert!(compact.contains("预留"));
+    assert!(!compact.contains("日志"));
+    //AI_END===
+    assert!(compact.contains("01:23"));
+    assert!(compact.contains("04:56"));
     assert!(compact.contains("q退出"));
+    //AI=== 音量与按键提示已从底栏移动到各自区域 / volume and key hints moved out of the footer
+    assert!(compact.contains("音量75%"));
+    assert!(compact.contains("←/→跳转"));
+    assert!(compact.contains("↑/↓滚动"));
+    assert!(!compact.contains("←快退"));
+    assert!(compact.contains("F12调试"));
+    assert!(compact.contains("e效果"));
+    //AI_END===
     Ok(())
 }
+
+//AI=== 调试弹窗显示链路延迟估算 / the debug popup shows latency estimates
+#[test]
+fn debug_popup_shows_latency_estimates() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40))?;
+    let mut app = App::preview();
+    app.window = Window::Debug;
+    app.debug.decoder_buffer_latency = Duration::from_millis(3);
+    app.debug.pre_effect_queue_latency = Duration::from_millis(12);
+    app.debug.effect_latency = Duration::from_millis(5);
+    app.debug.playback_latency = Duration::from_millis(180);
+    app.debug.total_latency = Duration::from_millis(200);
+
+    terminal.draw(|frame| ui::render(&mut app, frame))?;
+
+    let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
+    assert!(compact.contains("延迟管道"));
+    assert!(compact.contains("解码"));
+    assert!(compact.contains("播放"));
+    assert!(compact.contains("3.0ms"));
+    assert!(compact.contains("200.0ms"));
+    Ok(())
+}
+//AI_END===
+
+//AI=== 效果器窗口左右布局 / the effects window uses a two-column layout
+#[test]
+fn effects_window_lists_pre_and_post_effects() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40))?;
+    let mut app = App::preview();
+    app.window = Window::Effects;
+    app.effects.selected = 1;
+    app.effects.list = vec![
+        EffectSummary {
+            chain: EffectChainKind::Pre,
+            index: 0,
+            name: "采样率转换",
+            description: "把解码采样率转换到输出设备采样率。",
+            enabled: true,
+            can_disable: true,
+            latency: Duration::from_millis(12),
+        },
+        EffectSummary {
+            chain: EffectChainKind::Pre,
+            index: 1,
+            name: "交叉桥接",
+            description: "用内部延迟线在曲目切换时做交叉淡入淡出。",
+            enabled: false,
+            can_disable: true,
+            latency: Duration::ZERO,
+        },
+        EffectSummary {
+            chain: EffectChainKind::Post,
+            index: 0,
+            name: "淡入淡出",
+            description: "播放/暂停时对输出做半正弦淡入淡出。",
+            enabled: true,
+            can_disable: true,
+            latency: Duration::ZERO,
+        },
+    ];
+
+    terminal.draw(|frame| ui::render(&mut app, frame))?;
+
+    let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
+    assert!(compact.contains("前效果器"));
+    assert!(compact.contains("后效果器"));
+    assert!(compact.contains("采样率转换"));
+    assert!(compact.contains("交叉桥接"));
+    assert!(compact.contains("淡入淡出"));
+    assert!(compact.contains("[禁用]"));
+    assert!(compact.contains("↑/↓选择"));
+    assert!(compact.contains("用内部延迟线在曲目切换时做交叉淡入淡出。"));
+    assert!(compact.contains("──设置──"));
+    assert!(compact.contains("空格启用/禁用"));
+    Ok(())
+}
+//AI_END===
+
+//AI=== 窗口互斥：同一时间只显示一个 / only one popup is visible at a time
+#[test]
+fn popups_are_mutually_exclusive() {
+    let mut app = App::preview();
+
+    app.toggle_debug();
+    assert_eq!(Window::Debug, app.window);
+
+    app.toggle_effects();
+    assert_eq!(Window::Effects, app.window);
+
+    app.open_help();
+    assert_eq!(Window::Help, app.window);
+
+    app.toggle_debug();
+    assert_eq!(Window::Debug, app.window);
+
+    app.close_window();
+    assert_eq!(Window::None, app.window);
+}
+//AI_END===
+
+//AI=== 静态禁止禁用的效果器显示为固定 / a statically non-disableable effect is shown as fixed
+#[test]
+fn effects_window_marks_forbidden_effect() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40))?;
+    let mut app = App::preview();
+    app.window = Window::Effects;
+    app.effects.list = vec![EffectSummary {
+        chain: EffectChainKind::Pre,
+        index: 0,
+        name: "采样率转换",
+        description: "把解码采样率转换到输出设备采样率。",
+        enabled: true,
+        can_disable: false,
+        latency: Duration::ZERO,
+    }];
+
+    terminal.draw(|frame| ui::render(&mut app, frame))?;
+
+    let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
+    assert!(compact.contains("[固定]"));
+    assert!(compact.contains("不可禁用（需保持输出格式）"));
+    Ok(())
+}
+//AI_END===
+
+//AI=== 效果器选择在两端夹取 / effect selection clamps at both ends
+#[test]
+fn effect_selection_clamps_to_list_bounds() {
+    let mut app = App::preview();
+    app.effects.list = vec![
+        EffectSummary {
+            chain: EffectChainKind::Pre,
+            index: 0,
+            name: "A",
+            description: "",
+            enabled: true,
+            can_disable: true,
+            latency: Duration::ZERO,
+        },
+        EffectSummary {
+            chain: EffectChainKind::Post,
+            index: 0,
+            name: "B",
+            description: "",
+            enabled: true,
+            can_disable: true,
+            latency: Duration::ZERO,
+        },
+    ];
+
+    app.select_effect(1);
+    assert_eq!(1, app.effects.selected);
+    app.select_effect(5);
+    assert_eq!(1, app.effects.selected);
+    app.select_effect(-5);
+    assert_eq!(0, app.effects.selected);
+}
+//AI_END===
+
+//AI=== 双击切换：同行 500ms 内两次点击才生效 / double click: only a same-row second click within 500 ms counts
+#[test]
+fn playlist_double_click_requires_same_row_within_window() {
+    let mut app = App::preview();
+
+    assert!(!app.mouse.register_click(2));
+    assert!(app.mouse.register_click(2));
+    // 双击后重新计数，第三击是新的一轮 / the pair resets, so a third click starts over
+    assert!(!app.mouse.register_click(2));
+
+    assert!(app.mouse.register_click(2));
+    assert!(!app.mouse.register_click(3));
+    assert!(app.mouse.register_click(3));
+
+    // 超过 500ms 的同一行点击不算双击 / the same row after 500 ms is not a double click
+    app.mouse
+        .set_last_click(Instant::now() - Duration::from_millis(500), 3);
+    assert!(!app.mouse.register_click(3));
+}
+//AI_END===
 
 #[test]
 fn warn_log_level_is_yellow() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
+    app.window = Window::Debug;
     app.push_log(LogLine {
         level: Some(LogLevel::Warn),
         text: "2026-01-01T00:00:00Z  WARN 占位警告".to_string(),
@@ -93,19 +326,20 @@ fn apply_maps_snapshot_and_clears_without_track() {
         mode: LoopMode::Shuffle,
         index: Some(2),
         debug: DebugInfo::default(),
+        effects: None,
     });
-    assert_eq!("Title", app.title);
-    assert_eq!("Artist", app.artist);
-    assert_eq!("Album", app.album);
-    assert_eq!("FLAC · 44.1 kHz · 2 ch", app.audio_info);
-    assert_eq!("sample.flac", app.path);
-    assert_eq!(Duration::from_secs(90), app.duration);
-    assert_eq!(Duration::from_secs(10), app.pos);
-    assert_eq!(0.5, app.volume);
-    assert!(app.playing);
-    assert!(!app.poisoned);
-    assert_eq!(Some(2), app.current);
-    assert_eq!("随机播放", app.mode);
+    assert_eq!("Title", app.playback.title);
+    assert_eq!("Artist", app.playback.artist);
+    assert_eq!("Album", app.playback.album);
+    assert_eq!("FLAC · 44.1 kHz · 2 ch", app.playback.audio_info);
+    assert_eq!("sample.flac", app.playback.path);
+    assert_eq!(Duration::from_secs(90), app.playback.duration);
+    assert_eq!(Duration::from_secs(10), app.playback.pos);
+    assert_eq!(0.5, app.playback.volume);
+    assert!(app.playback.playing);
+    assert!(!app.playback.poisoned);
+    assert_eq!(Some(2), app.playlist.current);
+    assert_eq!("随机播放", app.playback.mode);
 
     app.apply(Snapshot {
         track: None,
@@ -116,22 +350,23 @@ fn apply_maps_snapshot_and_clears_without_track() {
         mode: LoopMode::SequentialLoop,
         index: None,
         debug: DebugInfo::default(),
+        effects: None,
     });
-    assert_eq!(app.title, "");
-    assert_eq!(app.artist, "");
-    assert_eq!(app.album, "");
-    assert_eq!(app.audio_info, "");
-    assert_eq!(app.path, "");
-    assert_eq!(Duration::ZERO, app.duration);
-    assert!(app.poisoned);
-    assert_eq!(None, app.current);
+    assert_eq!(app.playback.title, "");
+    assert_eq!(app.playback.artist, "");
+    assert_eq!(app.playback.album, "");
+    assert_eq!(app.playback.audio_info, "");
+    assert_eq!(app.playback.path, "");
+    assert_eq!(Duration::ZERO, app.playback.duration);
+    assert!(app.playback.poisoned);
+    assert_eq!(None, app.playlist.current);
 }
 
 #[test]
 fn poisoned_state_renders_error_line() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
-    app.poisoned = true;
+    app.playback.poisoned = true;
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
@@ -163,12 +398,18 @@ fn shuffle_startup_waits_for_five_tracks_with_done_fallback() {
 fn debug_popup_renders_buffers_and_timings() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
-    app.show_debug = true;
+    app.window = Window::Debug;
     app.debug.decoder_path = Some("D:\\Music\\sample.flac".to_string());
     app.debug.decoder_format = Some((44_100, 2));
+    //AI=== 播放格式 / playback format
+    app.debug.playback_format = Some((48_000, 2));
+    //AI_END===
     app.debug.pre_effect_len = 123;
     app.debug.pre_effect_capacity = 4096;
     app.debug.audio_len = 4800;
+    //AI=== 两个缓冲区统一按“已用 / 容量”展示 / both buffers show occupancy over capacity
+    app.debug.audio_capacity = 9600;
+    //AI_END===
     app.debug.playlist_len = 8;
     app.debug.playlist_index = Some(0);
     app.debug.metrics = vec![(
@@ -179,16 +420,27 @@ fn debug_popup_renders_buffers_and_timings() -> Result<(), Box<dyn std::error::E
             max_ns: 1_500_000,
         },
     )];
+    //AI=== 日志在 Debug 右栏 / logs live in the debug window's right pane
+    app.push_log(LogLine {
+        level: Some(LogLevel::Info),
+        text: "sample-log-line".to_string(),
+    });
+    //AI_END===
 
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
     assert!(compact.contains("Debug"));
     assert!(compact.contains("解码歌曲"));
+    //AI=== 播放格式 / playback format
+    assert!(compact.contains("播放格式"));
+    assert!(compact.contains("48000Hz/2ch"));
+    //AI_END===
     assert!(compact.contains("pre123/4096"));
-    assert!(compact.contains("audio4800"));
+    assert!(compact.contains("audio4800/9600"));
     assert!(compact.contains("decode"));
     assert!(compact.contains("max1.500"));
+    assert!(compact.contains("sample-log-line"));
     Ok(())
 }
 
@@ -196,39 +448,39 @@ fn debug_popup_renders_buffers_and_timings() -> Result<(), Box<dyn std::error::E
 #[test]
 fn playlist_scroll_clamps_to_bounds() {
     let mut app = App::preview();
-    app.playlist_height = 3;
+    app.playlist.height = 3;
 
     app.scroll_playlist(-1);
-    assert_eq!(0, app.playlist_offset);
+    assert_eq!(0, app.playlist.offset);
 
     app.scroll_playlist(100);
-    assert_eq!(5, app.playlist_offset); // 8 首 - 3 行可见 / 8 tracks - 3 visible rows
+    assert_eq!(5, app.playlist.offset); // 8 首 - 3 行可见 / 8 tracks - 3 visible rows
 
     app.scroll_playlist_to(usize::MAX);
-    assert_eq!(5, app.playlist_offset);
+    assert_eq!(5, app.playlist.offset);
 
     app.scroll_playlist_to(0);
-    assert_eq!(0, app.playlist_offset);
+    assert_eq!(0, app.playlist.offset);
 }
 
 #[test]
 fn playlist_page_scroll_moves_one_viewport() {
     let mut app = App::preview();
-    app.playlist_height = 3;
+    app.playlist.height = 3;
 
     app.scroll_playlist_page(1);
-    assert_eq!(3, app.playlist_offset);
+    assert_eq!(3, app.playlist.offset);
     app.scroll_playlist_page(1);
-    assert_eq!(5, app.playlist_offset);
+    assert_eq!(5, app.playlist.offset);
     app.scroll_playlist_page(-1);
-    assert_eq!(2, app.playlist_offset);
+    assert_eq!(2, app.playlist.offset);
 }
 
 #[test]
 fn apply_follows_current_track() {
     let mut app = App::preview();
-    app.playlist_height = 3;
-    app.current = Some(0);
+    app.playlist.height = 3;
+    app.playlist.current = Some(0);
 
     app.apply(Snapshot {
         track: None,
@@ -239,17 +491,18 @@ fn apply_follows_current_track() {
         mode: LoopMode::SequentialLoop,
         index: Some(7),
         debug: DebugInfo::default(),
+        effects: None,
     });
 
-    assert_eq!(Some(7), app.current);
-    assert_eq!(5, app.playlist_offset); // 第 8 首进入视口底部 / the 8th track enters at the bottom
+    assert_eq!(Some(7), app.playlist.current);
+    assert_eq!(5, app.playlist.offset); // 第 8 首进入视口底部 / the 8th track enters at the bottom
 }
 
 #[test]
 fn playlist_hit_test_maps_rows_and_rejects_border() {
     let mut app = App::preview();
-    app.playlist_area = Rect::new(10, 5, 20, 5); // 3 行内容 + 上下边框 / 3 content rows plus borders
-    app.playlist_offset = 2;
+    app.playlist.area = Rect::new(10, 5, 20, 5); // 3 行内容 + 上下边框 / 3 content rows plus borders
+    app.playlist.offset = 2;
 
     assert_eq!(Some(2), app.playlist_index_at(10, 6));
     assert_eq!(Some(4), app.playlist_index_at(29, 8));
@@ -260,7 +513,7 @@ fn playlist_hit_test_maps_rows_and_rejects_border() {
     assert_eq!(None, app.playlist_index_at(30, 6));
 
     // 偏移超出列表长度时不着色任何行 / no row when the offset is past the list
-    app.playlist_offset = 7;
+    app.playlist.offset = 7;
     assert_eq!(None, app.playlist_index_at(10, 7));
 }
 
@@ -268,7 +521,7 @@ fn playlist_hit_test_maps_rows_and_rejects_border() {
 fn playlist_render_shows_only_viewport() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 14))?;
     let mut app = App::preview();
-    app.playlist_offset = 6;
+    app.playlist.offset = 6;
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
@@ -530,10 +783,10 @@ fn seek_target_steps_and_clamps() {
 #[test]
 fn seek_preview_overrides_displayed_position() {
     let mut app = App::preview();
-    app.pos = Duration::from_secs(10);
+    app.playback.pos = Duration::from_secs(10);
     assert_eq!(Duration::from_secs(10), app.display_pos());
 
-    app.seek_gesture = Some(SeekGesture {
+    app.seek.gesture = Some(SeekGesture {
         target: Duration::from_secs(42),
         pending: true,
         last: Instant::now(),
@@ -548,7 +801,7 @@ fn seek_preview_overrides_displayed_position() {
 fn seek_preview_is_rendered() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
-    app.seek_gesture = Some(SeekGesture {
+    app.seek.gesture = Some(SeekGesture {
         target: Duration::from_secs(200),
         pending: true,
         last: Instant::now(),
@@ -559,7 +812,8 @@ fn seek_preview_is_rendered() -> Result<(), Box<dyn std::error::Error>> {
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
-    assert!(compact.contains("03:20/04:56"));
+    assert!(compact.contains("03:20"));
+    assert!(compact.contains("04:56"));
     assert!(compact.contains("跳转预览"));
     Ok(())
 }
@@ -570,18 +824,18 @@ fn footer_hints_have_click_targets() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::preview();
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
-    assert!(app.footer_actions.len() >= 2);
-    let (quit_start, _, quit_action) = app.footer_actions[0];
-    let (next_start, _, next_action) = app.footer_actions[1];
+    assert!(app.footer.actions.len() >= 2);
+    let (quit_start, _, quit_action) = app.footer.actions[0];
+    let (next_start, _, next_action) = app.footer.actions[1];
     assert_eq!(FooterAction::Quit, quit_action);
     assert_eq!(FooterAction::Next, next_action);
     assert_eq!(Some(FooterAction::Quit), app.footer_action_at(quit_start));
     assert_eq!(Some(FooterAction::Next), app.footer_action_at(next_start));
 
     // 命令输入时底栏不是按钮 / the footer is not a button bar while typing a command
-    app.command = Some("seek".to_string());
+    app.command.input = Some("seek".to_string());
     terminal.draw(|frame| ui::render(&mut app, frame))?;
-    assert!(app.footer_actions.is_empty());
+    assert!(app.footer.actions.is_empty());
     Ok(())
 }
 
@@ -589,13 +843,13 @@ fn footer_hints_have_click_targets() -> Result<(), Box<dyn std::error::Error>> {
 fn command_footer_shows_input_and_error() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
-    app.command = Some("vol +5".to_string());
+    app.command.input = Some("vol +5".to_string());
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
     assert!(compact.contains(":vol+5"));
 
-    app.command = None;
-    app.command_error = Some("未知命令：zzz".to_string());
+    app.command.input = None;
+    app.command.error = Some("未知命令：zzz".to_string());
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");
     assert!(compact.contains("未知命令：zzz"));
@@ -606,7 +860,7 @@ fn command_footer_shows_input_and_error() -> Result<(), Box<dyn std::error::Erro
 fn help_popup_lists_every_command() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     let mut app = App::preview();
-    app.show_help = true;
+    app.window = Window::Help;
     terminal.draw(|frame| ui::render(&mut app, frame))?;
 
     let compact = buffer_text(terminal.backend().buffer()).replace(' ', "");

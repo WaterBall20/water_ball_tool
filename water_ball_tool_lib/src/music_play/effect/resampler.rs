@@ -1,5 +1,6 @@
 use crate::music_play::effect::{
-    AudioFormat, PreEffect, PreEffectDiscontinuity, PreEffectInfo, PreEffectOutputFormat,
+    AudioFormat, DisablePolicy, PreEffect, PreEffectDiscontinuity, PreEffectInfo,
+    PreEffectOutputFormat, ResetReason,
 };
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
@@ -170,6 +171,7 @@ impl PreEffect for ResamplerEffect {
     fn reset(
         &mut self,
         input_format: AudioFormat,
+        _reason: ResetReason,
     ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync + 'static>> {
         self.init(input_format)
     }
@@ -242,6 +244,21 @@ impl PreEffect for ResamplerEffect {
         output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
+        //AI=== 禁用本级：清内部输入并复位滤波器 / disable self: clear buffered input and reset the filter
+        if kind == PreEffectDiscontinuity::DisableSelf {
+            self.in_buf.clear();
+            if let Some(resampler) = &mut self.resampler {
+                resampler.reset();
+            }
+            output.clear();
+            return 0;
+        }
+        //AI_END===
+        //AI=== 上游禁用：排空数据仍按正常路径处理 / upstream disabled: process drained data normally
+        if let PreEffectDiscontinuity::UpstreamDisabled { .. } = kind {
+            return self.process(input, output);
+        }
+        //AI_END===
         //AI=== Seek 同时清内部输入并复位重采样器，避免旧位置的延迟线样本混入新位置
         // Seek also drops buffered input and resets the resampler so old-position delay-line samples cannot leak.
         if PreEffectDiscontinuity::Seek == kind {
@@ -329,6 +346,31 @@ impl PreEffect for ResamplerEffect {
         }
         self.info.enabled = enabled;
     }
+
+    //AI=== 重采样器可能改变输出格式，禁止禁用 / the resampler may change the output format, so disabling is forbidden
+    fn disable_policy(&self) -> DisablePolicy {
+        DisablePolicy::Forbidden
+    }
+    //AI_END===
+
+    //AI=== 效果器窗口显示信息 / effects-window metadata
+    fn display_name(&self) -> &'static str {
+        "采样率转换"
+    }
+
+    fn description(&self) -> &'static str {
+        "把解码采样率转换到输出设备采样率。"
+    }
+    //AI_END===
+    fn min_input_len_work(&self) -> usize {
+        self.chunk_len * self.info.input_format.channels as usize
+    }
+
+    //AI=== 重采样器内部输入缓冲的样本 / samples buffered inside the resampler input queue
+    fn buffered_samples(&self) -> usize {
+        self.in_buf.len()
+    }
+    //AI_END===
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResamplePlan {

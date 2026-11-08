@@ -10,16 +10,16 @@
 
 //AI=== 经典进度条路径（从 wbfp.rs 拆出，保留原有行为）/ classic progress-bar path (split out of wbfp.rs, behavior preserved)
 
-//AI=== 引入非 panic 的进度条样式构造辅助，替换各处进度条模板的强制取值
-// Import the non-panicking progress-style helper, replacing panicking template unwraps.
-use crate::command::{
-    BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb, progress_style,
-};
 //AI_END===
 use super::common;
 use super::{
     WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsHashVerify,
     WaterBallFilePackCommandsPack, WaterBallFilePackCommandsUnpack,
+};
+//AI=== 引入非 panic 的进度条样式构造辅助，替换各处进度条模板的强制取值
+// Import the non-panicking progress-style helper, replacing panicking template unwraps.
+use crate::command::{
+    BUF_LEN, PACK_PROGRESS_STYLE_TEMPLATE, SPINNER_TEMPLATE, create_pb, progress_style,
 };
 use crate::multi_progress_init;
 use clap::error::Result;
@@ -51,13 +51,16 @@ pub(super) fn commands(args: WaterBallFilePackCommand) -> Result<(), Box<dyn std
     info!("wbfp: 经典路径 / classic path");
     let args2 = &args.commands;
     match args2 {
-        WaterBallFilePackCommands::Pack(p) => WaterBallFilePackArgsRuning::wbfp_p(p, mp),
-        WaterBallFilePackCommands::Unpack(u) => WaterBallFilePackArgsRuning::wbfp_u(u, mp),
-        WaterBallFilePackCommands::HashVerify(h) => WaterBallFilePackArgsRuning::wbfp_h(h, mp),
-        //AI=== 经典路径不支持浏览，入口层已把 browse 限定到 TUI / the classic path cannot browse; the entry routes browse to the TUI
-        WaterBallFilePackCommands::Browse(_) => {
-            Err("browse 需要交互式终端 / browse requires an interactive terminal".into())
-        } //AI_END===
+        Some(WaterBallFilePackCommands::Pack(p)) => WaterBallFilePackArgsRuning::wbfp_p(p, mp),
+        Some(WaterBallFilePackCommands::Unpack(u)) => WaterBallFilePackArgsRuning::wbfp_u(u, mp),
+        Some(WaterBallFilePackCommands::HashVerify(h)) => {
+            WaterBallFilePackArgsRuning::wbfp_h(h, mp)
+        }
+        //AI=== 经典路径不支持浏览/文件管理，入口层已限定到 TUI / the classic path cannot browse or manage files; the entry routes them to the TUI
+        Some(WaterBallFilePackCommands::Browse(_)) | None => Err(
+            "浏览/文件管理需要交互式终端 / browse and file management require an interactive terminal"
+                .into(),
+        ), //AI_END===
     }
 }
 

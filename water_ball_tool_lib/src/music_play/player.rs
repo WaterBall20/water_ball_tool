@@ -7,7 +7,8 @@ use crate::music_play::effect::runtime::{
     PreEffectRuntime, PreEffectRuntimeEventDirectSink, PreEffectRuntimeEventType,
 };
 use crate::music_play::effect::{
-    AudioFormat, Decision, PlayCmd, PostEffect, PostEffectChain, PreEffectChain, PreEffectError,
+    AudioFormat, Decision, EffectChainKind, EffectSummary, PlayCmd, PostEffect, PostEffectChain,
+    PreEffectChain, PreEffectError,
 };
 use crate::music_play::event::{EventChannelSink, EventSink};
 //AI_END===
@@ -143,6 +144,11 @@ impl Player {
         device.build_output_stream(
             config,
             move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                //AI=== 回调缓冲区长度用于播放延迟估算 / callback buffer length feeds the playback-latency estimate
+                time_metrics
+                    .callback_samples
+                    .store(data.len() as u64, Ordering::Relaxed);
+                //AI_END===
                 let pre_effect_item_eof = &event_content.pre_effect_item_eof;
                 let pre_effect_item_eof_pos = &event_content.pre_effect_item_eof_pos;
                 let t0 = Instant::now();
@@ -346,7 +352,7 @@ impl Player {
         // 在你的播放器初始化阶段
         //创建缓冲区
         //效果缓冲区
-        let pre_effect_ring_buf = ConcurrentRing::new_max_capacity(10)?;
+        let pre_effect_ring_buf = ConcurrentRing::new_max_capacity(5)?;
         //声音缓冲区
         let (audio_ring_buffer_reader, audio_ring_buffer) =
             crate::split_ring_buffer::unlocked_read_locked_write_ring_buffer(
@@ -567,6 +573,39 @@ impl Player {
     pub fn time_metrics(&self) -> &Arc<TimeMetrics> {
         &self.sound_engine.time_metrics
     }
+
+    //AI=== 效果器窗口数据：前效果在前、后效果在后；任一链正忙时返回 None 由 UI 保留上次结果
+    // Effects-window data: pre effects first, post effects after; None when either chain is busy, so the UI keeps its last snapshot.
+    /// 效果器链展示快照 / effect-chain display snapshot
+    #[must_use]
+    pub fn effect_summaries(&self) -> Option<Vec<EffectSummary>> {
+        let mut summaries = self.sound_engine.pre_effect_runtime.effect_summaries()?;
+        let post = self.sound_engine.post_effect_chain.try_lock().ok()?;
+        summaries.extend(post.effect_summaries());
+        Some(summaries)
+    }
+    //AI_END===
+
+    //AI=== 启用/禁用效果器：按链与索引分派，只调用 trait 方法 / enable/disable an effect by chain and index via trait methods
+    /// 设置指定效果器的启用状态；索引或链无效时返回 false
+    /// Set the enabled state of an effect; returns false when the chain or index is invalid.
+    pub fn set_effect_enabled(&self, chain: EffectChainKind, index: usize, enabled: bool) -> bool {
+        match chain {
+            //AI=== 前效果器在效果器线程应用；后效果器严格同步，直接切换 / pre effects apply on their thread; post effects toggle directly
+            EffectChainKind::Pre => self
+                .sound_engine
+                .pre_effect_runtime
+                .request_effect_enabled(index, enabled),
+            EffectChainKind::Post => self
+                .sound_engine
+                .post_effect_chain
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_effect_enabled(index, enabled),
+            //AI_END===
+        }
+    }
+    //AI_END===
 
     pub fn stop(self) -> DecoderResult<()> {
         let mut s = self;
@@ -799,6 +838,17 @@ impl Player {
     pub fn get_sample_rate(&self) -> u32 {
         self.sound_engine.stream_config.sample_rate
     }
+
+    //AI=== 输出设备格式：播放延迟按设备采样率与声道换算 / output device format for playback-latency conversion
+    /// 输出设备格式 / output device format
+    #[must_use]
+    pub fn output_format(&self) -> AudioFormat {
+        AudioFormat::new(
+            self.sound_engine.stream_config.channels,
+            self.sound_engine.stream_config.sample_rate,
+        )
+    }
+    //AI_END===
 
     pub fn get_pre_effect_item_eof(&self) -> bool {
         self.event_content

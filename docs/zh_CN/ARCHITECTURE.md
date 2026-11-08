@@ -75,6 +75,7 @@ water_ball_tool（二进制 crate，根包）
   │   │       ├── events.rs    ← TUI 任务事件 + 行状态
   │   │       ├── ops.rs       ← TUI 打包/解包/校验工作线程
   │   │       └── tui/         ← TUI（tui.rs、app.rs、ui.rs、browse.rs）
+  │   ├── command/tui_input.rs   ← 共享 TUI 输入（鼠标捕获、VT 解析、列表命中）
   │   ├── command/music_play.rs  ← clap 参数 + TUI 接线
   │   │   └── command/music_play/
   │   │       ├── runtime.rs         ← 播放运行时（事件 sink、快照）
@@ -419,6 +420,9 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
   「有 engine 但缺 data」的状态；旧的 engine/data 两个独立 `Option` 及其缺 data 分支已删除。
 - `DecoderRuntime::run()` 与 `PreEffectRuntime::run()` 返回 `Result`；线程 spawn 失败会中止 `Player::new()` 并返回错误，
   不再只记日志后继续。
+- 解码器在内部 `out_buf` 中累积交错样本，达到前效果器链的 `min_input_len_work()` 提示值（链上取各效果器的最大值）后
+  才写入一个 `Block`。该值只是批处理提示，不保证更小的输入不会工作：是否产生输出取决于效果器实现；没有内部缓冲的
+  效果器可能每个包都处理，`0` 表示解码器无需累积。调试读数包含解码器内部缓冲、解码→前效果排队、前效果延迟线和播放环。
 - 解码循环错误策略：
     - 瞬时 IO 错误（见 `DecoderRuntime::is_retryable_io_error`，如 Windows 1450 `ERROR_NO_SYSTEM_RESOURCES`）先重试，
       最多 5 次、每次间隔 200 ms，耗尽后才视为失败；
@@ -436,7 +440,7 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
 - 前效果器运行时线程遇到运行期错误不退出：环错误先用 `Skip` 不连续信号复位效果链，发出
   `PreEffectRuntimeEventErrorKind::Runtime` 事件，退避 10 ms 后继续消费（写端关闭时因此改为等待而不是空转）；输出写入
   硬错误同样只上报并丢弃该块。只有 `stop` 标志才结束循环。二进制通过 `PreEffectRuntimeEventChannelSink` 记录这些事件
-  （仅信息性，播放可继续）。
+  （仅信息性，播放可继续）。写输出环可能阻塞，因此写之前会释放效果链锁，使 UI 在暂停且输出环满时仍能读取效果器信息。
 - 事件通道 sink 构造器（`PlayerEventChannelSink::create`、`DecoderEventChannelSink::create`、
   `PreEffectRuntimeEventChannelSink::create`）返回 `Result`；DirectSink 的构造不会失败。`Player::new()` 与
   `Runtime::new()` 会传播 sink 与线程 spawn 失败。
@@ -469,25 +473,44 @@ transport 命令（`PlayCmd::{Play, Pause, Seek, ClearEofBuf}`）经有界 cross
 
 **文件**：`src/command/music_play/tui/`（`tui.rs`、`app.rs`、`ui.rs`、`channel_writer.rs`）
 
-- `tui::run` 每 50ms 轮询一次，取日志与扫描消息、应用 `Runtime::snapshot()`，渲染正在播放 / 进度 / 播放列表 / 日志 /
-  快捷键
+- `tui::run` 每 50ms 轮询一次，取日志与扫描消息、应用 `Runtime::snapshot()`，渲染正在播放 / 进度（右侧紧凑音量条）/
+  播放列表 / 右侧预留区 / 快捷键
+- TUI 状态在 `App` 中按职责分组（`playback`、`playlist`、`scan`、`seek`、`footer`、`mouse`、`command`、`effects`、
+  `debug`）。窗口布尔值合并为单个 `Window` 枚举（`None`/`Help`/`Debug`/`Effects`）。按键按窗口独占路由：命令输入优先，
+  其次 `Esc` 关闭当前窗口；`Window::None` 进入主界面处理，打开窗口时只进入该窗口的处理函数，按键不会落到主界面。
 - 播放列表视口：只渲染可见行；`↑`/`↓` 滚动一行、`PageUp`/`PageDown` 滚动一页、`Home`/`End` 跳到首尾，鼠标滚轮滚动三行，
-  左键点击某行会切换并播放该曲（`Runtime::play_at` → `PlayList::jump_to`）。底栏快捷键文字本身也可点击，分别对应退出、
-  下一曲、快退/快进、播放/暂停、单行滚动、音量、Debug 与命令模式。换曲时视口跟随当前曲目，在此之前保留用户
-  手动滚动的位置。TUI 主循环期间启用鼠标捕获，恢复终端前释放。Windows 下 TUI 会打开
-  `ENABLE_VIRTUAL_TERMINAL_INPUT`、请求 SGR 鼠标上报，并用 `vtparse`（`VtInput`）解析 VT 字节流；这样可避开
-  crossterm 的控制台鼠标记录——部分 ConPTY 终端会把它拆成裸 X10 负载字节。VT 模式下键盘改为专用线程直接读取
-  stdin 字节，而不是走 `crossterm::event`：crossterm 0.29 会丢弃合成 VT 输入中的 ESC、CR 等控制字符；
-  单独的 ESC 等待短暂超时后才作为 Esc 键。若无法启用 VT 输入，则禁用鼠标，键盘输入仍然可用
+  左键双击某行会切换并播放该曲（`Runtime::play_at` → `PlayList::jump_to`）。底栏快捷键文字本身也可点击，分别对应退出、
+  下一曲、播放/暂停、Debug、效果器与命令模式。换曲时视口跟随当前曲目，在此之前保留用户手动滚动的位置。鼠标捕获、VT
+  解析器（`VtInput`/`VtEvent`）、双击状态（`MouseState`）、带边框列表命中（`list_index_at`）与滚轮步长位于
+  `command/tui_input.rs`，与 `wbfp` 共用。TUI 主循环期间启用鼠标捕获，恢复终端前释放。Windows 下 TUI 会打开
+  `ENABLE_VIRTUAL_TERMINAL_INPUT`、请求 SGR 鼠标上报，并用 `vtparse` 解析 VT 字节流；这样可避开 crossterm 的控制台鼠标记录——部分
+  ConPTY 终端会把它拆成裸 X10
+  负载字节。VT 模式下键盘改为专用线程直接读取 stdin 字节，而不是走 `crossterm::event`：crossterm 0.29 会丢弃合成 VT
+  输入中的 ESC、CR 等控制字符；单独的 ESC 等待短暂超时后才作为 Esc 键。若无法启用 VT 输入，则禁用鼠标，键盘输入仍然可用
 - 启动：顺序模式在首曲到达时初始化（加载第一首）；随机模式先等 5 首，扫描结束（`ScanMessage::Done`）时不足 5 首则用
   已扫描到的曲目兜底初始化
 - 按键：`n` 下一曲、`←`/`→` 跳转进度（点按 5 秒；长按重复只移动预览，松开后提交）、空格 播放/暂停、`p` 暂停、
   `P` 播放、`↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` 滚动播放列表、
-  `+`/`-` 音量、`d`/F12 切换 Debug 弹窗、`:` 命令模式、`q`/`Esc`/`Ctrl+C` 退出。弹窗显示缓冲区长度、解码路径/格式、
-  播放列表状态、各段耗时（`TimeMetrics` 窗口）、`lock_fail` 与 `underrun`
+  `+`/`-` 音量、`F12` 切换 Debug 弹窗、`e` 切换效果器窗口、`:` 命令模式、`q`/`Esc`/`Ctrl+C` 退出。
+  Debug/效果器/帮助窗口互斥：打开一个会关闭其他窗口，`Esc` 先关闭当前窗口而不是退出。Debug 窗口为左右布局：左侧显示
+  缓冲区、解码状态、延迟管道与 `TimeMetrics`，右侧显示实时日志。内容包含各缓冲区的“已用 / 容量”、解码路径/格式、播放（设备）格式、播放列表状态、
+  基于缓冲区的延迟估算（解码器内部缓冲、解码→前效果排队、前效果延迟线、播放环加最近一次回调块，以及合计，按比例绘制
+  成从左到右的管道条）、各段耗时（`TimeMetrics` 窗口）、`lock_fail` 与 `underrun`
+- 进度行：进度条按格子绘制，并用八分块字符（`█▉▊▋▌▍▎▏`）细分，最小可到 1/8 格；时间/百分比标签放在进度条右侧，
+  不覆盖进度条，因此进度条始终连续（标签过长时至少给进度条保留 8 格，超出部分截断）。`wbfp` 任务卡片也使用共享的
+  `command::render_eighth_block_bar`。音量条保持普通整格条。
+- 效果器窗口：`e`（或 `:effects`）打开左右分栏视图。左栏先列前效果器链、再列后效果器链，只显示给人看的名称与启用状态；
+  `↑`/`↓` 与 `PageUp`/`PageDown` 移动选择，窗口标题同时显示 `↑`/`↓` 提示。右栏显示选中效果器的所属链、当前延迟、
+  介绍和设置区。`空格`/`Enter` 只发起切换请求，UI 不做乐观更新，最终状态由下一帧快照确认。前效果器开关进入独立命令
+  通道，由效果器线程在下一个音频块之前应用；禁用时先通过 `PreEffectDiscontinuity::DisableSelf` 排空内部缓冲，再把
+  排出的数据交给下游的 `UpstreamDisabled { distance }` 处理。非破坏性写唤醒会中断阻塞的输出写入但不清理缓冲；
+  效果器线程把未写部分放入待写缓存，先处理命令，再按顺序续写缓存，因此开关不会截断音频块。只有有效格式发生变化才重置下游；会改变格式的效果器
+  （重采样器）静态标记为 `Forbidden`，不参与旁路。后效果器严格同步，直接切换。列表只通过 `PreEffect`/`PostEffect`
+  的 trait 方法（`display_name`、`description`、`enabled`、`disable_policy`、`buffered_samples`，前效果器使用管理器
+  登记的输入格式）生成，新增效果器无需修改 UI。其他设置编辑留待专门设计 trait 后实现。
 - 命令模式：`:` 把底栏变为输入行（`Enter` 执行、`Esc` 取消、`Backspace` 编辑）。命令按唯一前缀匹配：`quit`、`play`、
-  `pause`、`toggle`、`next`、`prev`、`seek <mm:ss|+N|-N>`、`vol <0-100|+N|-N>`、`mode <name>`、`goto <n>`、`debug` 与
-  `help`/`?`；未知或歧义命令在底栏报错。`help` 打开命令表弹窗，`prev` 沿 `PlayList::prev` 的历史回退，`goto` 复用
+  `pause`、`toggle`、`next`、`prev`、`seek <mm:ss|+N|-N>`、`vol <0-100|+N|-N>`、`mode <name>`、`goto <n>`、`debug`、
+  `effects` 与 `help`/`?`；未知或歧义命令在底栏报错。`help` 打开命令表弹窗，`prev` 沿 `PlayList::prev` 的历史回退，`goto` 复用
   `Runtime::play_at`，`mode` 调用 `Runtime::set_loop_mode`。`:seek` 走 `Runtime::seek` → `Player::try_seek`：清空输出环、
   用解码器准确 seek 并做 `Seek` 基本复位、作废旧 EOF 状态、重设进度基准；显示进度与真实位置可能相差一个音频块。
   `Runtime::seek` 在换曲期间或 EOF 尾部/交叉渐变尚未播完时忽略请求，因为该窗口内 `pos` 仍包含上一曲的样本。
@@ -625,6 +648,10 @@ pub struct DataPosList {
     list: Vec<(u64, u64)>,                      // (位置, 长度) 对
 }
 ```
+
+`PackStruct.items` 以条目名称作为 key，而 `PackStructItem.name` 是序列化进块的字段。同目录重命名必须同时更新两者；
+它只重写所在的 `PackStruct` 块，`metadata_file_pos`、`struct_file_pos`、数据块与哈希都保持不变。跨目录移动会重写
+源与目标两个 `PackStruct` 块，并调整两条祖先链上的目录累计元数据；条目的数据与哈希仍然不变。
 
 ### 8.4 清单数据块：A/B 双块机制
 
@@ -765,7 +792,7 @@ Flow
 
 ### 8.8 公共 API 层：ManagerSync
 
-**文件**：`water_ball_tool_lib/src/wb_files_pack/manager_sync.rs`（438 行）
+**文件**：`water_ball_tool_lib/src/wb_files_pack/manager_sync.rs`（553 行）
 
 `ManagerSync` 是包住 `WBFPManager` + `PackIO` 的线程安全包装：
 
@@ -790,6 +817,9 @@ pub struct ManagerSync {
 |               | `virtual_file_options() -> VirtualFileOpenOptions`                               | 构造器：`read()`/`write()`/`create_new()`/`end_pos()`/`alloc_size()`                   |
 | **读取**      | `get_manifest_attribute` / `get_root_struct_items` / `get_dir` / `load_all_data` |                                                                                        |
 | **写入**      | `create_dir_all` / `delete_file` / `delete_dir_all`                              |                                                                                        |
+| **重命名**    | `rename(from, to)`                                                               | 仅同目录改叶子名称；跨目录移动使用 `move_entry`                                        |
+| **移动**      | `move_entry(from, to)`                                                           | 移动到另一个已存在的父目录，可同时修改叶子名称                                         |
+| **探测**      | `probe_pack(path)`                                                               | 只读文件头检测，不获取 `.lock`                                                         |
 | **删除**      | `delete_file` / `delete_dir_all`                                                 | 移除元数据 + 结构，数据块提交 GC（不覆写）                                             |
 | **擦除**      | `erase_file(strategy)` / `erase_dir_all(strategy)`                               | 覆写数据 + 清单块 → GC → 移除                                                          |
 | **校验**      | `verify_all_file_hash`                                                           | 递归哈希校验所有文件                                                                   |
@@ -802,7 +832,11 @@ pub struct ManagerSync {
 | `Random`  | 1    | 单遍随机字节                                      |
 | `Dod5220` | 3    | DoD 5220.22-M：0x00 → 0xFF → 随机（每遍写入磁盘） |
 
-> `PackStruct` 上的 `child_locked_count` 跟踪有多少后代文件持有活动写句柄。仅当 `child_locked_count == 0` 时目录才能被删除/擦除。
+> `PackStruct` 上的 `child_locked_count` 跟踪有多少后代文件持有活动虚拟文件句柄。仅当 `child_locked_count == 0`
+> 时目录才能被删除、擦除、重命名或移动。文件自身被锁定时 `rename`/`move_entry` 同样拒绝；只读
+> `PackVirtualFile` 也会持有句柄。`rename` 绝不移动条目：`from` 与 `to` 必须共享同一父目录。`move_entry`
+> 要求父目录不同，可同时修改叶子名称；目录不能移动到自己的子树；它会把移动条目对应的累计值从源祖先链减去、
+> 加到目标祖先链。目标 `PackStruct` 先于源 `PackStruct` 写入：两次写入之间崩溃可能留下重复引用，但不会丢失条目。
 
 **设计说明**
 
@@ -842,6 +876,10 @@ Responsibilities
 1. 计算并持久化文件哈希
 2. 释放预分配但未使用的空间（通过 `set_len(metadata_len)`）
 3. 将元数据归还给 `WBFPManager.file_metadata_update()`
+
+`PackFileHandle` 打开时捕获 `path_list`，`commit_data()` 用该路径定位条目并回写元数据。因此禁止重命名或移动
+打开中的条目：文件自身或目录的任一后代文件被打开时，`WBFPManager::rename` 返回 `PackFileError::Lock`；
+只读句柄同样计入。
 
 ### 8.10 哈希系统
 
@@ -971,13 +1009,21 @@ flowchart TD
 `tui/ui.rs`、`tui/browse.rs`）
 
 - **路由**：stdout/stdin 是终端且未传 `--no-tui` 时，`wbfp::run` 进入 TUI；否则调用经典 `indicatif` 路径。
-  `wbfp::commands` 始终走经典路径（测试使用）。`browse` 没有经典等价物，需要交互式终端。
-- **布局**：参考 yazi：标题栏/路径栏、文件列表、预留预览窗（当前显示元数据，后续接入内容预览）、状态行和按键栏。
-  宽屏左右分栏，窄屏单栏并用 `p` 切换。所有模式下文件列表只读，打包/解包/校验不提供编辑操作。
-- **导航**：`ManagerSync` 按目录懒加载（`get_struct_item_name_list` + `get_pack_struct_item`）；打包模式浏览本地源目录。
-  目录优先排序；`..` 作为导航行。键盘导航始终可用；非 Windows 平台还支持鼠标选择/双击/滚轮。Windows/ConPTY 下
-  crossterm 会把 SGR 鼠标报文拆成普通按键，因此 TUI 在 Windows 上仅启用键盘，并用
-  `MouseCapture::keyboard_only` 清除旧进程残留的鼠标上报。
+  `wbfp::commands` 始终走经典路径（测试使用）。`browse` 没有经典等价物，需要交互式终端。无子命令时进入文件管理器，
+  仅支持 TUI：包路径可选（`wbfp <pack>` 立即打开，裸 `wbfp` 隐藏中间视图），`--no-tui` 与非 TTY 输入会被拒绝。
+  `wbfp browse <pack>` 仍是只读单栏浏览器；打包/解包/校验保持原有单栏布局。
+- **布局**：Manager 模式三栏——本地文件系统、包、预览。宽度 >= 110 时显示三栏（30/40/30）；>= 80 时折叠预览，
+  保留本地/包（35/65）；< 80 时只保留包视图。无包时省略中间栏：>= 80 显示本地/预览，更窄只显示本地。预览先于
+  本地栏折叠；打开包时中间栏永不折叠。子命令模式保持旧的单列表+预览布局。
+- **状态**：`App` 分组为 `ui`、`nav`（主面板；Manager 下为包视图，子命令下为唯一面板）、`local_nav`（Manager 的
+  文件系统面板）、`focus`（`Local`/`Pack`）与 `jobs`。弹层仍是 `Window` 枚举。磁盘上的包文件按文件头探测，不依赖
+  扩展名；探测结果存入 `Entry.pack_version`，渲染为品红色 `◆`。
+- **导航**：`ManagerSync` 按需加载包目录；本地面板使用 `std::fs`。`Tab` 切换焦点，`Enter` 进入目录或打开探测到的
+  本地包，`Ctrl+W` 关闭包。鼠标命中先确定面板；选择/双击/滚轮通过 `command/tui_input.rs` 与 `mp` 共用。Windows
+  下使用与 `mp` 相同的 VT 输入路径；鼠标捕获启动失败时继续以键盘运行。
+- **复制/移动**：`c`/`m` 把焦点条目传到另一面板（本地 ↔ 包）。目标名称必须不存在；目录复制保留空目录；移动先复制，
+  成功后再删除源。当前传输在 UI 线程同步执行（`shortcut:`），超大目录会阻塞 UI 直到完成。包写入要求 Manager 使用
+  读写句柄；`wbfp browse` 仍是只读。
 - **任务**：`ops::spawn` 在后台线程执行打包/解包/校验，通过 mpsc 发送
   `JobEvent::{Dir, File, Start, Progress, Done, Total, Finished}`。`app::App::apply_event` 更新行状态与任务卡片。
   解包/校验只打开一个只读 `ManagerSync`，UI 与任务共享其克隆：包的 `.lock` 会拒绝同进程第二次打开，因此无法保留
@@ -993,9 +1039,11 @@ flowchart TD
   列与任务区域不会跳动。
 - **进度**：TUI 在备用屏幕内绝不写 `indicatif`。`common::copy_file_into_pack` 与
   `common::extract_pack_file_to_disk` 与经典路径共用；TUI 工作线程改为发送逐文件进度与限流的全局 `Total`。
+  任务卡片与任务行使用与 `mp` 相同的 `command::eighth_block_bar`，两套 TUI 的进度都精确到 1/8 格。任务卡片把进度条
+  独占一行、标签放到下一行，文字不会遮住进度；写入优化跳过标记为 `Done`，不计为警告。
 - **退出**：操作不可取消。任务运行中按 `q`/`Ctrl+C` 只设置 `quit_after_job`，收到 `Finished` 后才退出，避免打包写入中途
   被丢弃。鼠标捕获由 Drop 守卫释放，终端在所有退出路径上恢复，与 `mp` 一致。
-- **日志**：TUI 安装 `music_play::tui::channel_writer::init_logging("wbfp")`，日志进入有界通道并由 `d` 弹层显示；
+- **日志**：TUI 安装 `music_play::tui::channel_writer::init_logging("wbfp")`，日志进入有界通道并由 `F12` 调试弹层显示；
   经典路径继续使用 `multi_progress_init`。
 
 ---
@@ -1004,7 +1052,8 @@ flowchart TD
 
 **核心设计**：每个非 TUI 子命令路径通过 `multi_progress_init(module)` 创建自己的 `indicatif::MultiProgress`，该命令的所有子进度条都注册在
 其中。终端日志 writer 包装同一个 `MultiProgress`，因此 `suspend()` 不会让日志撕裂进度条。`wbfp` TUI 不使用
-indicatif，而是通过 ratatui 与 `JobEvent` 绘制进度（见 §8.16）。
+indicatif，而是通过 ratatui 与 `JobEvent` 绘制进度（见 §8.16）。经典 `progress_style` 构造的 `ProgressStyle` 与
+TUI 进度条共用八分块字符集（`█▉▊▋▌▍▎▏ `），两者都能把一格细分到 1/8。
 
 **层级结构**
 
@@ -1097,10 +1146,18 @@ flowchart TD
 后，对向阻塞调用得到 `ReadersClosed` / `WritersClosed`（对齐 `split_ring_buffer` 的「对端关闭 →
 `CannotWait`」）。没有独立的读/写端句柄类型，也没有手动 close/reopen；从未调用阻塞方法的句柄不会被判为已关闭。
 
+`wake_blocked_readers` 不修改缓冲区，只主动唤醒阻塞的 `pop_wait`：在等待锁内置位粘性标志并通知读者。被唤醒的调用
+返回 `ReadWoken` 且不消费任何排队数据；即使唤醒发生在读者进入等待之前，标志也会保留。因此前效果器线程在没有音频块
+到达时也能被控制命令唤醒。该唤醒是一次性语义，面向单读者场景（前效果器输入环）。
+
 ### 12.2 `split_ring_buffer`
 
 读写分离环形缓冲区，读端与写端可各自独立选择有锁或无锁（`locked_ring_buffer`、
-`unlocked_read_locked_write_ring_buffer` 等）；音频回调用的是无锁读端。`LockedWriter::resize` /
+`unlocked_read_locked_write_ring_buffer` 等）；音频回调用的是无锁读端。`write_all` 返回专用错误
+`WriteAllError { written, kind }`：`Interrupted` 来自非破坏性的 `wake_blocked_writers`（缓冲内容不变，可从
+`written` 续写），`Rejected` 来自 `reject_pending_writers`（缓冲已清空，已写前缀失效），`PeerClosed` 表示读端消失。
+`wake_blocked_writers` 只递增独立的唤醒代际并通知，`reject_pending_writers` 保持“清空 + 拒绝”语义。
+`LockedWriter::resize` /
 `UnlockedWriter::resize`（仅 Copy）调整逻辑容量：超过物理分配时会分配新的 A/B，阻止新写端并等待在途写端退出（读端
 继续运行，只在极短的交换窗口内得到「暂无数据」），把存量数据复制到新 A 的同一逻辑位置，交换缓冲区，旧 A 延迟到
 没有在途操作后释放。缩小或在物理分配内调整只原子更新容量；超过新容量的存量数据保留，因此 `len()` 可能暂时大于

@@ -221,22 +221,17 @@ impl WBFPManager {
                     )))?;
             temp_ps.add_item(name.clone(), item);
         }
-        if let Err(err) = m_load_all_data(self, &mut temp_ps, no_err, &PathBuf::new())
-            && !no_err
-        {
-            for name in &root_keys {
-                let item = temp_ps
-                    .remove_item(name)
-                    .ok_or(PackFileError::State(format!("临时结构项\"{name}\"不存在")))?;
-                self.manifest.root_struct_mut().add_item(name.clone(), item);
-            }
-            Err(err)?;
-        }
+        let r = m_load_all_data(self, &mut temp_ps, no_err, &PathBuf::new());
         for name in &root_keys {
             let item = temp_ps
                 .remove_item(name)
                 .ok_or(PackFileError::State(format!("临时结构项\"{name}\"不存在")))?;
             self.manifest.root_struct_mut().add_item(name.clone(), item);
+        }
+        if let Err(err) = r
+            && !no_err
+        {
+            Err(err)?;
         }
         Ok(())
     }

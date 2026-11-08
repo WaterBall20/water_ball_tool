@@ -152,6 +152,14 @@ pub(crate) struct Inner<T> {
     /// `reject_pending_writers` 代际计数。阻塞写端入口记录当前值，若后续
     /// 发现值变化则返回拒绝错误。
     rejection_epoch: AtomicUsize,
+    //AI=== 非破坏性写唤醒代际：只解除阻塞，不清空 / non-destructive writer wake epoch: unblock only, no clear
+    /// `wake_blocked_writers` 代际。`write_all` 入口记录当前值；变化时返回
+    /// `WriteAllErrorKind::Interrupted`，缓冲内容不变，可从 `written` 续写。
+    ///
+    /// Wake epoch for `wake_blocked_writers`; `write_all` returns `Interrupted`
+    /// without touching the buffer and may resume from `written`.
+    wake_epoch: AtomicUsize,
+    //AI_END===
 }
 
 // SAFETY: 手写 `Send`。`UnsafeCell` / `MaybeUninit` 抑制自动推导。
@@ -195,6 +203,9 @@ impl<T> Inner<T> {
             clear_cvar: Condvar::new(),
             mutation_mutex: Mutex::new(()),
             rejection_epoch: AtomicUsize::new(0),
+            //AI=== 初始没有待处理的非破坏性写唤醒 / no pending non-destructive writer wake initially
+            wake_epoch: AtomicUsize::new(0),
+            //AI_END===
         }
     }
 
@@ -250,6 +261,20 @@ impl<T> Inner<T> {
     pub(crate) fn rejection_changed(&self, my_epoch: usize) -> bool {
         self.rejection_epoch.load(Ordering::Acquire) != my_epoch
     }
+
+    //AI=== 非破坏性写唤醒代际 / non-destructive writer wake epoch
+    /// 当前非破坏性唤醒代际 / current non-destructive wake epoch
+    #[inline]
+    pub(crate) fn current_wake_epoch(&self) -> usize {
+        self.wake_epoch.load(Ordering::Acquire)
+    }
+
+    /// 检查是否收到非破坏性唤醒 / whether a non-destructive wake arrived
+    #[inline]
+    pub(crate) fn wake_changed(&self, my_epoch: usize) -> bool {
+        self.wake_epoch.load(Ordering::Acquire) != my_epoch
+    }
+    //AI_END===
 
     pub(crate) fn enter_read(&self) -> Option<InFlightGuard<'_, T>> {
         self.enter_inner(false)
@@ -420,9 +445,10 @@ impl<T> Inner<T> {
         self.release_b_dropping();
     }
 
-    /// 清空缓冲区并拒绝所有当前 pending 的阻塞写端，让它们返回
-    /// `Kind::WriteRejected` / `Kind::WriteRejectedValue`。之后进入的写端不受
-    /// 影响。
+    /// 清空缓冲区并拒绝所有当前 pending 的阻塞写端。`write_all` 返回
+    /// `WriteAllErrorKind::Rejected`（带已写入数量），`push_wait` /
+    /// `write_wait` 返回 `Kind::WriteRejected` / `Kind::WriteRejectedValue`。
+    /// 之后进入的写端不受影响。
     ///
     /// 本方法**不获取 `write.lock`**：与 `write_all`（持写端锁直至完成并在
     /// `write_cvar` 等待）互斥由内部机制保证：
@@ -477,11 +503,7 @@ impl<T> Inner<T> {
         //   clear_pending 复位后，新写端进入时记录的 my_epoch 已是新值，不受影响。
         // - 若先复位 clear_pending 再递增 epoch，新写端可能在递增之前拿锁进入
         //   wait 并记录旧 epoch，然后被递增拒绝——语义错误。
-        {
-            let _g = lock_ignore_poison(&self.wait_mutex);
-            self.rejection_epoch.fetch_add(1, Ordering::AcqRel);
-            self.write.notify_all_locked();
-        }
+        self.reject_writers_now();
 
         // 复位 clear_pending，唤醒读写端与等待 clear / truncate 的写端
         self.open_rw_window_and_notify(&mut cp_guard);
@@ -546,6 +568,30 @@ impl<T> Inner<T> {
         let _g = lock_ignore_poison(&self.wait_mutex);
         self.write.notify_all_locked();
     }
+
+    //AI=== 销毁性拒绝与非销毁性唤醒共用同一通知点 / destructive rejection and non-destructive wake share the notification point
+    /// 递增破坏性拒绝代际并唤醒写端 / bump the destructive rejection epoch and wake writers
+    fn reject_writers_now(&self) {
+        let _g = lock_ignore_poison(&self.wait_mutex);
+        self.rejection_epoch.fetch_add(1, Ordering::AcqRel);
+        self.write.notify_all_locked();
+    }
+
+    /// 只唤醒阻塞写端，不清空缓冲区。
+    ///
+    /// 递增 `wake_epoch` 并 `notify_all`。`write_all` 看到代际变化后返回
+    /// `WriteAllErrorKind::Interrupted`，数据保持不变，调用方可从 `written`
+    /// 处续写。之后进入的写端记录新代际，不受影响。
+    ///
+    /// Wake blocked writers without clearing the buffer. `write_all` returns
+    /// `Interrupted` with the progress unchanged; later writers record the new
+    /// epoch and are not affected.
+    pub fn wake_blocked_writers(&self) {
+        let _g = lock_ignore_poison(&self.wait_mutex);
+        self.wake_epoch.fetch_add(1, Ordering::AcqRel);
+        self.write.notify_all_locked();
+    }
+    //AI_END===
 
     /// 旧缓冲区进入延迟释放队列，等在途操作全部退出后释放。
     ///

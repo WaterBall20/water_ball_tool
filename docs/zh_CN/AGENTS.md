@@ -18,8 +18,10 @@ cargo test --workspace -- --include-ignored # 包含长时间测试（主分支�
 ./target/release/water_ball_tool -h
 ```
 
-- `wbfp` 在 stdout/stdin 为终端时运行 TUI；`--no-tui`（或非 TTY stdout）保留经典进度条输出。`wbfp browse <pack>` 只打开只读
-  浏览器，不启动任务。打包/解包/校验期间 TUI 文件列表仅支持预览。
+- `wbfp` 在 stdout/stdin 为终端时运行 TUI；`--no-tui`（或非 TTY stdout）保留经典进度条输出。无子命令时打开文件管理器：
+  左侧文件系统、中间可选包视图、最右预览；`wbfp <pack>` 立即打开该包，裸 `wbfp` 隐藏中间视图。该形式仅支持 TUI
+  （`--no-tui` 与非 TTY 输入会被拒绝）。`wbfp browse <pack>` 仍是只读单栏浏览器；打包/解包/校验子命令保持原来的
+  预览式单栏布局。
 
 ## 构建选项
 
@@ -37,8 +39,13 @@ cargo test --workspace -- --include-ignored # 包含长时间测试（主分支�
 
 ## 测试规范
 
+- **不得吞掉测试输出**：测试必须直接运行（`cargo test ...`），保持完整输出可见。不得通过 `Select-String`、`grep`、`rg`
+  等过滤器丢弃过程输出与失败细节；被过滤的运行一旦卡住或超时，将没有任何可诊断信息。输出过大时应重定向到文件再查看，
+  而不是丢弃输出流。
 - 慢速测试标记为 `#[ignore = "longtime"]`。`cargo test --workspace` 默认跳过它们。主分支 CI 推送时使用 `--include-ignored`
   运行全量套件。必须带 `--workspace`：`water_ball_tool_lib` 是 workspace 成员，单独的 `cargo test` 只覆盖二进制包。
+- `#[ignore = "longtime"]` **只允许**用于必然会超过 60 秒的测试。禁止因为测试不稳定、偶尔卡住或运行不便而标记
+  `#[ignore]`；应修复或拆分该测试。
 - `ff` 与经典 `wbfp` 路径通过 `crate::multi_progress_init(module)` 自行初始化日志，因此调用其处理函数的测试无需额外设置
   即可获得可用的 `MultiProgress`。`wbfp` TUI 与 `mp` 安装 TUI 日志通道（`tui::channel_writer::init_logging`），因此测试
   不应调用 `wbfp::run`/`music_play::args` 并期待终端。重复注册 subscriber 会被 `try_init` 拒绝并仅记录日志。测试使用

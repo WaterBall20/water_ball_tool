@@ -1,13 +1,16 @@
-use crate::concurrent_ring::ConcurrentRing;
+use crate::concurrent_ring::{ConcurrentRing, ConcurrentRingErrorKind};
 use crate::music_play::effect::{
-    AudioData, AudioFormat, PreEffect, PreEffectChain, PreEffectDiscontinuity, PreEffectError,
-    PreEffectInfo,
+    AudioData, AudioFormat, EffectSummary, EffectToggleError, PreEffect, PreEffectChain,
+    PreEffectDiscontinuity, PreEffectError, PreEffectInfo, ResetReason,
 };
 use crate::music_play::event::{EventChannelSink, EventDirectSink, EventSink};
 use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
 //AI=== 看门狗线程退出通知 / watchdog thread-exit notification
 use crate::music_play::watchdog::{SLOT_PRE_EFFECT, ThreadExitGuard, WatchNotify};
-use crate::split_ring_buffer::LockedWriter;
+use crate::split_ring_buffer::{LockedWriter, WriteAllErrorKind};
+//AI=== 独立效果器命令通道：不经过音频环，支持主动唤醒阻塞读者 / separate effect command channel with active reader wake
+use crossbeam_channel::{Receiver, Sender};
+//AI_END===
 use std::any::Any;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -17,10 +20,29 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error};
 //AI_END===
 
+//AI=== 效果器开关命令 / effect toggle command
+#[derive(Clone, Copy, Debug)]
+struct EffectCommand {
+    index: usize,
+    enabled: bool,
+}
+
+/// 一次输出写入的结果 / outcome of one output write
+enum AudioWriteOutcome {
+    Complete,
+    Interrupted(usize),
+    Discarded,
+}
+//AI_END===
+
 pub struct PreEffectRuntime {
     effects: Arc<Mutex<PreEffectChain>>,
     input_buf: ConcurrentRing<AudioData>,
     audio_buf: LockedWriter<f32>,
+    //AI=== 开关命令走独立通道，由效果器线程应用 / toggle commands use a separate channel applied by the effect thread
+    effect_cmd_tx: Sender<EffectCommand>,
+    effect_cmd_rx: Receiver<EffectCommand>,
+    //AI_END===
     stop: Arc<AtomicBool>,
     effect_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     event_list: Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
@@ -39,6 +61,8 @@ impl Clone for PreEffectRuntime {
             effects: self.effects.clone(),
             input_buf: self.input_buf.clone(),
             audio_buf: self.audio_buf.clone(),
+            effect_cmd_tx: self.effect_cmd_tx.clone(),
+            effect_cmd_rx: self.effect_cmd_rx.clone(),
             stop: self.stop.clone(),
             effect_thread: self.effect_thread.clone(),
             event_list: self.event_list.clone(),
@@ -53,6 +77,11 @@ impl Drop for PreEffectRuntime {
     fn drop(&mut self) {
         if self.strong.fetch_sub(1, Ordering::Release) == 1 {
             self.stop.store(true, Ordering::Release);
+            //AI=== 停止标志本身不能唤醒阻塞的 pop_wait；输出环满时还要拒绝在途写者 / the stop flag alone cannot wake a blocked pop_wait; reject in-flight writers too
+            self.input_buf.wake_blocked_readers();
+            self.input_buf.reject_waiting_writers();
+            self.audio_buf.reject_pending_writers();
+            //AI_END===
             if let Some(thread) = self
                 .effect_thread
                 .lock()
@@ -89,37 +118,97 @@ impl PreEffectRuntime {
         }
     }
 
+    //AI=== 效果线程算延迟并存原子值，UI 不锁效果链 / compute on the effect thread; the UI reads an atomic and never locks the chain
+    fn store_effect_delay(effects: &PreEffectChain, time_metrics: &TimeMetrics) {
+        let ns = u64::try_from(effects.buffered_duration().as_nanos()).unwrap_or(u64::MAX);
+        time_metrics.effect_delay_ns.store(ns, Ordering::Relaxed);
+    }
+    //AI_END===
+
     fn send_input_and_clear_buf_inner(&self, audio_data: AudioData) -> Result<(), PreEffectError> {
         self.input_buf.reject_waiting_writers();
+        //AI=== 输入环被清空：丢弃的块不会再被效果线程取走，排队延迟必须同步归零
+        // The input ring was cleared: discarded blocks will never be popped, so the queue gauge must reset too.
+        self.time_metrics
+            .pre_effect_queue_samples
+            .store(0, Ordering::Relaxed);
+        //AI_END===
         self.input_buf.push_wait(audio_data)?;
         Ok(())
     }
 
-    fn audio_buf_write_all(
+    //AI=== 输出缓存：被非破坏性唤醒时保留未写数据，稍后按顺序重试 / output cache: keep unwritten data on a non-destructive wake
+    fn write_audio_once(
         buf: &LockedWriter<f32>,
         data: &[f32],
         event_list: &Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
-    ) -> Result<bool, crate::split_ring_buffer::error::Error<f32>> {
-        if let Err(e) = buf.write_all(data) {
-            if let crate::split_ring_buffer::error::Kind::WriteRejected = e.kind {
-                return Ok(true);
-            }
-            Self::emit(
-                PreEffectRuntimeEvent {
-                    result: Err(PreEffectRuntimeEventError::new(
-                        "Pre effect runtime write error",
-                        PreEffectRuntimeEventErrorKind::Runtime(e.to_string()),
-                    )),
-                },
-                &event_list,
-            );
-            //AI=== 硬错误只上报，是否退出线程由调用方决定（现在不退出）/ a hard error is only reported; the caller decides (it no longer exits)
-            error!("Failed to write all audio data: {}", e);
-            //AI_END===
-            return Err(e);
+    ) -> AudioWriteOutcome {
+        match buf.write_all(data) {
+            Ok(()) => AudioWriteOutcome::Complete,
+            Err(e) => match e.kind {
+                WriteAllErrorKind::Interrupted => AudioWriteOutcome::Interrupted(e.written),
+                WriteAllErrorKind::Rejected => AudioWriteOutcome::Discarded,
+                WriteAllErrorKind::PeerClosed => {
+                    Self::emit(
+                        PreEffectRuntimeEvent {
+                            result: Err(PreEffectRuntimeEventError::new(
+                                "Pre effect runtime write error",
+                                PreEffectRuntimeEventErrorKind::Runtime(e.to_string()),
+                            )),
+                        },
+                        &event_list,
+                    );
+                    error!("Failed to write all audio data: {}", e);
+                    AudioWriteOutcome::Discarded
+                }
+            },
         }
-        Ok(false)
     }
+
+    /// 把新输出放到待写缓存末尾；缓存为空时先尝试直接写。
+    /// Returns true when the pending buffer is still non-empty.
+    fn queue_audio_output(
+        buf: &LockedWriter<f32>,
+        pending: &mut Vec<f32>,
+        data: &[f32],
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
+    ) -> bool {
+        if pending.is_empty() {
+            match Self::write_audio_once(buf, data, event_list) {
+                AudioWriteOutcome::Complete | AudioWriteOutcome::Discarded => false,
+                AudioWriteOutcome::Interrupted(written) => {
+                    pending.extend_from_slice(&data[written..]);
+                    !pending.is_empty()
+                }
+            }
+        } else {
+            pending.extend_from_slice(data);
+            true
+        }
+    }
+
+    /// 尝试写出缓存；返回 true 表示仍有未写数据。
+    fn flush_pending_audio(
+        buf: &LockedWriter<f32>,
+        pending: &mut Vec<f32>,
+        event_list: &Arc<Mutex<Vec<Box<dyn EventSink<PreEffectRuntimeEvent>>>>>,
+    ) -> bool {
+        if pending.is_empty() {
+            return false;
+        }
+        match Self::write_audio_once(buf, pending, event_list) {
+            AudioWriteOutcome::Complete | AudioWriteOutcome::Discarded => {
+                pending.clear();
+                false
+            }
+            AudioWriteOutcome::Interrupted(written) => {
+                pending.drain(..written);
+                !pending.is_empty()
+            }
+        }
+    }
+
+    //AI_END===
 }
 
 impl PreEffectRuntime {
@@ -128,10 +217,15 @@ impl PreEffectRuntime {
         audio_buf: LockedWriter<f32>,
         time_metrics: Arc<TimeMetrics>,
     ) -> Self {
+        //AI=== 命令通道不丢消息，容量不设上限 / command channel must not drop messages, so it is unbounded
+        let (effect_cmd_tx, effect_cmd_rx) = crossbeam_channel::unbounded();
+        //AI_END===
         Self {
             effects: Arc::new(Mutex::new(PreEffectChain::new())),
             input_buf,
             audio_buf,
+            effect_cmd_tx,
+            effect_cmd_rx,
             stop: Arc::new(AtomicBool::new(false)),
             effect_thread: Arc::new(Mutex::new(None)),
             event_list: Arc::new(Mutex::new(Vec::new())),
@@ -219,6 +313,11 @@ impl PreEffectRuntime {
                 // 旧线程已死：清掉环里崩溃前未消费的块，避免重启后先播残留音频
                 // The old thread is gone: drop blocks it never consumed so a restart does not replay them.
                 self.input_buf.reject_waiting_writers();
+                //AI=== 环已清空，排队延迟归零 / the ring was cleared, so the queue gauge resets
+                self.time_metrics
+                    .pre_effect_queue_samples
+                    .store(0, Ordering::Relaxed);
+                //AI_END===
                 if let Some(handle) = handle
                     && let Err(e) = handle.join()
                 {
@@ -235,6 +334,7 @@ impl PreEffectRuntime {
             let effects = self.effects.clone();
             let input_buf = self.input_buf.clone();
             let audio_buf = self.audio_buf.clone();
+            let effect_cmd_rx = self.effect_cmd_rx.clone();
             let stop = self.stop.clone();
             let event_list = self.event_list.clone();
             let time_metrics = self.time_metrics.clone();
@@ -255,6 +355,12 @@ impl PreEffectRuntime {
                         //AI_END===
                         //统计
                         let mut out_temp_buf = Vec::new();
+                        //AI=== 待写输出缓存：非破坏性唤醒后保留未写数据 / pending output cache retained across non-destructive wakes
+                        let mut pending_audio = Vec::new();
+                        let mut pending_eof = false;
+                        //AI=== 开关排空缓冲复用，避免每条命令分配 / reuse the drained buffer across commands
+                        let mut drained = Vec::new();
+                        //AI_END===
                         let mut read_wait_acc = DurationAccumulator::new();
                         let mut process_acc = DurationAccumulator::new();
                         let mut write_wait_acc = DurationAccumulator::new();
@@ -265,14 +371,102 @@ impl PreEffectRuntime {
                             if stop.load(Ordering::Acquire) {
                                 break;
                             }
+                            //AI=== 先应用开关命令，再阻塞取音频；与音频回调“先命令后数据”的顺序一致
+                            // Apply toggle commands before blocking for audio, mirroring the audio callback.
+                            while let Ok(command) = effect_cmd_rx.try_recv() {
+                                drained.clear();
+                                let result = {
+                                    let mut effects = effects.lock().unwrap_or_else(|e| {
+                                        effects.clear_poison();
+                                        e.into_inner()
+                                    });
+                                    let result = effects.set_effect_enabled(
+                                        command.index,
+                                        command.enabled,
+                                        &mut drained,
+                                    );
+                                    Self::store_effect_delay(&effects, &time_metrics);
+                                    result
+                                };
+                                match result {
+                                    Ok(()) => {}
+                                    Err(EffectToggleError::Reset(errors)) => {
+                                        error!(
+                                            "效果器开关 reset 失败，相关效果器已降级 / effect toggle reset failed, effects degraded: {errors:?}"
+                                        );
+                                        Self::emit(
+                                            PreEffectRuntimeEvent {
+                                                result: Err(PreEffectRuntimeEventError::new(
+                                                    "Reset pre effect err",
+                                                    PreEffectRuntimeEventErrorKind::from(errors),
+                                                )),
+                                            },
+                                            &event_list,
+                                        );
+                                    }
+                                    Err(
+                                        EffectToggleError::InvalidIndex
+                                        | EffectToggleError::Forbidden,
+                                    ) => {
+                                        debug!(
+                                            "效果器开关被拒绝 / effect toggle rejected: index={} enabled={}",
+                                            command.index, command.enabled
+                                        );
+                                    }
+                                }
+                                if !drained.is_empty() {
+                                    // 排空数据追加到待写缓存，保持旧块 → 排空数据 → 新块顺序
+                                    // Append drained output after any pending block to preserve ordering.
+                                    Self::queue_audio_output(
+                                        &audio_buf,
+                                        &mut pending_audio,
+                                        &drained,
+                                        &event_list,
+                                    );
+                                }
+                            }
+                            //AI_END===
+
+                            //AI=== 先写完缓存再取新数据；被再次唤醒就回到顶部处理命令 / flush before new data; on another wake go back to commands
+                            if !pending_audio.is_empty() {
+                                Self::flush_pending_audio(
+                                    &audio_buf,
+                                    &mut pending_audio,
+                                    &event_list,
+                                );
+                                if !pending_audio.is_empty() {
+                                    continue;
+                                }
+                            }
+                            if pending_eof && pending_audio.is_empty() {
+                                Self::emit(
+                                    PreEffectRuntimeEvent {
+                                        result: Ok(PreEffectRuntimeEventType::Eof),
+                                    },
+                                    &event_list,
+                                );
+                                pending_eof = false;
+                            }
+                            //AI_END===
+
+                            //数据处理
+                            let t0 = Instant::now();
+                            let pop_r = input_buf.pop_wait();
                             let mut effects = effects.lock().unwrap_or_else(|e| {
                                 effects.clear_poison();
                                 e.into_inner()
                             });
-                            //数据处理
-                            let t0 = Instant::now();
-                            let data = match input_buf.pop_wait() {
+                            let data = match pop_r {
                                 Ok(v) => v,
+                                //AI=== 主动唤醒只表示有命令待处理：不当作错误，也不复位效果器
+                                // An active wake only means commands are pending: not an error, no effect reset.
+                                Err(e)
+                                if matches!(&e.kind, ConcurrentRingErrorKind::ReadWoken) =>
+                                    {
+                                        drop(effects);
+                                        continue;
+                                    }
+                                //AI_END===
                                 //AI=== 环错误不退出线程：复位效果器（skip 信号）、上报事件，退避后继续；
                                 // 写端全部消失时 `pop_wait` 会持续返回 WritersClosed，靠退避等待其重新登记。
                                 // A ring error no longer ends the thread: reset the effects (skip signal), report the
@@ -284,6 +478,9 @@ impl PreEffectRuntime {
                                         &mut out_temp_buf,
                                         PreEffectDiscontinuity::Skip,
                                     );
+                                    //AI=== 复位后延迟线为空 / the delay line is empty after the reset
+                                    Self::store_effect_delay(&effects, &time_metrics);
+                                    //AI_END===
                                     Self::emit(
                                         PreEffectRuntimeEvent {
                                             result: Err(PreEffectRuntimeEventError::new(
@@ -305,27 +502,31 @@ impl PreEffectRuntime {
                             }
                             match data {
                                 AudioData::Block(data) => {
+                                    //AI=== 该块已离开输入环，先扣减排队样本 / this block has left the input ring, so remove it from the queue gauge
+                                    time_metrics.take_pre_effect_queue_samples(data.len());
+                                    //AI_END===
                                     let t1 = Instant::now();
                                     let len = effects.process(&data, &mut out_temp_buf);
                                     process_acc.record(t1.elapsed());
+                                    //AI=== 处理完更新延迟线时长 / update the delay-line duration after processing
+                                    Self::store_effect_delay(&effects, &time_metrics);
+                                    //AI_END===
                                     if len == 0 {
                                         continue;
                                     }
+                                    //AI=== 写输出环可能阻塞，先释放效果链锁让 UI 能读取列表 / releasing the output ring can block, so drop the chain lock first
+                                    drop(effects);
+                                    //AI_END===
                                     let t2 = Instant::now();
-                                    //AI=== 写失败已在 audio_buf_write_all 内 error! 上报：现在不退出线程——
-                                    // 硬错误上报事件后丢弃本块继续；WriteRejected 表示环拒绝写入（停止/切曲中），直接跳过本块继续消费控制数据。
-                                    // Write failures are already reported through error! inside audio_buf_write_all and no
-                                    // longer end the thread: a hard error is reported as an event and the block is dropped;
-                                    // WriteRejected means the ring rejects writes (shutdown/track change), so skip the block
-                                    // and keep consuming control data such as Eof/NoNext.
-                                    match Self::audio_buf_write_all(&audio_buf,
-                                                                    &out_temp_buf[..len],
-                                                                    &event_list) {
-                                        Ok(true) => continue,
-                                        Ok(false) => {}
-                                        Err(_) => {
-                                            continue;
-                                        }
+                                    //AI=== 未写完的数据进入缓存，回到顶部先处理命令再续写 / keep unwritten data and handle commands before retrying
+                                    Self::queue_audio_output(
+                                        &audio_buf,
+                                        &mut pending_audio,
+                                        &out_temp_buf[..len],
+                                        &event_list,
+                                    );
+                                    if !pending_audio.is_empty() {
+                                        continue;
                                     }
                                     //AI_END===
                                     write_wait_acc.record(t2.elapsed());
@@ -344,6 +545,8 @@ impl PreEffectRuntime {
                                     // Seek drops audio already written for the old position; this thread is the ring's only writer.
                                     if matches!(&data, AudioData::Seek) {
                                         audio_buf.clear();
+                                        // 旧位置的待写数据随输出环一起丢弃 / old-position pending data is dropped with the output ring
+                                        pending_audio.clear();
                                     }
                                     //AI_END===
                                     //AI=== 该转换失败只可能在逻辑不变量被破坏时发生（外层 match 已排除 Block/Reset），
@@ -366,29 +569,41 @@ impl PreEffectRuntime {
                                         &mut out_temp_buf,
                                         discontinuity,
                                     );
+                                    //AI=== 不连续处理会清空或排空延迟线 / a discontinuity clears or drains the delay line
+                                    Self::store_effect_delay(&effects, &time_metrics);
                                     //AI_END===
-                                    match Self::audio_buf_write_all(&audio_buf,
-                                                                    &out_temp_buf[..len],
-                                                                    &event_list) {
-                                        Ok(true) => continue,
-                                        Ok(false) => {}
-                                        //AI=== 硬错误不再退出线程：上报事件后跳过本块 / a hard error no longer ends the thread: report and skip
-                                        Err(_) => {
-                                            continue;
-                                        }
-                                        //AI_END===
+                                    //AI=== 写输出环可能阻塞，先释放效果链锁 / releasing the output ring can block, so drop the chain lock first
+                                    drop(effects);
+                                    //AI_END===
+                                    //AI=== 边界数据必须完整写出后再发 Eof；被唤醒则回到顶部，缓存写完再发
+                                    // Finish the boundary output before emitting Eof; on a wake, return to the top and emit after the cache drains.
+                                    Self::queue_audio_output(
+                                        &audio_buf,
+                                        &mut pending_audio,
+                                        &out_temp_buf[..len],
+                                        &event_list,
+                                    );
+                                    if matches!(&data, AudioData::Eof) {
+                                        pending_eof = true;
                                     }
-                                    if let AudioData::Eof = data {
+                                    if !pending_audio.is_empty() {
+                                        continue;
+                                    }
+                                    if pending_eof {
                                         Self::emit(
                                             PreEffectRuntimeEvent {
                                                 result: Ok(PreEffectRuntimeEventType::Eof),
                                             },
                                             &event_list,
                                         );
+                                        pending_eof = false;
                                     }
+                                    //AI_END===
                                 }
                                 AudioData::Reset(input_format) => {
-                                    if let Err(e) = effects.reset(input_format) {
+                                    if let Err(e) =
+                                        effects.reset(input_format, ResetReason::TrackStart)
+                                    {
                                         //AI=== reset 失败属于可恢复的运行期错误：PreEffectChain::reset 已把失败的效果器降级
                                         // 为 disabled 透传，本曲仍可继续播放，因此保留 continue（不结束线程），但必须上报。
                                         // A reset failure is a recoverable runtime error: PreEffectChain::reset has already degraded
@@ -408,6 +623,9 @@ impl PreEffectRuntime {
                                         );
                                         //AI_END===
                                     }
+                                    //AI=== reset 后重新登记格式，延迟线已清空 / formats are registered again and the delay line is empty after reset
+                                    Self::store_effect_delay(&effects, &time_metrics);
+                                    //AI_END===
                                 }
                             }
                         }
@@ -426,7 +644,15 @@ impl PreEffectRuntime {
 
     pub fn stop(&self) -> Result<(), Box<dyn Any + Send + 'static>> {
         self.stop.store(true, Ordering::Release);
+        //AI=== 主动唤醒阻塞读者，保证 stop 不依赖后续 push / wake blocked readers so stop does not rely on a later push
+        self.input_buf.wake_blocked_readers();
+        //AI_END===
         self.input_buf.reject_waiting_writers();
+        //AI=== 停止时清空排队延迟 / clear the queue gauge on stop
+        self.time_metrics
+            .pre_effect_queue_samples
+            .store(0, Ordering::Relaxed);
+        //AI_END===
         self.audio_buf.reject_pending_writers();
         _ = self.input_buf.push(AudioData::NoNext);
         if let Some(join_handle) = self
@@ -482,6 +708,49 @@ impl PreEffectRuntime {
     pub fn pre_effect_ring_buffer(&self) -> &ConcurrentRing<AudioData> {
         &self.input_buf
     }
+
+    pub fn min_input_len_work(&self) -> usize {
+        self.effects
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .min_input_len_work()
+    }
+
+    //AI=== 效果器窗口数据：try_lock 避免 UI 阻塞效果线程 / effects-window data: try_lock so the UI never blocks the effect thread
+    /// 前效果器展示快照；效果线程正忙时返回 None / pre-effect display snapshot; None while the effect thread is busy
+    #[must_use]
+    pub fn effect_summaries(&self) -> Option<Vec<EffectSummary>> {
+        self.effects
+            .try_lock()
+            .ok()
+            .map(|effects| effects.effect_summaries())
+    }
+
+    //AI=== 启用/禁用前效果器：投递到效果器线程，由它排空并通知下游 / queue the toggle for the effect thread
+    /// 请求设置指定前效果器的启用状态。
+    ///
+    /// 命令进入独立通道后主动唤醒阻塞的效果器线程；实际应用发生在下一个
+    /// 数据块边界之前。返回值只表示请求已入队，最终状态以快照为准。
+    ///
+    /// Request a pre-effect toggle. The command is queued on the dedicated channel
+    /// and the blocked effect thread is woken; it is applied before the next block.
+    /// The return value only says the request was queued.
+    pub fn request_effect_enabled(&self, index: usize, enabled: bool) -> bool {
+        if self
+            .effect_cmd_tx
+            .send(EffectCommand { index, enabled })
+            .is_err()
+        {
+            return false;
+        }
+        self.input_buf.wake_blocked_readers();
+        //AI=== 写端可能阻塞在满输出环上，非破坏性唤醒让它回到命令处理 / the writer may be blocked on a full output ring
+        self.audio_buf.wake_blocked_writers();
+        //AI_END===
+        true
+    }
+    //AI_END===
+    //AI_END===
 }
 
 #[derive(Debug)]

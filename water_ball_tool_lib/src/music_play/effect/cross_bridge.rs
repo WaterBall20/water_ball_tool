@@ -1,5 +1,6 @@
 use crate::music_play::effect::{
     AudioFormat, PreEffect, PreEffectDiscontinuity, PreEffectInfo, PreEffectOutputFormat,
+    ResetReason,
 };
 use std::collections::VecDeque;
 use std::error::Error;
@@ -33,11 +34,12 @@ impl PreEffect for CrossBridgeEffect {
     fn reset(
         &mut self,
         _input_format: AudioFormat,
+        reason: ResetReason,
     ) -> Result<PreEffectOutputFormat, Box<dyn Error + Send + Sync + 'static>> {
-        // reset 在每首歌开始输入数据前调用。
-        // 若 is_effect = true，说明上一首 input_eof 已触发，
-        // buf 里是 A 尾部，正在等本首数据做交叉，必须保留。
-        if !self.is_effect {
+        // 只有新曲开始才保留上一首的交叉尾巴；开关切换/输入变化必须清空。
+        // Only a new track preserves the previous tail; toggles/input changes clear it.
+        if reason != ResetReason::TrackStart || !self.is_effect {
+            self.is_effect = false;
             self.b_buf.clear();
             self.buf.clear();
         }
@@ -60,6 +62,21 @@ impl PreEffect for CrossBridgeEffect {
         output: &mut Vec<f32>,
         kind: PreEffectDiscontinuity,
     ) -> usize {
+        //AI=== 禁用本级：只排空延迟线，保留增益表与容量 / disable self: drain the delay line, keep gain tables and capacity
+        if kind == PreEffectDiscontinuity::DisableSelf {
+            output.clear();
+            output.reserve_exact(self.buf.len());
+            output.extend(self.buf.drain(..));
+            self.b_buf.clear();
+            self.is_effect = false;
+            return output.len();
+        }
+        //AI_END===
+        //AI=== 上游禁用：正常处理排空数据，不启动新的交叉 / upstream disabled: process drained data without arming a crossfade
+        if let PreEffectDiscontinuity::UpstreamDisabled { .. } = kind {
+            return self.process_normal(input, output);
+        }
+        //AI_END===
         //AI=== Seek 丢弃交叉淡入的旧尾巴与延迟线 / Seek drops the old crossfade tail and delay line
         if PreEffectDiscontinuity::Seek == kind {
             self.is_effect = false;
@@ -115,6 +132,22 @@ impl PreEffect for CrossBridgeEffect {
     fn set_enabled(&mut self, enabled: bool) {
         self.info.enabled = enabled;
     }
+
+    //AI=== 效果器窗口显示信息 / effects-window metadata
+    fn display_name(&self) -> &'static str {
+        "交叉桥接"
+    }
+
+    fn description(&self) -> &'static str {
+        "用内部延迟线在曲目切换时做交叉淡入淡出。"
+    }
+    //AI_END===
+
+    //AI=== 交叉桥延迟线当前保留的输入样本 / samples currently retained by the cross-bridge delay line
+    fn buffered_samples(&self) -> usize {
+        self.buf.len() + self.b_buf.len()
+    }
+    //AI_END===
 }
 
 impl CrossBridgeEffect {

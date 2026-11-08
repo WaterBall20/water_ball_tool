@@ -6,7 +6,7 @@
 //! and key hints.
 
 //AI=== yazi 风格渲染 / yazi-inspired rendering
-use super::app::{App, JobState, Mode, TaskItem};
+use super::app::{App, Focus, JobState, Mode, Nav, TaskItem, Window};
 use super::browse::{Entry, format_hash, format_modified};
 use crate::command::music_play::tui::channel_writer::LogLevel;
 use crate::command::wbfp::events::RowStatus;
@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use water_ball_tool_lib::tools::bytes_len_to_string;
@@ -27,6 +27,10 @@ const TASK_BAR_WIDTH: usize = 6;
 const TASK_PERCENT_WIDTH: usize = 4;
 const JOB_KEY_WIDTH: usize = 14;
 const JOB_DETAIL_HEIGHT: u16 = 5;
+//AI=== Manager 三栏/两栏折叠阈值 / manager three-pane and two-pane fold thresholds
+const MANAGER_THREE_PANE_MIN_WIDTH: u16 = 110;
+const MANAGER_TWO_PANE_MIN_WIDTH: u16 = 80;
+//AI_END===
 
 pub(super) fn render(app: &mut App, frame: &mut Frame) {
     let [header, path, body, status, footer] = Layout::vertical([
@@ -40,28 +44,134 @@ pub(super) fn render(app: &mut App, frame: &mut Frame) {
 
     render_header(app, frame, header);
     render_path(app, frame, path);
+    if app.ui.mode == Mode::Manager {
+        render_manager(app, frame, body);
+    } else {
+        render_single(app, frame, body);
+    }
+    render_status(app, frame, status);
+    render_footer(app, frame, footer);
 
-    if app.show_preview {
+    match app.ui.window {
+        Window::Help => render_help(frame),
+        Window::Debug => render_logs(app, frame),
+        Window::None => {}
+    }
+}
+
+/// 子命令模式的原有单栏布局 / the existing single-pane layout for subcommands.
+fn render_single(app: &mut App, frame: &mut Frame, body: Rect) {
+    if app.nav.show_preview {
         if frame.area().width >= 80 {
             let [list, preview] =
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(body);
-            render_list(app, frame, list);
+            prepare_nav(&mut app.nav, list);
+            render_list(app, &app.nav, frame, list, " 文件 / Files ", true);
             render_preview(app, frame, preview);
         } else {
             render_preview(app, frame, body);
         }
     } else {
-        render_list(app, frame, body);
+        prepare_nav(&mut app.nav, body);
+        render_list(app, &app.nav, frame, body, " 文件 / Files ", true);
     }
-    render_status(app, frame, status);
-    render_footer(app, frame, footer);
+}
 
-    if app.show_help {
-        render_help(frame);
+fn prepare_nav(nav: &mut Nav, area: Rect) {
+    nav.list_area = area;
+    nav.height = usize::from(area.height.saturating_sub(2)).max(1);
+}
+
+/// Manager 模式：左文件系统、中包、右预览；先折叠预览，再折叠文件系统。
+/// Manager: filesystem left, pack middle, preview right; preview folds first, then filesystem.
+fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
+    let has_pack = app.pack.is_some();
+    let want_preview = app.nav.show_preview;
+    let width = body.width;
+
+    // 焦点不能停在被折叠的面板上 / focus must not stay on a folded pane
+    if !has_pack {
+        app.focus = Focus::Local;
+    } else if width < MANAGER_TWO_PANE_MIN_WIDTH && app.focus == Focus::Local {
+        app.focus = Focus::Pack;
     }
-    if app.show_logs {
-        render_logs(app, frame);
+
+    if has_pack && width >= MANAGER_THREE_PANE_MIN_WIDTH && want_preview {
+        let [local, pack, preview] = Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+        ])
+        .areas(body);
+        prepare_nav(&mut app.local_nav, local);
+        prepare_nav(&mut app.nav, pack);
+        render_list(
+            app,
+            &app.local_nav,
+            frame,
+            local,
+            " 文件系统 / Filesystem ",
+            app.focus == Focus::Local,
+        );
+        render_list(
+            app,
+            &app.nav,
+            frame,
+            pack,
+            " 包 / Pack ",
+            app.focus == Focus::Pack,
+        );
+        render_preview(app, frame, preview);
+    } else if has_pack && width >= MANAGER_TWO_PANE_MIN_WIDTH {
+        let [local, pack] =
+            Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .areas(body);
+        prepare_nav(&mut app.local_nav, local);
+        prepare_nav(&mut app.nav, pack);
+        render_list(
+            app,
+            &app.local_nav,
+            frame,
+            local,
+            " 文件系统 / Filesystem ",
+            app.focus == Focus::Local,
+        );
+        render_list(
+            app,
+            &app.nav,
+            frame,
+            pack,
+            " 包 / Pack ",
+            app.focus == Focus::Pack,
+        );
+    } else if has_pack {
+        prepare_nav(&mut app.nav, body);
+        render_list(app, &app.nav, frame, body, " 包 / Pack ", true);
+    } else if want_preview && width >= MANAGER_TWO_PANE_MIN_WIDTH {
+        let [local, preview] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(body);
+        prepare_nav(&mut app.local_nav, local);
+        render_list(
+            app,
+            &app.local_nav,
+            frame,
+            local,
+            " 文件系统 / Filesystem ",
+            true,
+        );
+        render_preview(app, frame, preview);
+    } else {
+        prepare_nav(&mut app.local_nav, body);
+        render_list(
+            app,
+            &app.local_nav,
+            frame,
+            body,
+            " 文件系统 / Filesystem ",
+            true,
+        );
     }
 }
 
@@ -71,9 +181,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
             " wbfp ",
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(app.title.clone(), Style::new().fg(Color::White)),
+        Span::styled(app.ui.title.clone(), Style::new().fg(Color::White)),
     ];
-    if app.mode == Mode::Pack {
+    if app.ui.mode == Mode::Pack {
         left.push(Span::styled(
             "  ·  只读源目录 / source",
             Style::new().fg(Color::DarkGray),
@@ -82,7 +192,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(left)), area);
 
     if area.width >= 70 {
-        let stats = if let Some(info) = &app.pack_info {
+        let stats = if let Some(info) = &app.ui.pack_info {
             let cow = if info.cow { " · COW" } else { "" };
             format!(
                 "v{} · {} files · {} dirs · {}{cow} ",
@@ -91,7 +201,7 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
                 info.dir_count,
                 bytes_len_to_string(info.data_len)
             )
-        } else if let Some(job) = &app.job {
+        } else if let Some(job) = &app.jobs.state {
             format!("{} ", job.label)
         } else {
             String::new()
@@ -107,36 +217,64 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 fn render_path(app: &App, frame: &mut Frame, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(22)]).areas(area);
+    let (tag, tag_color) = if app.ui.mode == Mode::Manager {
+        match app.focus {
+            Focus::Local => ("[文件系统 / FS] ", Color::Cyan),
+            Focus::Pack => ("[包 / PACK] ", Color::Magenta),
+        }
+    } else {
+        ("", Color::DarkGray)
+    };
+    let right_text = if app.ui.mode == Mode::Manager {
+        if app.pack.is_some() {
+            "[读写 / RW] "
+        } else {
+            "[无包 / NO PACK] "
+        }
+    } else {
+        "[只读 / READONLY] "
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ", Style::new().fg(Color::DarkGray)),
+            Span::styled(tag, Style::new().fg(tag_color)),
             Span::styled(app.display_cwd(), Style::new().fg(Color::LightCyan)),
         ])),
         left,
     );
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "[只读 / READONLY] ",
-            Style::new().fg(Color::Yellow),
+            right_text,
+            Style::new().fg(if app.pack.is_some() || app.ui.mode != Mode::Manager {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            }),
         ))
         .alignment(Alignment::Right),
         right,
     );
 }
 
-fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
-    app.list_area = area;
-    app.height = usize::from(area.height.saturating_sub(2)).max(1);
-
+fn render_list(app: &App, nav: &Nav, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::Cyan))
-        .title(Line::from(" 文件 / Files ").style(Style::new().fg(Color::Cyan)));
+        .border_style(Style::new().fg(if focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        }))
+        .title(Line::from(title).style(Style::new().fg(if focused {
+            Color::Cyan
+        } else {
+            Color::Gray
+        })));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.entries.is_empty() {
+    if nav.entries.is_empty() {
         let message = app
+            .ui
             .error
             .clone()
             .unwrap_or_else(|| "空目录 / empty directory".to_string());
@@ -155,13 +293,13 @@ fn render_list(app: &mut App, frame: &mut Frame, area: Rect) {
         name_max = name_max.saturating_sub(1 + SIZE_WIDTH + 1);
     }
     let name_max = name_max.max(8);
-    let items: Vec<ListItem> = app
+    let items: Vec<ListItem> = nav
         .entries
         .iter()
         .enumerate()
-        .skip(app.offset)
-        .take(app.height)
-        .map(|(index, entry)| list_item(app, entry, index == app.selected, show_size, name_max))
+        .skip(nav.offset)
+        .take(nav.height)
+        .map(|(index, entry)| list_item(app, entry, index == nav.selected, show_size, name_max))
         .collect();
     frame.render_widget(List::new(items), inner);
 }
@@ -182,6 +320,10 @@ fn list_item(
         Style::new()
             .fg(Color::LightBlue)
             .add_modifier(Modifier::BOLD)
+    } else if entry.pack_version.is_some() {
+        //AI=== 探测到的水球包使用独立颜色 / probed WaterBall packs get a distinct color
+        Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+        //AI_END===
     } else {
         Style::new()
     };
@@ -189,6 +331,10 @@ fn list_item(
         "↑ "
     } else if entry.is_dir {
         "▸ "
+    } else if entry.pack_version.is_some() {
+        //AI=== 包文件图标 / pack-file icon
+        "◆ "
+        //AI_END===
     } else {
         "  "
     };
@@ -243,7 +389,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if let Some(job) = &app.job {
+    if let Some(job) = &app.jobs.state {
         render_job_card(app, job, frame, inner);
         return;
     }
@@ -283,16 +429,27 @@ fn render_job_card(app: &App, job: &JobState, frame: &mut Frame, area: Rect) {
             bytes_len_to_string(job.total)
         )
     };
+    // 进度条独占第一行，标签放第二行，避免文字把进度条挖空。
+    // The bar owns the first row and the label the second, so text never punches a hole in the bar.
+    let [bar_area, label_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(gauge_area);
+    //AI=== 与 mp 共用的八分块进度条 / shared eighth-block bar with mp
+    crate::command::render_eighth_block_bar(
+        frame,
+        bar_area,
+        job.ratio(),
+        if job.error.is_some() {
+            Color::Red
+        } else {
+            Color::Cyan
+        },
+        "",
+        Style::new(),
+    );
+    //AI_END===
     frame.render_widget(
-        Gauge::default()
-            .gauge_style(Style::new().fg(if job.error.is_some() {
-                Color::Red
-            } else {
-                Color::Cyan
-            }))
-            .ratio(job.ratio())
-            .label(label),
-        gauge_area,
+        Paragraph::new(Span::styled(label, Style::new())).alignment(Alignment::Center),
+        label_area,
     );
 
     let status_value = if let Some(error) = &job.error {
@@ -361,7 +518,7 @@ fn render_tasks(app: &App, frame: &mut Frame, area: Rect) {
     }
     let rows = Rect::new(area.x, area.y + 1, area.width, area.height - 1);
     let mut row = rows.y;
-    for task in app.active_tasks.iter().chain(app.done_tasks.iter()) {
+    for task in app.jobs.active.iter().chain(app.jobs.done.iter()) {
         if row >= rows.y.saturating_add(rows.height) {
             break;
         }
@@ -405,20 +562,19 @@ fn task_line(task: &TaskItem, width: u16) -> Line<'static> {
 
     let ratio = task.ratio();
     if show_bar {
-        let filled = (ratio * TASK_BAR_WIDTH as f64).round() as usize;
-        let bar = format!(
-            "[{}{}]",
-            "█".repeat(filled),
-            "░".repeat(TASK_BAR_WIDTH - filled)
-        );
+        //AI=== 与 mp 共用的八分块进度条 / shared eighth-block bar with mp
         spans.push(Span::styled(
-            format!(" {bar}"),
+            format!(
+                " [{}]",
+                crate::command::eighth_block_bar(TASK_BAR_WIDTH, ratio)
+            ),
             Style::new().fg(match task.status {
                 RowStatus::Done => Color::Green,
                 RowStatus::Failed => Color::Red,
                 _ => Color::Yellow,
             }),
         ));
+        //AI_END===
     }
     if show_percent {
         let percent = if task.total == 0 {
@@ -459,7 +615,13 @@ fn push_metadata(lines: &mut Vec<Line<'static>>, app: &App, entry: &Entry) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("type      ", Style::new().fg(Color::DarkGray)),
-        Span::raw(if entry.is_dir { "dir" } else { "file" }),
+        Span::raw(if let Some(version) = entry.pack_version {
+            format!("WBFilesPack v{version}")
+        } else if entry.is_dir {
+            "dir".to_string()
+        } else {
+            "file".to_string()
+        }),
     ]));
     lines.push(Line::from(vec![
         Span::styled("size      ", Style::new().fg(Color::DarkGray)),
@@ -471,7 +633,7 @@ fn push_metadata(lines: &mut Vec<Line<'static>>, app: &App, entry: &Entry) {
     ]));
     lines.push(Line::from(vec![
         Span::styled("hash      ", Style::new().fg(Color::DarkGray)),
-        Span::raw(if app.mode == Mode::Pack {
+        Span::raw(if app.ui.mode == Mode::Pack {
             "—（打包后生成 / generated after packing）".to_string()
         } else {
             format_hash(entry.hash.as_ref())
@@ -488,7 +650,8 @@ fn push_metadata(lines: &mut Vec<Line<'static>>, app: &App, entry: &Entry) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let (ok, warn, fail) = app
-        .job
+        .jobs
+        .state
         .as_ref()
         .map(|job| {
             (
@@ -498,20 +661,21 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             )
         })
         .unwrap_or((0, 0, 0));
-    let position = if app.entries.is_empty() {
+    let nav = app.active_nav();
+    let position = if nav.entries.is_empty() {
         0
     } else {
-        app.selected + 1
+        nav.selected + 1
     };
     let left = format!(
         " {position:>4}/{:<4} 项 · 已选 {:>10} · ✓ {:>5}  ⚠ {:>5}  ✗ {:>5}",
-        app.entries.len(),
+        nav.entries.len(),
         pad_left_width(&format_size_column(app.selected_size()), SIZE_WIDTH),
         pad_left_width(&ok.to_string(), 5),
         pad_left_width(&warn.to_string(), 5),
         pad_left_width(&fail.to_string(), 5),
     );
-    let right = if let Some(job) = &app.job {
+    let right = if let Some(job) = &app.jobs.state {
         if job.error.is_some() {
             "失败 / failed"
         } else if job.finished {
@@ -529,7 +693,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(
         Paragraph::new(right)
             .alignment(Alignment::Right)
-            .style(Style::new().fg(if app.job_running {
+            .style(Style::new().fg(if app.jobs.running {
                 Color::Yellow
             } else {
                 Color::DarkGray
@@ -539,10 +703,16 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let text = if app.job_running {
-        " ↑↓ 滚动   d 日志   ? 帮助   q 完成后退出 "
+    let text = if app.jobs.running {
+        " ↑↓ 滚动   F12 调试   ? 帮助   q 完成后退出 "
+    } else if app.ui.mode == Mode::Manager {
+        if app.pack.is_some() {
+            " Tab 切换面板   ⏎ 进入/打开   c 复制   m 移动   Ctrl+W 关闭包   p 预览   F12 调试   ? 帮助   q 退出 "
+        } else {
+            " ⏎ 打开包/进入目录   ↑↓ 移动   ← 上级   p 预览   F12 调试   ? 帮助   q 退出 "
+        }
     } else {
-        " q 退出   ↑↓ 移动   ⏎ 进入   ← 上级   p 预览   d 日志   ? 帮助 "
+        " q 退出   ↑↓ 移动   ⏎ 进入   ← 上级   p 预览   F12 调试   ? 帮助 "
     };
     frame.render_widget(
         Paragraph::new(Line::from(text))
@@ -561,24 +731,26 @@ fn render_help(frame: &mut Frame) {
         .title(Line::from(" 帮助 / Help ").style(Style::new().fg(Color::Cyan)));
     let lines = vec![
         Line::from("q / Ctrl+C   退出 / quit（任务运行中会等完成）"),
-        Line::from("Esc          返回上级 / parent directory"),
+        Line::from("Esc          关闭弹层 / 返回上级 / close popup / parent"),
+        Line::from("Tab          切换文件系统与包面板 / switch panes"),
         Line::from("↑↓ / j k     移动 / move"),
         Line::from("PgUp PgDn    翻页 / page"),
         Line::from("Home End     首尾 / first last"),
-        Line::from("⏎ / → / l    进入目录 / enter directory"),
-        Line::from("左键 / 双击  选择 / 进入 / select / open（非 Windows / non-Windows）"),
-        Line::from("Windows      鼠标暂禁用，仅键盘 / mouse disabled, keyboard only"),
+        Line::from("⏎ / → / l    进入目录；本地包文件打开 / enter; open a local pack"),
+        Line::from("c / m        复制 / 移动到另一面板 / copy / move to the other pane"),
+        Line::from("Ctrl+W       关闭当前包 / close the open pack"),
+        Line::from("左键 / 双击  选择 / 进入 / select / open"),
         Line::from("← / h        上级 / parent"),
         Line::from("p            切换预览 / toggle preview"),
-        Line::from("d / F12      日志 / logs"),
+        Line::from("F12          调试 / debug"),
         Line::from("?            帮助 / help"),
         Line::from(""),
         Line::from(Span::styled(
-            "文件列表在打包/解包/校验时仅支持预览，不提供编辑操作。",
+            "左侧文件按文件头格式探测水球包，不依赖扩展名。",
             Style::new().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "The file list is read-only during pack/unpack/verify.",
+            "Local files are probed by header format, not by extension.",
             Style::new().fg(Color::DarkGray),
         )),
     ];
@@ -594,7 +766,7 @@ fn render_logs(app: &App, frame: &mut Frame) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::Yellow))
-        .title(Line::from(" 日志 / Logs ").style(Style::new().fg(Color::Yellow)));
+        .title(Line::from(" 调试 / Debug ").style(Style::new().fg(Color::Yellow)));
     let mut lines = Vec::new();
     let count = usize::from(area.height.saturating_sub(2)).max(1);
     for (level, text) in app.last_logs(count) {
@@ -684,17 +856,5 @@ fn format_size_column(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn size_column_keeps_number_and_unit_aligned() {
-        for bytes in [0, 180, 12_684, 1_234_567_890, 18_386_554_201] {
-            let column = format_size_column(bytes);
-            assert_eq!(display_width(&column), SIZE_WIDTH);
-        }
-        assert!(format_size_column(180).ends_with("B  "));
-        assert!(format_size_column(12_684).ends_with("KiB"));
-    }
-}
+mod test;
 //AI_END===

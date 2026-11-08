@@ -43,7 +43,9 @@ mod reader;
 mod test;
 mod writer;
 
-pub use error::{Error, Kind};
+//AI=== write_all 专用错误 / dedicated write_all error
+pub use error::{Error, Kind, WriteAllError, WriteAllErrorKind};
+//AI_END===
 pub use mode::{ReadMode, WriteMode};
 pub use reader::{LockedReader, Reader, UnlockedReader};
 pub use writer::{LockedWriter, UnlockedWriter, Writer};

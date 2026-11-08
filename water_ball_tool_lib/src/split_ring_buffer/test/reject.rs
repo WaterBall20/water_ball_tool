@@ -87,11 +87,117 @@ fn write_all_rejected_when_blocked() {
     writer.reject_pending_writers();
 
     match h.join().expect("thread should not panic") {
-        Err(e) => assert!(matches!(e.kind, Kind::WriteRejected)),
-        Ok(_) => panic!("expected WriteRejected"),
+        Err(e) => {
+            assert!(matches!(e.kind, WriteAllErrorKind::Rejected));
+            assert_eq!(0, e.written);
+        }
+        Ok(_) => panic!("expected Rejected"),
     }
     assert_eq!(reader.len(), 0);
 }
+
+//AI=== 非破坏性写唤醒：不清空数据，错误携带已写入数量 / non-destructive writer wake keeps data and reports progress
+#[test]
+fn wake_blocked_writers_keeps_data_and_reports_written() {
+    let (reader, writer) = locked_ring_buffer::<u8>(4);
+    writer.write_all(&[1, 2]).expect("prefill");
+
+    let w2 = writer.clone();
+    let h = thread::spawn(move || {
+        let data = vec![3u8, 4, 5, 6];
+        let result = w2.write_all(&data);
+        (result, data)
+    });
+    // 写端先填满剩余 2 个槽位，然后阻塞 / fill the remaining two slots, then block
+    thread::sleep(WAIT);
+
+    assert_eq!(4, writer.len());
+    writer.wake_blocked_writers();
+
+    let (result, data) = h.join().expect("writer thread should not panic");
+    let err = match result {
+        Err(e) => e,
+        Ok(()) => panic!("expected Interrupted"),
+    };
+    assert!(matches!(err.kind, WriteAllErrorKind::Interrupted));
+    assert_eq!(2, err.written);
+
+    // 数据未被清空 / the wake did not clear the buffer
+    assert_eq!(4, reader.len());
+    let mut prefix = [0u8; 4];
+    reader
+        .read_exact(&mut prefix)
+        .expect("prefill and partial write must remain");
+    assert_eq!([1, 2, 3, 4], prefix);
+
+    // 从 written 处续写剩余部分 / resume from the reported progress
+    writer
+        .write_all(&data[err.written..])
+        .expect("remainder must be writable");
+    assert_eq!(2, reader.len());
+}
+
+#[test]
+fn reject_pending_writers_reports_written() {
+    let (reader, writer) = locked_ring_buffer::<u8>(4);
+    writer.write_all(&[1, 2]).expect("prefill");
+
+    let w2 = writer.clone();
+    let h = thread::spawn(move || w2.write_all(&[3u8, 4, 5, 6]));
+    thread::sleep(WAIT);
+    assert_eq!(4, writer.len());
+
+    writer.reject_pending_writers();
+
+    let err = match h.join().expect("writer thread should not panic") {
+        Err(e) => e,
+        Ok(()) => panic!("expected Rejected"),
+    };
+    assert!(matches!(err.kind, WriteAllErrorKind::Rejected));
+    assert_eq!(2, err.written);
+    assert_eq!(0, reader.len());
+}
+
+#[test]
+fn write_all_peer_closed_reports_written() {
+    let (reader, writer) = locked_ring_buffer::<u8>(4);
+    writer.write_all(&[1, 2]).expect("prefill");
+
+    let w2 = writer.clone();
+    let h = thread::spawn(move || w2.write_all(&[3u8, 4, 5, 6]));
+    thread::sleep(WAIT);
+    assert_eq!(4, writer.len());
+
+    drop(reader);
+
+    let err = match h.join().expect("writer thread should not panic") {
+        Err(e) => e,
+        Ok(()) => panic!("expected PeerClosed"),
+    };
+    assert!(matches!(err.kind, WriteAllErrorKind::PeerClosed));
+    assert_eq!(2, err.written);
+}
+
+#[test]
+fn wake_blocked_writers_zero_progress() {
+    let (reader, writer) = locked_ring_buffer::<u8>(2);
+    writer.write_all(&[1, 2]).expect("prefill");
+
+    let w2 = writer.clone();
+    let h = thread::spawn(move || w2.write_all(&[3u8, 4]));
+    thread::sleep(WAIT);
+
+    writer.wake_blocked_writers();
+
+    let err = match h.join().expect("writer thread should not panic") {
+        Err(e) => e,
+        Ok(()) => panic!("expected Interrupted"),
+    };
+    assert!(matches!(err.kind, WriteAllErrorKind::Interrupted));
+    assert_eq!(0, err.written);
+    assert_eq!(2, reader.len());
+}
+//AI_END===
 
 #[test]
 fn write_all_after_reject_normal() {

@@ -871,6 +871,12 @@ impl PackStructItem {
         &self.name
     }
 
+    //AI=== 重命名时名称必须与 PackStruct::items 的 key 同步 / rename must keep the name in sync with the PackStruct::items key
+    pub(crate) fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+    //AI_END===
+
     /// 返回该项的类型（文件或目录）/ Returns the item type (File or Dir)
     #[must_use]
     pub fn item_type(&self) -> &PackStructItemType {

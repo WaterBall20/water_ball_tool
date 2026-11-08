@@ -9,6 +9,8 @@ use water_ball_tool_lib::music_play::decoder_runtime::{
     DecoderError, DecoderErrorKind, DecoderEventChannelSink, DecoderEventDirectSink,
     DecoderEventType,
 };
+use water_ball_tool_lib::music_play::effect::EffectChainKind;
+use water_ball_tool_lib::music_play::effect::EffectSummary;
 use water_ball_tool_lib::music_play::effect::fade::FadeEffect;
 use water_ball_tool_lib::music_play::effect::runtime::PreEffectRuntimeEventChannelSink;
 use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
@@ -28,6 +30,10 @@ pub(super) struct Runtime {
     // 最近一次非空的耗时窗口缓存：统计按块刷新，50ms 采样时大多数窗口为空，不能直接清零
     // Cache of the last non-empty timing windows: stats flush per block, so most 50ms samples are empty.
     debug_metrics: Mutex<Vec<(&'static str, DurationStatsWindow)>>,
+    //AI=== 效果器窗口打开时缓存最后一次成功快照，避免 try_lock 失败导致列表闪烁
+    // Cache the last successful effects snapshot so a failed try_lock does not flicker the list.
+    effect_cache: Mutex<Vec<EffectSummary>>,
+    //AI_END===
 }
 
 /// 事件回调与 UI 线程共享的状态 / state shared by event callbacks and the UI thread
@@ -71,22 +77,38 @@ pub(super) struct Snapshot {
     pub(super) mode: LoopMode,
     pub(super) index: Option<usize>,
     pub(super) debug: DebugInfo,
+    //AI=== 效果器窗口打开时才有值 / present only while the effects window is open
+    pub(super) effects: Option<Vec<EffectSummary>>,
+    //AI_END===
 }
 
-/// Debug 弹窗的数据：缓冲区、解码器状态与各段耗时 / debug popup data: buffers, decoder state and per-stage timings
+/// Debug 弹窗的数据：缓冲区、链路延迟、解码器状态与各段耗时 / debug popup data: buffers, latency, decoder state and per-stage timings
 #[derive(Default)]
 pub(super) struct DebugInfo {
     pub(super) decoder_path: Option<String>,
     pub(super) decoder_format: Option<(u32, u16)>,
+    //AI=== 播放格式：输出设备实际采样率与声道 / playback format: the device's actual rate and channels
+    pub(super) playback_format: Option<(u32, u16)>,
+    //AI_END===
     pub(super) pre_effect_len: usize,
     pub(super) pre_effect_capacity: usize,
     pub(super) audio_len: usize,
+    //AI=== 与 pre 统一按“已用 / 容量”展示 / show occupancy over capacity like `pre`
+    pub(super) audio_capacity: usize,
+    //AI_END===
     pub(super) playlist_len: usize,
     pub(super) playlist_index: Option<usize>,
     pub(super) pre_effect_eof: bool,
     pub(super) lock_fail: u64,
     pub(super) underrun: u64,
     pub(super) metrics: Vec<(&'static str, DurationStatsWindow)>,
+    //AI=== 链路延迟估算 / buffer-based latency estimates
+    pub(super) decoder_buffer_latency: Duration,
+    pub(super) pre_effect_queue_latency: Duration,
+    pub(super) effect_latency: Duration,
+    pub(super) playback_latency: Duration,
+    pub(super) total_latency: Duration,
+    //AI_END===
 }
 
 impl Runtime {
@@ -144,6 +166,9 @@ impl Runtime {
             player,
             shared,
             debug_metrics: Mutex::new(Vec::new()),
+            //AI=== 效果器列表初始为空 / the effect list starts empty
+            effect_cache: Mutex::new(Vec::new()),
+            //AI_END===
         })
     }
 
@@ -283,7 +308,20 @@ impl Runtime {
         self.player.set_volume(self.player.volume() + delta);
     }
 
-    pub(super) fn snapshot(&self) -> Snapshot {
+    //AI=== 效果器启用/禁用 / enable or disable an effect
+    /// 设置指定效果器的启用状态；索引无效时返回 false
+    /// Set the enabled state of an effect; returns false when the index is invalid.
+    pub(super) fn set_effect_enabled(
+        &self,
+        chain: EffectChainKind,
+        index: usize,
+        enabled: bool,
+    ) -> bool {
+        self.player.set_effect_enabled(chain, index, enabled)
+    }
+    //AI_END===
+
+    pub(super) fn snapshot(&self, include_effects: bool) -> Snapshot {
         let (track, index, mode, playlist_len) = {
             let list = self
                 .shared
@@ -324,17 +362,58 @@ impl Runtime {
             cached.clone()
         };
 
+        //AI=== 链路延迟估算：全部按缓冲区占用计算，不含设备/OS 延迟 / latency estimates from buffer occupancy only; device/OS latency excluded
+        let decoder_format = self.player.decoder_runtime().decoder_format();
+        let output_format = self.player.output_format();
+        let playing = self.player.is_playing();
+        let decoder_buffered = decoder_format.map_or(Duration::ZERO, |format| {
+            format.samples_to_duration(
+                metrics.decoder_buffered_samples.load(Ordering::Relaxed) as usize
+            )
+        });
+        let pre_effect_queue = decoder_format.map_or(Duration::ZERO, |format| {
+            format.samples_to_duration(
+                metrics.pre_effect_queue_samples.load(Ordering::Relaxed) as usize
+            )
+        });
+        let effect_latency = Duration::from_nanos(metrics.effect_delay_ns.load(Ordering::Relaxed));
+        let callback_samples = if playing {
+            metrics.callback_samples.load(Ordering::Relaxed) as usize
+        } else {
+            0
+        };
+        let playback_latency = output_format.samples_to_duration(
+            self.player
+                .audio_ring_buffer()
+                .len()
+                .saturating_add(callback_samples),
+        );
+        let total_latency = decoder_buffered + pre_effect_queue + effect_latency + playback_latency;
+        //AI_END===
+
+        //AI=== 仅在效果器窗口打开时获取列表；try_lock 失败保留上次快照 / only fetch while the effects window is open; keep the last snapshot if try_lock fails
+        let effects = include_effects.then(|| {
+            let mut cache = self
+                .effect_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(latest) = self.player.effect_summaries() {
+                *cache = latest;
+            }
+            cache.clone()
+        });
+        //AI_END===
+
         let debug = DebugInfo {
             decoder_path: self
                 .player
                 .decoder_runtime()
                 .decoder_path()
                 .map(|path| path.display().to_string()),
-            decoder_format: self
-                .player
-                .decoder_runtime()
-                .decoder_format()
-                .map(|format| (format.sample_rate(), format.channels())),
+            decoder_format: decoder_format.map(|format| (format.sample_rate(), format.channels())),
+            //AI=== 播放格式：输出设备实际采样率与声道 / playback format: the device's actual rate and channels
+            playback_format: Some((output_format.sample_rate(), output_format.channels())),
+            //AI_END===
             pre_effect_len: self
                 .player
                 .pre_effect_runtime()
@@ -346,23 +425,34 @@ impl Runtime {
                 .pre_effect_ring_buffer()
                 .capacity(),
             audio_len: self.player.audio_ring_buffer().len(),
+            //AI=== 与 pre 统一按“已用 / 容量”展示 / show occupancy over capacity like `pre`
+            audio_capacity: self.player.audio_ring_buffer().capacity(),
+            //AI_END===
             playlist_len,
             playlist_index: index,
             pre_effect_eof: self.player.get_pre_effect_item_eof(),
             lock_fail: metrics.lock_fail.load(Ordering::Relaxed),
             underrun: metrics.underrun.load(Ordering::Relaxed),
             metrics: metrics_snapshot,
+            //AI=== 调试页链路延迟 / debug latency estimates
+            decoder_buffer_latency: decoder_buffered,
+            pre_effect_queue_latency: pre_effect_queue,
+            effect_latency,
+            playback_latency,
+            total_latency,
+            //AI_END===
         };
 
         Snapshot {
             track,
             pos: self.player.get_pos(),
             volume: self.player.volume(),
-            playing: self.player.is_playing(),
+            playing,
             poisoned: self.player.decoder_runtime().is_poisoned(),
             mode,
             index,
             debug,
+            effects,
         }
     }
 

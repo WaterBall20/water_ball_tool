@@ -7,8 +7,11 @@ pub mod ui;
 use crate::command::music_play::runtime::Runtime;
 use crate::command::music_play::scanner::ScanMessage;
 //AI=== seek 手势状态 / seek gesture state
-use crate::command::music_play::tui::app::{App, FooterAction, SeekGesture};
+use crate::command::music_play::tui::app::{App, FooterAction, SeekGesture, Window};
 //AI_END===
+use crate::command::tui_input::{
+    ESC_PENDING_TIMEOUT, VtEvent, VtInput, WHEEL_STEP, spawn_stdin_reader,
+};
 use ratatui::DefaultTerminal;
 //AI=== 鼠标事件用于滚轮与点击播放列表 / mouse events drive wheel scrolling and playlist clicks
 use ratatui::crossterm::event::{
@@ -16,9 +19,6 @@ use ratatui::crossterm::event::{
 };
 //AI_END===
 use std::error::Error;
-//AI=== Windows VT 输入改为直接读 stdin 字节 / Windows VT input reads raw stdin bytes
-use std::io::Read;
-//AI_END===
 //AI=== 命令模式解析循环模式 / command mode parses the loop mode
 use std::str::FromStr;
 //AI_END===
@@ -28,8 +28,6 @@ use std::time::{Duration, Instant};
 //AI_END===
 use tracing::{debug, error};
 //AI_END===
-//AI=== Windows VT 输入解析器 / Windows VT input parser
-use vtparse::{CsiParam, VTActor, VTParser};
 use water_ball_tool_lib::music_play::LoopMode;
 
 // 50ms 一帧：进度条同时以这个频率刷新 / one frame every 50ms; the progress bar refreshes at the same rate
@@ -42,10 +40,6 @@ const SEEK_STEP: Duration = Duration::from_secs(5);
 const SEEK_HOLD_RATE: f64 = 10.0;
 const SEEK_HOLD_WINDOW: Duration = Duration::from_millis(700);
 const SEEK_RELEASE_DELAY: Duration = Duration::from_millis(150);
-//AI_END===
-
-//AI=== 单独的 ESC 等待后续字节的时长；超时才当作 Esc 键 / how long a lone ESC waits for the rest of a sequence
-const ESC_PENDING_TIMEOUT: Duration = Duration::from_millis(50);
 //AI_END===
 
 // 随机模式先攒够 5 首再初始化；扫描结束时不足 5 首也会兜底初始化
@@ -82,7 +76,7 @@ pub(super) fn run(
     loop {
         drain_logs(logs, app);
         drain_scans(scans, runtime, app, autoplay, shuffle, &mut started);
-        app.apply(runtime.snapshot());
+        app.apply(runtime.snapshot(app.window == Window::Effects));
 
         terminal.draw(|frame| ui::render(app, frame))?;
 
@@ -155,13 +149,13 @@ fn drain_scans(
             ScanMessage::Track(track) => {
                 let display = format!("{} — {}", track.title(), track.artist());
                 runtime.add_track(track);
-                app.playlist.push(display);
+                app.playlist.tracks.push(display);
             }
-            ScanMessage::Progress { files, dirs } => app.discovery = (files, dirs),
-            ScanMessage::Done => app.scan_done = true,
+            ScanMessage::Progress { files, dirs } => app.scan.discovery = (files, dirs),
+            ScanMessage::Done => app.scan.done = true,
         }
 
-        if should_start(*started, shuffle, app.playlist.len(), app.scan_done) {
+        if should_start(*started, shuffle, app.playlist.tracks.len(), app.scan.done) {
             start(runtime, autoplay);
             *started = true;
         }
@@ -192,271 +186,6 @@ fn should_start(started: bool, shuffle: bool, loaded: usize, scan_done: bool) ->
     !shuffle || loaded >= SHUFFLE_INIT_TRACKS
 }
 
-//AI=== Windows VT 输入解析：ConPTY 把鼠标/方向键作为 ANSI 字节流交付，用 vtparse 解析。
-// Windows VT input parsing: ConPTY delivers mouse/arrow keys as an ANSI byte stream; parse it with vtparse.
-pub(crate) struct VtInput {
-    parser: VTParser,
-    events: Vec<VtEvent>,
-    x10: X10State,
-    //AI=== 单独的 ESC 可能是按键，也可能是序列前缀 / a lone ESC may be a key or the prefix of a sequence
-    pending_esc: Option<Instant>,
-    //AI_END===
-}
-
-#[derive(Default)]
-struct X10State {
-    active: bool,
-    filled: usize,
-    payload: [u8; 3],
-}
-
-impl X10State {
-    fn start(&mut self) {
-        self.active = true;
-        self.filled = 0;
-    }
-
-    fn push(&mut self, byte: u8) -> Option<[u8; 3]> {
-        self.payload[self.filled] = byte;
-        self.filled += 1;
-        if self.filled < self.payload.len() {
-            return None;
-        }
-        self.active = false;
-        Some(self.payload)
-    }
-}
-
-pub(crate) enum VtEvent {
-    Key(KeyCode, KeyModifiers),
-    Mouse(MouseEventKind, u16, u16),
-}
-
-impl VtInput {
-    pub(crate) fn new() -> Self {
-        Self {
-            parser: VTParser::new(),
-            events: Vec::new(),
-            x10: X10State::default(),
-            //AI=== 默认没有挂起的 ESC / no pending ESC by default
-            pending_esc: None,
-            //AI_END===
-        }
-    }
-
-    pub(crate) fn feed(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        //AI=== ESC 与后续字节拆成两次读取时：以 [ / O 开头的仍是转义序列，否则前一个 ESC 是独立按键
-        // When ESC and the rest arrive in separate reads: a chunk starting with [ / O is still an escape
-        // sequence; otherwise the pending ESC was a standalone key.
-        if self.pending_esc.take().is_some() && !matches!(bytes.first(), Some(b'[' | b'O')) {
-            self.parser = VTParser::new();
-            self.x10 = X10State::default();
-            self.events
-                .push(VtEvent::Key(KeyCode::Esc, KeyModifiers::empty()));
-        }
-        self.pending_esc = (bytes.len() == 1 && bytes[0] == 0x1b).then(Instant::now);
-        //AI_END===
-        let Self {
-            parser,
-            events,
-            x10,
-            ..
-        } = self;
-        let mut actor = VtActor { events, x10 };
-        parser.parse(bytes, &mut actor);
-    }
-
-    //AI=== 单独的 ESC 超时未等到后续字节，才作为 Esc 键（同时复位解析器）
-    // A lone ESC that has waited past the timeout becomes the Esc key (and the parser is reset).
-    pub(crate) fn take_lone_esc(&mut self, timeout: Duration) -> bool {
-        if let Some(at) = self.pending_esc
-            && at.elapsed() >= timeout
-        {
-            self.pending_esc = None;
-            self.parser = VTParser::new();
-            self.x10 = X10State::default();
-            self.events
-                .push(VtEvent::Key(KeyCode::Esc, KeyModifiers::empty()));
-            return true;
-        }
-        false
-    }
-    //AI_END===
-
-    pub(crate) fn drain(&mut self) -> Vec<VtEvent> {
-        std::mem::take(&mut self.events)
-    }
-}
-
-struct VtActor<'a> {
-    events: &'a mut Vec<VtEvent>,
-    x10: &'a mut X10State,
-}
-
-impl VTActor for VtActor<'_> {
-    fn print(&mut self, b: char) {
-        if self.x10.active {
-            let byte = u8::try_from(b as u32).unwrap_or(b' ');
-            if let Some(payload) = self.x10.push(byte)
-                && let Some((kind, column, row)) = x10_mouse(payload)
-            {
-                self.events.push(VtEvent::Mouse(kind, column, row));
-            }
-            return;
-        }
-
-        let code = if b == '\u{7f}' {
-            KeyCode::Backspace
-        } else {
-            KeyCode::Char(b)
-        };
-        self.events.push(VtEvent::Key(code, KeyModifiers::empty()));
-    }
-
-    fn execute_c0_or_c1(&mut self, control: u8) {
-        let event = match control {
-            0x03 => Some((KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            0x08 | 0x7f => Some((KeyCode::Backspace, KeyModifiers::empty())),
-            0x0a | 0x0d => Some((KeyCode::Enter, KeyModifiers::empty())),
-            0x09 => Some((KeyCode::Tab, KeyModifiers::empty())),
-            _ => None,
-        };
-        if let Some((code, modifiers)) = event {
-            self.events.push(VtEvent::Key(code, modifiers));
-        }
-    }
-
-    fn dcs_hook(&mut self, _: u8, _: &[i64], _: &[u8], _: bool) {}
-
-    fn dcs_put(&mut self, _: u8) {}
-
-    fn dcs_unhook(&mut self) {}
-
-    fn esc_dispatch(&mut self, _: &[i64], _: &[u8], _: bool, _: u8) {}
-
-    fn csi_dispatch(&mut self, params: &[CsiParam], _: bool, byte: u8) {
-        if byte == b'M' && params.is_empty() {
-            // X10 鼠标：CSI M + 3 个原始字节；不支持 SGR 的终端会走这里
-            // X10 mouse: CSI M plus 3 raw bytes; terminals without SGR fall back here.
-            self.x10.start();
-            return;
-        }
-        if let Some((kind, column, row)) = sgr_mouse(params, byte) {
-            self.events.push(VtEvent::Mouse(kind, column, row));
-            return;
-        }
-
-        let code = match byte {
-            b'A' => Some(KeyCode::Up),
-            b'B' => Some(KeyCode::Down),
-            b'C' => Some(KeyCode::Right),
-            b'D' => Some(KeyCode::Left),
-            b'H' => Some(KeyCode::Home),
-            b'F' => Some(KeyCode::End),
-            b'Z' => Some(KeyCode::BackTab),
-            b'~' => match params.first().and_then(csi_integer) {
-                Some(5) => Some(KeyCode::PageUp),
-                Some(6) => Some(KeyCode::PageDown),
-                Some(1 | 7) => Some(KeyCode::Home),
-                Some(4 | 8) => Some(KeyCode::End),
-                Some(3) => Some(KeyCode::Delete),
-                Some(n @ 11..=15) => Some(KeyCode::F(u8::try_from(n - 10).unwrap_or(1))),
-                Some(n @ 17..=21) => Some(KeyCode::F(u8::try_from(n - 16).unwrap_or(6))),
-                Some(23) => Some(KeyCode::F(11)),
-                Some(24) => Some(KeyCode::F(12)),
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(code) = code {
-            self.events.push(VtEvent::Key(code, KeyModifiers::empty()));
-        }
-    }
-
-    fn osc_dispatch(&mut self, _: &[&[u8]]) {}
-
-    fn apc_dispatch(&mut self, _: Vec<u8>) {}
-}
-
-fn csi_integer(param: &CsiParam) -> Option<u16> {
-    match param {
-        CsiParam::Integer(value) => u16::try_from(*value).ok(),
-        CsiParam::P(_) => None,
-    }
-}
-
-/// SGR 鼠标报文：`CSI < b ; x ; y M/m`，坐标是 1-based。
-///
-/// SGR mouse report: `CSI < b ; x ; y M/m`; coordinates are 1-based.
-fn sgr_mouse(params: &[CsiParam], byte: u8) -> Option<(MouseEventKind, u16, u16)> {
-    if !matches!(byte, b'M' | b'm') {
-        return None;
-    }
-    let numbers: Vec<u16> = params.iter().filter_map(csi_integer).collect();
-    if numbers.len() < 3 {
-        return None;
-    }
-    let button = numbers[0];
-    let column = numbers[1].saturating_sub(1);
-    let row = numbers[2].saturating_sub(1);
-
-    let kind = match (byte, button & 0b110_0011) {
-        (b'M', 0) => MouseEventKind::Down(MouseButton::Left),
-        (b'M', 64) => MouseEventKind::ScrollUp,
-        (b'M', 65) => MouseEventKind::ScrollDown,
-        _ => return None,
-    };
-    Some((kind, column, row))
-}
-
-fn x10_mouse(payload: [u8; 3]) -> Option<(MouseEventKind, u16, u16)> {
-    let button = payload[0].saturating_sub(32);
-    let column = u16::from(payload[1].saturating_sub(33));
-    let row = u16::from(payload[2].saturating_sub(33));
-    let kind = if button & 0x40 != 0 {
-        if button & 1 == 0 {
-            MouseEventKind::ScrollUp
-        } else {
-            MouseEventKind::ScrollDown
-        }
-    } else if button & 0x20 != 0 || button & 0x03 != 0 {
-        return None;
-    } else {
-        MouseEventKind::Down(MouseButton::Left)
-    };
-    Some((kind, column, row))
-}
-
-//AI=== 原始字节读取线程：VT 模式不经过 crossterm，避免 ESC/CR 被丢弃
-// Raw-byte reader thread: VT mode bypasses crossterm so ESC/CR are not dropped.
-fn spawn_stdin_reader() -> Result<Receiver<Vec<u8>>, Box<dyn Error>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("mp-stdin".to_string())
-        .spawn(move || {
-            let mut stdin = std::io::stdin();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
-                }
-            }
-        })
-        .map_err(|e| format!("创建 stdin 读取线程失败 / failed to spawn stdin reader: {e}"))?;
-    Ok(rx)
-}
-//AI_END===
-
 fn dispatch_vt(vt: &mut VtInput, runtime: &Runtime, app: &mut App) {
     for event in vt.drain() {
         match event {
@@ -480,24 +209,33 @@ fn dispatch_vt(vt: &mut VtInput, runtime: &Runtime, app: &mut App) {
 //AI_END===
 
 fn handle_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, app: &mut App) {
-    //AI=== 命令输入优先；帮助弹窗用 Esc 关闭 / command input takes priority; Esc closes the help popup
-    if app.command.is_some() {
+    //AI=== 命令输入优先；其余按键按当前窗口路由，窗口内不落到主界面 / command input first; other keys route by active window, never fall through
+    if app.command.input.is_some() {
         handle_command_key(code, modifiers, runtime, app);
         return;
     }
-    if app.show_help && code == KeyCode::Esc {
-        app.show_help = false;
+    if code == KeyCode::Esc && app.window != Window::None {
+        app.close_window();
         return;
     }
+    match app.window {
+        Window::None => handle_main_key(code, modifiers, runtime, app),
+        Window::Help => handle_help_key(code, app),
+        Window::Debug => handle_debug_key(code, app),
+        Window::Effects => handle_effects_key(code, runtime, app),
+    }
     //AI_END===
+}
+
+//AI=== 主界面按键 / main-view keys
+fn handle_main_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, app: &mut App) {
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => app.should_quit = true,
         //AI=== `:` 进入命令模式 / `:` opens command mode
         KeyCode::Char(':') => {
-            app.command = Some(String::new());
-            app.command_error = None;
-            app.show_help = false;
+            app.command.input = Some(String::new());
+            app.command.error = None;
         }
         //AI_END===
         //AI=== `n` 下一曲；左右方向键跳转进度 / `n` next track; left/right arrows seek
@@ -522,12 +260,63 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, app: &m
         }
         KeyCode::Char('p') => report(runtime.pause()),
         KeyCode::Char('P') => report(runtime.play()),
-        KeyCode::Char('d') | KeyCode::F(12) => app.show_debug = !app.show_debug,
+        //AI=== Debug/效果器改用功能键与 e / debug uses an F-key, effects uses e
+        KeyCode::F(12) => app.toggle_debug(),
+        KeyCode::Char('e') => app.toggle_effects(),
+        //AI_END===
         KeyCode::Char('+') | KeyCode::Char('=') => runtime.add_volume(0.05),
         KeyCode::Char('-') => runtime.add_volume(-0.05),
         _ => {}
     }
 }
+//AI_END===
+
+//AI=== 窗口专属按键：与主界面完全隔离 / window-only keys, fully isolated from the main view
+fn handle_help_key(code: KeyCode, app: &mut App) {
+    if code == KeyCode::Char('?') {
+        app.close_window();
+    }
+}
+
+fn handle_debug_key(code: KeyCode, app: &mut App) {
+    if code == KeyCode::F(12) {
+        app.close_window();
+    }
+}
+
+fn handle_effects_key(code: KeyCode, runtime: &Runtime, app: &mut App) {
+    match code {
+        KeyCode::Char('e') => app.close_window(),
+        KeyCode::Up => app.select_effect(-1),
+        KeyCode::Down => app.select_effect(1),
+        KeyCode::PageUp => app.select_effect(-5),
+        KeyCode::PageDown => app.select_effect(5),
+        KeyCode::Home => app.effects.selected = 0,
+        KeyCode::End => app.effects.selected = app.effects.list.len().saturating_sub(1),
+        //AI=== 空格/回车切换选中效果器的启用状态 / Space/Enter toggles the selected effect
+        KeyCode::Char(' ') | KeyCode::Enter => {
+            let Some(effect) = app.effects.list.get(app.effects.selected) else {
+                return;
+            };
+            if !effect.can_disable {
+                return;
+            }
+            let chain = effect.chain;
+            let index = effect.index;
+            let enabled = !effect.enabled;
+            //AI=== 命令异步应用，最终状态由快照确认，不做本地乐观更新 / the command is async; wait for the snapshot
+            if !runtime.set_effect_enabled(chain, index, enabled) {
+                debug!(
+                    "效果器开关请求被拒绝 / effect toggle request rejected: chain={chain:?} index={index}"
+                );
+            }
+            //AI_END===
+        }
+        //AI_END===
+        _ => {}
+    }
+}
+//AI_END===
 
 //AI=== 左右方向键 seek：点按立刻 ±5s；重复事件只移动预览，停手后一次提交
 // Left/right seek: a tap steps ±5s immediately; repeats only move the preview and are committed once, on release.
@@ -551,9 +340,9 @@ fn seek_by(base: Duration, direction: i8, offset: Duration, duration: Duration) 
 
 fn handle_seek_key(direction: i8, runtime: &Runtime, app: &mut App) {
     let now = Instant::now();
-    let duration = app.duration;
+    let duration = app.playback.duration;
 
-    if let Some(gesture) = app.seek_gesture.as_mut()
+    if let Some(gesture) = app.seek.gesture.as_mut()
         && gesture.direction == direction
         && now.duration_since(gesture.last) <= SEEK_HOLD_WINDOW
     {
@@ -569,9 +358,9 @@ fn handle_seek_key(direction: i8, runtime: &Runtime, app: &mut App) {
 
     // 新手势：第一下立即生效（点按语义），后续重复只改预览
     // A new gesture applies its first step immediately (the tap case); later repeats only move the preview.
-    let target = seek_target(app.pos, direction, duration);
+    let target = seek_target(app.playback.pos, direction, duration);
     report(runtime.seek(target));
-    app.seek_gesture = Some(SeekGesture {
+    app.seek.gesture = Some(SeekGesture {
         target,
         pending: false,
         last: now,
@@ -584,7 +373,7 @@ fn handle_seek_key(direction: i8, runtime: &Runtime, app: &mut App) {
 /// 停手后提交长按预览；点按已即时提交，过重复窗口后只需清除状态
 /// Commit the hold preview once the keys go quiet; a tap was already applied and only needs its state cleared.
 fn commit_seek_gesture(runtime: &Runtime, app: &mut App) {
-    let Some(gesture) = app.seek_gesture.as_ref() else {
+    let Some(gesture) = app.seek.gesture.as_ref() else {
         return;
     };
     let idle = gesture.last.elapsed();
@@ -593,18 +382,18 @@ fn commit_seek_gesture(runtime: &Runtime, app: &mut App) {
             return;
         }
         let target = gesture.target;
-        app.seek_gesture = None;
+        app.seek.gesture = None;
         report(runtime.seek(target));
     } else if idle >= SEEK_HOLD_WINDOW {
-        app.seek_gesture = None;
+        app.seek.gesture = None;
     }
 }
 //AI_END===
 
 //AI=== 鼠标：列表内滚轮滚动，左键点击曲目播放 / mouse: wheel scrolls inside the list, left click plays a track
 fn handle_mouse(mouse: MouseEvent, runtime: &Runtime, app: &mut App) {
-    //AI=== 命令输入与帮助弹窗期间忽略鼠标 / ignore the mouse while typing a command or reading help
-    if app.command.is_some() || app.show_help {
+    //AI=== 命令输入或任何窗口显示时忽略鼠标 / ignore the mouse while typing a command or while a window is open
+    if app.command.input.is_some() || app.window != Window::None {
         return;
     }
     //AI_END===
@@ -614,7 +403,7 @@ fn handle_mouse(mouse: MouseEvent, runtime: &Runtime, app: &mut App) {
     );
     let position = ratatui::layout::Position::new(mouse.column, mouse.row);
     //AI=== 底栏按钮优先：提示文字本身就是点击目标 / footer buttons first: the hint labels are the targets
-    if app.footer_area.contains(position) {
+    if app.footer.area.contains(position) {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(action) = app.footer_action_at(mouse.column)
         {
@@ -624,25 +413,29 @@ fn handle_mouse(mouse: MouseEvent, runtime: &Runtime, app: &mut App) {
         return;
     }
     //AI_END===
-    if !app.playlist_area.contains(position) {
+    if !app.playlist.area.contains(position) {
         return;
     }
     match mouse.kind {
-        MouseEventKind::ScrollUp => app.scroll_playlist(-3),
-        MouseEventKind::ScrollDown => app.scroll_playlist(3),
+        MouseEventKind::ScrollUp => app.scroll_playlist(-WHEEL_STEP),
+        MouseEventKind::ScrollDown => app.scroll_playlist(WHEEL_STEP),
         MouseEventKind::Down(MouseButton::Left) => {
             let index = app.playlist_index_at(mouse.column, mouse.row);
             //AI=== 点击诊断：行命中/未命中与列表状态 / click diagnostics: hit/miss, area and list state
             debug!(
                 "播放列表点击 / playlist click: index={index:?} area={:?} offset={} len={}",
-                app.playlist_area,
-                app.playlist_offset,
-                app.playlist.len()
+                app.playlist.area,
+                app.playlist.offset,
+                app.playlist.tracks.len()
             );
             //AI_END===
-            if let Some(index) = index {
+            //AI=== 双击才切换曲目，单击避免误触 / only a double click switches tracks so a single click cannot misfire
+            if let Some(index) = index
+                && app.mouse.register_click(index)
+            {
                 report(runtime.play_at(index));
             }
+            //AI_END===
         }
         _ => {}
     }
@@ -654,15 +447,6 @@ fn handle_footer_action(action: FooterAction, runtime: &Runtime, app: &mut App) 
     match action {
         FooterAction::Quit => app.should_quit = true,
         FooterAction::Next => report(runtime.next_track()),
-        FooterAction::SeekBack | FooterAction::SeekForward => {
-            let direction = if action == FooterAction::SeekBack {
-                -1
-            } else {
-                1
-            };
-            app.seek_gesture = None;
-            report(runtime.seek(seek_target(app.pos, direction, app.duration)));
-        }
         FooterAction::Toggle => {
             if runtime.is_playing() {
                 report(runtime.pause());
@@ -670,15 +454,13 @@ fn handle_footer_action(action: FooterAction, runtime: &Runtime, app: &mut App) 
                 report(runtime.play());
             }
         }
-        FooterAction::ScrollUp => app.scroll_playlist(-1),
-        FooterAction::ScrollDown => app.scroll_playlist(1),
-        FooterAction::VolumeDown => runtime.add_volume(-0.05),
-        FooterAction::VolumeUp => runtime.add_volume(0.05),
-        FooterAction::Debug => app.show_debug = !app.show_debug,
+        FooterAction::Debug => app.toggle_debug(),
+        //AI=== 底栏效果器按钮 / footer effects button
+        FooterAction::Effects => app.toggle_effects(),
+        //AI_END===
         FooterAction::Command => {
-            app.command = Some(String::new());
-            app.command_error = None;
-            app.show_help = false;
+            app.command.input = Some(String::new());
+            app.command.error = None;
         }
     }
 }
@@ -715,6 +497,9 @@ pub(super) const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     ("goto", "goto <n>", "跳到第 n 首并播放"),
     ("debug", "debug", "开关 Debug 弹窗"),
+    //AI=== 效果器窗口命令 / effects-window command
+    ("effects", "effects", "开关效果器窗口"),
+    //AI_END===
     ("help", "help", "显示帮助（? 同义）"),
 ];
 
@@ -796,13 +581,14 @@ fn execute_command(line: &str, runtime: &Runtime, app: &mut App) -> Result<(), S
                 return Err("用法：:seek <mm:ss|+N|-N>".to_string());
             };
             // 命令行跳转取消未提交的方向键预览 / an explicit seek cancels any pending arrow preview
-            app.seek_gesture = None;
+            app.seek.gesture = None;
             let target = if let Some(relative) = arg.strip_prefix('+') {
-                app.pos
+                app.playback
+                    .pos
                     .checked_add(parse_time(relative)?)
                     .ok_or_else(|| "目标时间超出范围".to_string())?
             } else if let Some(relative) = arg.strip_prefix('-') {
-                app.pos.saturating_sub(parse_time(relative)?)
+                app.playback.pos.saturating_sub(parse_time(relative)?)
             } else {
                 parse_time(arg)?
             };
@@ -813,8 +599,8 @@ fn execute_command(line: &str, runtime: &Runtime, app: &mut App) -> Result<(), S
             let Some(arg) = args.first() else {
                 return Err("用法：:vol <0-100|+N|-N>".to_string());
             };
-            let volume = parse_volume(arg, app.volume)?;
-            runtime.add_volume(volume - app.volume);
+            let volume = parse_volume(arg, app.playback.volume)?;
+            runtime.add_volume(volume - app.playback.volume);
         }
         "mode" => {
             let Some(arg) = args.first() else {
@@ -833,13 +619,16 @@ fn execute_command(line: &str, runtime: &Runtime, app: &mut App) -> Result<(), S
             let index = arg
                 .parse::<usize>()
                 .map_err(|_| format!("曲目序号无效：{arg}"))?;
-            if index == 0 || index > app.playlist.len() {
-                return Err(format!("序号超出范围：1-{}", app.playlist.len()));
+            if index == 0 || index > app.playlist.tracks.len() {
+                return Err(format!("序号超出范围：1-{}", app.playlist.tracks.len()));
             }
             command_result(runtime.play_at(index - 1))?;
         }
-        "debug" => app.show_debug = !app.show_debug,
-        "help" => app.show_help = true,
+        "debug" => app.toggle_debug(),
+        //AI=== 效果器窗口命令 / effects-window command
+        "effects" => app.toggle_effects(),
+        //AI_END===
+        "help" => app.open_help(),
         _ => unreachable!("未处理的命令 / unhandled command"),
     }
     Ok(())
@@ -859,21 +648,21 @@ fn handle_command_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime,
         return;
     }
     match code {
-        KeyCode::Esc => app.command = None,
+        KeyCode::Esc => app.command.input = None,
         KeyCode::Enter => {
-            let line = app.command.take().unwrap_or_default();
+            let line = app.command.input.take().unwrap_or_default();
             match execute_command(&line, runtime, app) {
-                Ok(()) => app.command_error = None,
-                Err(message) => app.command_error = Some(message),
+                Ok(()) => app.command.error = None,
+                Err(message) => app.command.error = Some(message),
             }
         }
         KeyCode::Backspace => {
-            if let Some(buffer) = app.command.as_mut() {
+            if let Some(buffer) = app.command.input.as_mut() {
                 buffer.pop();
             }
         }
         KeyCode::Char(c) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-            if let Some(buffer) = app.command.as_mut() {
+            if let Some(buffer) = app.command.input.as_mut() {
                 buffer.push(c);
             }
         }

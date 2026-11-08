@@ -12,13 +12,22 @@ use crate::command::wbfp::WaterBallFilePackCommand;
 use clap::error::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+//AI=== 共享八分块进度条：mp 与 wbfp 的 TUI 共用 / shared eighth-block bar for the mp and wbfp TUIs
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Color, Style},
+};
+//AI_END===
 use std::time::Duration;
 use tracing::error;
+use unicode_width::UnicodeWidthStr;
 
 mod ff;
 pub mod music_play;
 #[cfg(test)]
 mod test;
+mod tui_input;
 mod wbfp;
 
 #[derive(Debug, Parser)]
@@ -83,10 +92,78 @@ fn create_pb(mp: &MultiProgress) -> ProgressBar {
 pub(crate) fn progress_style(template: &str) -> ProgressStyle {
     ProgressStyle::default_bar()
         .template(template)
+        .map(|style| style.progress_chars(EIGHTH_BLOCK_CHARS))
         .unwrap_or_else(|e| {
             error!("进度条模板非法，回退到默认样式 / invalid progress template: {e}");
-            ProgressStyle::default_bar()
+            ProgressStyle::default_bar().progress_chars(EIGHTH_BLOCK_CHARS)
         })
+}
+//AI_END===
+
+//AI=== 八分块进度：indicatif 与两套 TUI 共用同一组字符 / eighth blocks shared by indicatif and both TUIs
+/// indicatif 进度条字符：满格 `█`、七级细分、空格背景 / indicatif bar chars: `█`, seven partials, blank background
+const EIGHTH_BLOCK_CHARS: &str = "█▉▊▋▌▍▎▏ ";
+
+/// 八分块条：`width` 个终端格，每格可再分 8 级。宽度按字符数计。
+///
+/// Eighth-block bar: `width` terminal cells, each resolved to 1/8. Width counts characters.
+pub(crate) fn eighth_block_bar(width: usize, ratio: f64) -> String {
+    const PARTIALS: [char; 8] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    const FULL: char = '█';
+    let filled = ratio.clamp(0.0, 1.0) * width as f64;
+    let mut full = filled.floor() as usize;
+    let mut eighths = ((filled - full as f64) * 8.0).round() as usize;
+    if eighths == 8 {
+        full += 1;
+        eighths = 0;
+    }
+    let full = full.min(width);
+    let mut bar = String::with_capacity(width);
+    bar.extend(std::iter::repeat_n(FULL, full));
+    if full < width && eighths > 0 {
+        bar.push(PARTIALS[eighths]);
+    }
+    bar.extend(std::iter::repeat_n(
+        ' ',
+        width.saturating_sub(bar.chars().count()),
+    ));
+    bar
+}
+
+/// 在 `area` 首行绘制八分块进度条，标签放在进度条右侧。
+///
+/// 进度条始终是连续的一段，文字不覆盖进度条；标签过长时让出至少
+/// `MIN_BAR_CELLS` 格给进度条，超出部分截断。
+///
+/// Draw the eighth-block bar on the first row of `area` with the label to its right.
+/// The bar is always contiguous because no text is drawn over it; a long label leaves at
+/// least [`MIN_BAR_CELLS`] cells for the bar and is truncated.
+pub(crate) fn render_eighth_block_bar(
+    frame: &mut Frame,
+    area: Rect,
+    ratio: f64,
+    color: Color,
+    label: &str,
+    label_style: Style,
+) {
+    /// 标签再长也给进度条留出的最小格数 / minimum cells reserved for the bar
+    const MIN_BAR_CELLS: usize = 8;
+    let width = usize::from(area.width);
+    let label_width = label.width().min(width.saturating_sub(MIN_BAR_CELLS));
+    let bar_width = width.saturating_sub(label_width + 1);
+    let bar = eighth_block_bar(bar_width, ratio);
+    let buf = frame.buffer_mut();
+    for (i, ch) in bar.chars().enumerate() {
+        buf[(area.x + i as u16, area.y)].set_char(ch).set_fg(color);
+    }
+    let label_x = area.x.saturating_add(bar_width as u16 + 1);
+    buf.set_stringn(
+        label_x,
+        area.y,
+        label,
+        usize::from(area.right().saturating_sub(label_x)),
+        label_style,
+    );
 }
 //AI_END===
 

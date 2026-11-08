@@ -442,6 +442,65 @@ impl ManagerSync /*写*/ {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         manager.create_dir_all(path)
     }
+
+    /// 包内同目录重命名：只修改叶子名称，不移动条目。
+    ///
+    /// `from` 与 `to` 的父路径必须完全一致；跨目录移动请使用 [`move_entry`](Self::move_entry)。
+    /// 目标名称已存在、名称为空/`.`/`..`/包含分隔符/超过 65535 字节时返回错误。
+    /// 文件或目录子树存在打开的虚拟文件句柄时返回 [`PackFileError::Lock`]。
+    ///
+    /// Rename an entry in place: only the leaf name changes, the entry is never
+    /// relocated. `from` and `to` must have the same parent; use
+    /// [`move_entry`](Self::move_entry) for a cross-directory move. Returns an
+    /// error for an existing target, an empty/`.`/`..`/separator-containing name,
+    /// or a name longer than 65535 bytes. Returns [`PackFileError::Lock`] while
+    /// the file or any file in the directory subtree has an open virtual-file handle.
+    //AI=== 包内同目录重命名 API / in-pack same-directory rename API
+    pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(&mut self, from: &P, to: &Q) -> Result<()> {
+        if self.access_mode == PackAccessMode::Read {
+            return Err(PackFileError::PermissionDenied(
+                "只读模式无法重命名 / read-only mode cannot rename".into(),
+            ));
+        }
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let from = PathTool::path_to_string_vec(from);
+        let to = PathTool::path_to_string_vec(to);
+        manager.rename(&from, &to)
+    }
+    //AI_END===
+
+    /// 包内跨目录移动，可同时修改叶子名称。
+    ///
+    /// 源与目标父目录必须不同；同目录改名请使用 [`rename`](Self::rename)。
+    /// 目标父目录必须已存在，不会自动创建；目标名称必须不存在。
+    /// 目录不能移动到自己的子树内。被移动文件或目录子树存在打开的虚拟文件句柄时
+    /// 返回 [`PackFileError::Lock`]。
+    ///
+    /// Move an entry to another directory, optionally changing its leaf name.
+    /// The source and destination parents must differ; use [`rename`](Self::rename)
+    /// for a same-directory name change. The destination parent must already
+    /// exist and the target name must be free. A directory cannot move into its
+    /// own subtree. Returns [`PackFileError::Lock`] while the file or any
+    /// descendant of a moved directory has an open virtual-file handle.
+    //AI=== 包内跨目录移动 API / in-pack cross-directory move API
+    pub fn move_entry<P: AsRef<Path>, Q: AsRef<Path>>(&mut self, from: &P, to: &Q) -> Result<()> {
+        if self.access_mode == PackAccessMode::Read {
+            return Err(PackFileError::PermissionDenied(
+                "只读模式无法移动 / read-only mode cannot move".into(),
+            ));
+        }
+        let manager = self.manager.clone();
+        let mut manager = manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let from = PathTool::path_to_string_vec(from);
+        let to = PathTool::path_to_string_vec(to);
+        manager.move_entry(&from, &to)
+    }
+    //AI_END===
 }
 
 impl ManagerSync /*删除*/ {

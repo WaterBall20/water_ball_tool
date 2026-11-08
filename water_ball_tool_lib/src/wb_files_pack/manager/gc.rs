@@ -8,12 +8,12 @@ impl WBFPManager {
     ///
     /// Known-size file initial allocation: exact 128B (DATA_BLOCK_LEN) alignment,
     /// no over-allocation. Same alignment rule as manifest data allocation.
-    pub(super) fn get_file_pos(&mut self, length: u64) -> Result<(u64, u64)> {
+    pub(super) fn get_file_pos(&mut self, length: u64) -> (u64, u64) {
         let pack_file = self.pack_file.clone();
         let mut pack_file = pack_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(pack_file.get_file_pos(length))
+        pack_file.get_file_pos(length)
     }
 
     /// 未知大小文件的初始分配：长度按 4MiB（DATA_DATA_BLOCK_LEN）对齐，
@@ -49,14 +49,14 @@ impl WBFPManager {
         let mut pack_file = pack_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        pack_file.file_gc()?;
+        pack_file.file_gc();
         drop(pack_file);
         self.save_empty_data_list()
     }
 
     pub(super) fn manifest_file_gc(&mut self) -> Result<()> {
         if let Some(file) = self.manifest.file_mut() {
-            file.file_gc()?;
+            file.file_gc();
             self.save_manifest_empty_data_list()
         } else {
             Ok(())

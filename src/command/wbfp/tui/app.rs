@@ -1,30 +1,33 @@
 //! wbfp TUI 状态 / wbfp TUI state
 //!
-//! 列表、视口、预览、任务进度与日志都集中在 `App`；后台任务只通过
-//! [`JobEvent`] 修改它。
+//! `App` 按职责分为 `Ui`、`Nav`、`Jobs` 三组状态；后台任务只通过
+//! [`JobEvent`] 修改任务状态。
 //!
-//! The list, viewport, preview, job progress and logs live in `App`; background
-//! jobs only modify it through [`JobEvent`].
+//! `App` groups its state into `Ui`, `Nav` and `Jobs`; background jobs only
+//! modify job state through [`JobEvent`].
 
 //AI=== TUI 状态、目录导航与事件归并 / TUI state, navigation and event merging
 use super::browse::{self, Entry, PackInfo};
 use crate::command::music_play::tui::channel_writer::{LogLevel, LogLine};
+use crate::command::tui_input::{MouseState, list_index_at};
 use crate::command::wbfp::common;
 use crate::command::wbfp::events::{JobEvent, JobSummary, RowStatus};
 use crate::command::wbfp::ops::JobSpec;
 use crate::command::wbfp::{
     WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsBrowse,
 };
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 use tracing::{debug, error, warn};
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 
 /// TUI 当前模式 / current TUI mode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Mode {
+    /// 无子命令的文件管理器 / no-subcommand file manager
+    Manager,
     Browse,
     Pack,
     Unpack,
@@ -34,12 +37,21 @@ pub(crate) enum Mode {
 impl Mode {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::Manager => "管理 / manager",
             Self::Browse => "浏览 / browse",
             Self::Pack => "打包 / pack",
             Self::Unpack => "解包 / unpack",
             Self::Verify => "校验 / verify",
         }
     }
+}
+
+/// 文件管理器焦点 / file-manager focus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Focus {
+    #[default]
+    Local,
+    Pack,
 }
 
 /// 任务卡片状态 / job-card state.
@@ -146,11 +158,17 @@ impl TaskItem {
 const TASK_ACTIVE_CAP: usize = 64;
 const TASK_DONE_CAP: usize = 100;
 
-/// TUI 全部可变状态 / all mutable TUI state.
-pub(crate) struct App {
-    pub mode: Mode,
-    pub title: String,
-    pub pack_info: Option<PackInfo>,
+/// 弹层窗口 / modal window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Window {
+    #[default]
+    None,
+    Help,
+    Debug,
+}
+
+/// 浏览与导航状态 / browsing and navigation state.
+pub(crate) struct Nav {
     pub cwd: PathBuf,
     pub local_root: Option<PathBuf>,
     pub entries: Vec<Entry>,
@@ -158,36 +176,13 @@ pub(crate) struct App {
     pub offset: usize,
     pub height: usize,
     pub show_preview: bool,
-    pub statuses: HashMap<PathBuf, RowStatus>,
-    /// 目录祖先的状态计数；只在事件到达时增量更新 / incremental descendant counts for ancestor directories
-    dir_agg: HashMap<PathBuf, DirAgg>,
-    /// 已发现的目录路径 / discovered directory paths
-    dir_paths: HashSet<PathBuf>,
-    pub job: Option<JobState>,
-    /// 当前操作的文件（最新在最前）/ currently operating files (newest first)
-    pub active_tasks: VecDeque<TaskItem>,
-    /// 已完成文件（最新在最前，放在活动任务下方）/ finished files (newest first, below active)
-    pub done_tasks: VecDeque<TaskItem>,
-    pub job_running: bool,
-    pub should_quit: bool,
-    pub quit_after_job: bool,
-    pub show_help: bool,
-    pub show_logs: bool,
-    pub logs: VecDeque<LogLine>,
     pub list_area: Rect,
-    /// 双击检测：上一次左键点击的时间与行号 / double-click detection: last left-click time and row
-    pub last_click: Option<(Instant, usize)>,
-    pub pack: Option<ManagerSync>,
-    pub error: Option<String>,
-    pub job_spec: Option<JobSpec>,
+    pub mouse: MouseState,
 }
 
-impl App {
-    fn new(mode: Mode) -> Self {
+impl Default for Nav {
+    fn default() -> Self {
         Self {
-            mode,
-            title: String::new(),
-            pack_info: None,
             cwd: PathBuf::new(),
             local_root: None,
             entries: Vec::new(),
@@ -195,23 +190,78 @@ impl App {
             offset: 0,
             height: 1,
             show_preview: true,
-            statuses: HashMap::new(),
-            dir_agg: HashMap::new(),
-            dir_paths: HashSet::new(),
-            job: None,
-            active_tasks: VecDeque::new(),
-            done_tasks: VecDeque::new(),
-            job_running: false,
-            should_quit: false,
-            quit_after_job: false,
-            show_help: false,
-            show_logs: false,
-            logs: VecDeque::new(),
             list_area: Rect::ZERO,
-            last_click: None,
+            mouse: MouseState::default(),
+        }
+    }
+}
+
+/// 任务卡片与逐行状态 / job card and per-row state.
+#[derive(Default)]
+pub(crate) struct Jobs {
+    pub state: Option<JobState>,
+    /// 当前操作的文件（最新在最前）/ currently operating files (newest first)
+    pub active: VecDeque<TaskItem>,
+    /// 已完成文件（最新在最前，放在活动任务下方）/ finished files (newest first, below active)
+    pub done: VecDeque<TaskItem>,
+    pub running: bool,
+    pub spec: Option<JobSpec>,
+    pub statuses: HashMap<PathBuf, RowStatus>,
+    /// 目录祖先的状态计数；只在事件到达时增量更新 / incremental descendant counts for ancestor directories
+    dir_agg: HashMap<PathBuf, DirAgg>,
+    /// 已发现的目录路径 / discovered directory paths
+    dir_paths: HashSet<PathBuf>,
+}
+
+/// 界面壳状态 / UI shell state.
+pub(crate) struct Ui {
+    pub mode: Mode,
+    pub title: String,
+    pub pack_info: Option<PackInfo>,
+    pub window: Window,
+    pub logs: VecDeque<LogLine>,
+    pub should_quit: bool,
+    pub quit_after_job: bool,
+    pub error: Option<String>,
+}
+
+/// TUI 全部可变状态 / all mutable TUI state.
+pub(crate) struct App {
+    pub ui: Ui,
+    /// 主面板：子命令模式下的唯一面板；Manager 模式下是包视图。
+    /// Primary pane: the only pane in subcommand modes; the pack pane in manager mode.
+    pub nav: Nav,
+    /// Manager 模式下的本地文件系统面板 / local-filesystem pane in manager mode.
+    pub local_nav: Nav,
+    pub focus: Focus,
+    pub jobs: Jobs,
+    pub pack: Option<ManagerSync>,
+    /// 当前打开包的规范化路径与文件头版本（用于左侧包标记）。
+    /// Canonical path and header version of the open pack (for the left-pane marker).
+    pub pack_path: Option<PathBuf>,
+    pub pack_format_version: Option<u16>,
+}
+
+impl App {
+    fn new(mode: Mode) -> Self {
+        Self {
+            ui: Ui {
+                mode,
+                title: String::new(),
+                pack_info: None,
+                window: Window::None,
+                logs: VecDeque::new(),
+                should_quit: false,
+                quit_after_job: false,
+                error: None,
+            },
+            nav: Nav::default(),
+            local_nav: Nav::default(),
+            focus: Focus::Local,
+            jobs: Jobs::default(),
             pack: None,
-            error: None,
-            job_spec: None,
+            pack_path: None,
+            pack_format_version: None,
         }
     }
 
@@ -221,14 +271,30 @@ impl App {
     pub(crate) fn from_args(
         args: WaterBallFilePackCommand,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        match args.commands {
+        // 无子命令：文件管理器；包路径可选，无包时只显示文件系统与预览。
+        // No subcommand: file manager; the pack path is optional, and without a pack only the local pane and preview are shown.
+        let Some(commands) = args.commands else {
+            let mut app = Self::new(Mode::Manager);
+            app.ui.title = "manager".to_string();
+            app.local_nav.cwd = std::env::current_dir()?;
+            app.local_nav.show_preview = app.nav.show_preview;
+            app.load_local_dir().map_err(std::io::Error::other)?;
+            if let Some(pack_path) = args.pack_path {
+                app.open_pack(Path::new(&pack_path))
+                    .map_err(std::io::Error::other)?;
+            } else {
+                app.focus = Focus::Local;
+            }
+            return Ok(app);
+        };
+        match commands {
             WaterBallFilePackCommands::Browse(WaterBallFilePackCommandsBrowse { pack_path }) => {
                 let pack = ManagerSync::open(&pack_path)
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
                 let mut app = Self::new(Mode::Browse);
-                app.title = pack_path;
-                app.pack_info = Some(info);
+                app.ui.title = pack_path;
+                app.ui.pack_info = Some(info);
                 app.pack = Some(pack);
                 app.load_current_dir().map_err(std::io::Error::other)?;
                 Ok(app)
@@ -244,15 +310,15 @@ impl App {
                 }
                 let pack_path = common::pack_output_path(&in_path, p.out_pack_path.as_deref())?;
                 let mut app = Self::new(Mode::Pack);
-                app.title = pack_path.display().to_string();
-                app.local_root = Some(in_path.clone());
-                app.cwd = in_path.clone();
-                app.job = Some(JobState::new(
+                app.ui.title = pack_path.display().to_string();
+                app.nav.local_root = Some(in_path.clone());
+                app.nav.cwd = in_path.clone();
+                app.jobs.state = Some(JobState::new(
                     Mode::Pack.label(),
                     pack_path.display().to_string(),
                 ));
-                app.job_running = true;
-                app.job_spec = Some(JobSpec::Pack {
+                app.jobs.running = true;
+                app.jobs.spec = Some(JobSpec::Pack {
                     in_path: in_path.clone(),
                     pack_path,
                     separate_manifest: !p.no_separation,
@@ -268,15 +334,15 @@ impl App {
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
                 let mut app = Self::new(Mode::Unpack);
-                app.title = u.pack_path.clone();
-                app.pack_info = Some(info);
+                app.ui.title = u.pack_path.clone();
+                app.ui.pack_info = Some(info);
                 app.pack = Some(pack.clone());
-                app.job = Some(JobState::new(
+                app.jobs.state = Some(JobState::new(
                     Mode::Unpack.label(),
                     out_dir.display().to_string(),
                 ));
-                app.job_running = true;
-                app.job_spec = Some(JobSpec::Unpack {
+                app.jobs.running = true;
+                app.jobs.spec = Some(JobSpec::Unpack {
                     pack,
                     out_dir,
                     hash_verify: u.hash_verify,
@@ -290,13 +356,13 @@ impl App {
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
                 let mut app = Self::new(Mode::Verify);
-                app.title = h.pack_path.clone();
-                app.pack_info = Some(info);
+                app.ui.title = h.pack_path.clone();
+                app.ui.pack_info = Some(info);
                 app.pack = Some(pack.clone());
                 // 校验没有输出目录，任务卡片不显示输出字段 / verify writes nothing, so the task card has no output field
-                app.job = Some(JobState::new(Mode::Verify.label(), String::new()));
-                app.job_running = true;
-                app.job_spec = Some(JobSpec::Verify {
+                app.jobs.state = Some(JobState::new(Mode::Verify.label(), String::new()));
+                app.jobs.running = true;
+                app.jobs.spec = Some(JobSpec::Verify {
                     pack,
                     thread_count: common::get_thread_count(h.thread_count),
                 });
@@ -306,22 +372,190 @@ impl App {
         }
     }
 
-    /// 重新读取当前目录并回到首行 / reload the current directory and reset to the first row.
+    /// Manager 模式下的活动面板 / active pane in manager mode.
+    pub(crate) fn active_nav(&self) -> &Nav {
+        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+            &self.local_nav
+        } else {
+            &self.nav
+        }
+    }
+
+    pub(crate) fn active_nav_mut(&mut self) -> &mut Nav {
+        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+            &mut self.local_nav
+        } else {
+            &mut self.nav
+        }
+    }
+
+    pub(crate) fn is_manager(&self) -> bool {
+        self.ui.mode == Mode::Manager
+    }
+
+    /// 只读探测并打开包，切换到包视图 / probe and open a pack, then focus the pack pane.
+    pub(crate) fn open_pack(&mut self, path: &Path) -> Result<(), String> {
+        if self.jobs.running {
+            return Err(
+                "任务运行中，不能切换包 / a job is running; cannot switch packs".to_string(),
+            );
+        }
+        let probe = water_ball_tool_lib::wb_files_pack::probe_pack(path)
+            .map_err(|e| format!("探测包失败 / failed to probe pack: {e}"))?;
+        let Some(probe) = probe else {
+            return Err(format!(
+                "不是有效的 WBFilesPack 文件 / not a WBFilesPack file: {}",
+                path.display()
+            ));
+        };
+        // 先关闭旧包，避免同一进程的 .lock 冲突 / drop the old pack first to avoid a same-process .lock conflict
+        self.close_pack();
+        let pack = ManagerSync::options()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
+        let info = browse::pack_info(&pack)?;
+        self.pack = Some(pack);
+        self.ui.pack_info = Some(info);
+        self.ui.title = path.display().to_string();
+        self.pack_path = Some(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        self.pack_format_version = Some(probe.format_version);
+        self.ui.error = None;
+        self.nav.cwd = PathBuf::new();
+        self.nav.entries.clear();
+        self.nav.selected = 0;
+        self.nav.offset = 0;
+        self.focus = Focus::Pack;
+        debug!(
+            "open_pack: {} format_version={}",
+            path.display(),
+            probe.format_version
+        );
+        self.load_pack_dir()?;
+        // 重新加载本地面板以标记正在打开的包 / reload local pane to mark the open pack
+        if let Err(err) = self.load_local_dir() {
+            warn!("reload local pane after opening pack failed: {err}");
+            self.ui.error = Some(err);
+        }
+        Ok(())
+    }
+
+    /// 关闭当前包并回到本地文件系统 / close the current pack and return to the local pane.
+    pub(crate) fn close_pack(&mut self) {
+        if self.jobs.running {
+            self.ui.error = Some(
+                "任务运行中，不能关闭包 / a job is running; cannot close the pack".to_string(),
+            );
+            return;
+        }
+        self.pack = None;
+        self.pack_path = None;
+        self.pack_format_version = None;
+        self.ui.pack_info = None;
+        self.ui.title = "manager".to_string();
+        self.nav.cwd = PathBuf::new();
+        self.nav.entries.clear();
+        self.nav.selected = 0;
+        self.nav.offset = 0;
+        if self.is_manager() {
+            self.focus = Focus::Local;
+            self.ui.error = None;
+        }
+    }
+
+    fn load_local_dir(&mut self) -> Result<(), String> {
+        let cwd = self.local_nav.cwd.clone();
+        debug!("load_local_dir: cwd={:?}", cwd);
+        let mut entries = browse::local_dir(&cwd)?;
+        //AI=== 已打开包即使被自身 .lock 占用也显示标记 / mark the open pack even when its own .lock blocks a probe
+        if let Some(pack_path) = self.pack_path.as_ref() {
+            let version = self.pack_format_version.unwrap_or(0);
+            for entry in &mut entries {
+                if entry.is_dir {
+                    continue;
+                }
+                let same = entry.path == *pack_path
+                    || fs::canonicalize(&entry.path)
+                        .ok()
+                        .as_ref()
+                        .is_some_and(|path| path == pack_path);
+                if same {
+                    entry.pack_version = Some(version);
+                }
+            }
+        }
+        //AI_END===
+        let at_root = cwd.parent().is_none();
+        self.local_nav.entries = if at_root {
+            entries
+        } else {
+            browse::with_parent(entries, cwd.parent().unwrap_or(&cwd).to_path_buf())
+        };
+        self.local_nav.selected = 0;
+        self.local_nav.offset = 0;
+        Self::clamp_nav_offset(&mut self.local_nav);
+        self.ui.error = None;
+        Ok(())
+    }
+
+    fn load_pack_dir(&mut self) -> Result<(), String> {
+        let Some(pack) = self.pack.as_mut() else {
+            self.nav.entries.clear();
+            return Ok(());
+        };
+        let cwd = self.nav.cwd.clone();
+        debug!("load_pack_dir: cwd={:?}", cwd);
+        let entries = browse::pack_dir(pack, &cwd)?;
+        let at_root = cwd.as_os_str().is_empty();
+        self.nav.entries = if at_root {
+            entries
+        } else {
+            browse::with_parent(entries, cwd.parent().unwrap_or(Path::new("")).to_path_buf())
+        };
+        self.nav.selected = 0;
+        self.nav.offset = 0;
+        Self::clamp_nav_offset(&mut self.nav);
+        self.ui.pack_info = browse::pack_info(pack).ok();
+        self.ui.error = None;
+        Ok(())
+    }
+
+    /// 在文件系统面板和包面板之间切换焦点 / switch focus between the local and pack panes.
+    pub(crate) fn switch_focus(&mut self) {
+        if !self.is_manager() {
+            return;
+        }
+        self.focus = match self.focus {
+            Focus::Local if self.pack.is_some() => Focus::Pack,
+            Focus::Pack => Focus::Local,
+            Focus::Local => Focus::Local,
+        };
+    }
+
+    /// 重新读取活动面板的当前目录并回到首行 / reload the active pane's current directory and reset to the first row.
     pub(crate) fn load_current_dir(&mut self) -> Result<(), String> {
+        if self.is_manager() {
+            return match self.focus {
+                Focus::Local => self.load_local_dir(),
+                Focus::Pack => self.load_pack_dir(),
+            };
+        }
+
         debug!(
             "load_current_dir: mode={:?}, cwd={:?}, pack_open={}",
-            self.mode,
-            self.cwd,
+            self.ui.mode,
+            self.nav.cwd,
             self.pack.is_some()
         );
-        let entries = if self.mode == Mode::Pack {
-            if self.cwd.is_file() {
-                browse::local_file(&self.cwd).map(|entry| vec![entry])
+        let entries = if self.ui.mode == Mode::Pack {
+            if self.nav.cwd.is_file() {
+                browse::local_file(&self.nav.cwd).map(|entry| vec![entry])
             } else {
-                browse::local_dir(&self.cwd)
+                browse::local_dir(&self.nav.cwd)
             }
         } else if let Some(pack) = self.pack.as_mut() {
-            browse::pack_dir(pack, &self.cwd)
+            browse::pack_dir(pack, &self.nav.cwd)
         } else {
             Err("包未打开 / pack is not open".to_string())
         };
@@ -329,64 +563,83 @@ impl App {
         let entries = entries?;
         debug!(
             "load_current_dir: {:?} -> {} entries",
-            self.cwd,
+            self.nav.cwd,
             entries.len()
         );
         let at_root = self.is_at_root();
-        self.entries = if at_root {
+        self.nav.entries = if at_root {
             entries
         } else {
             browse::with_parent(entries, self.parent_path())
         };
-        self.selected = 0;
-        self.offset = 0;
+        self.nav.selected = 0;
+        self.nav.offset = 0;
         self.clamp_offset();
-        self.error = None;
+        self.ui.error = None;
         Ok(())
     }
 
     fn reload(&mut self) {
         if let Err(e) = self.load_current_dir() {
             warn!("load directory failed: {e}");
-            self.entries.clear();
-            self.error = Some(e);
+            self.active_nav_mut().entries.clear();
+            self.ui.error = Some(e);
         }
     }
 
     pub(crate) fn is_at_root(&self) -> bool {
-        match self.mode {
+        match self.ui.mode {
+            Mode::Manager if self.focus == Focus::Local => self.local_nav.cwd.parent().is_none(),
             Mode::Pack => self
+                .nav
                 .local_root
                 .as_ref()
-                .is_none_or(|root| self.cwd == *root),
-            _ => self.cwd.as_os_str().is_empty(),
+                .is_none_or(|root| self.nav.cwd == *root),
+            _ => self.nav.cwd.as_os_str().is_empty(),
         }
     }
 
     fn parent_path(&self) -> PathBuf {
-        match self.mode {
+        match self.ui.mode {
+            Mode::Manager if self.focus == Focus::Local => self
+                .local_nav
+                .cwd
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.local_nav.cwd.clone()),
             Mode::Pack => {
-                let root = self.local_root.as_deref().unwrap_or(Path::new(""));
-                let parent = self.cwd.parent().unwrap_or(root);
+                let root = self.nav.local_root.as_deref().unwrap_or(Path::new(""));
+                let parent = self.nav.cwd.parent().unwrap_or(root);
                 if parent.starts_with(root) {
                     parent.to_path_buf()
                 } else {
                     root.to_path_buf()
                 }
             }
-            _ => self.cwd.parent().map(Path::to_path_buf).unwrap_or_default(),
+            _ => self
+                .nav
+                .cwd
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
         }
     }
 
     /// 当前目录的显示文本 / display text for the current directory.
     pub(crate) fn display_cwd(&self) -> String {
-        let relative = if self.mode == Mode::Pack {
-            self.local_root
+        //AI=== Manager 左侧显示真实路径 / manager's left pane shows the real path
+        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+            return self.local_nav.cwd.display().to_string();
+        }
+        //AI_END===
+        let relative = if self.ui.mode == Mode::Pack {
+            self.nav
+                .local_root
                 .as_deref()
-                .and_then(|root| self.cwd.strip_prefix(root).ok())
-                .unwrap_or(&self.cwd)
+                .and_then(|root| self.nav.cwd.strip_prefix(root).ok())
+                .unwrap_or(&self.nav.cwd)
         } else {
-            &self.cwd
+            &self.nav.cwd
         };
         if relative.as_os_str().is_empty() {
             "/".to_string()
@@ -405,22 +658,42 @@ impl App {
     }
 
     pub(crate) fn enter(&mut self) {
-        let Some(entry) = self.entries.get(self.selected) else {
+        let Some(entry) = self
+            .active_nav()
+            .entries
+            .get(self.active_nav().selected)
+            .cloned()
+        else {
             debug!("enter ignored: no selected entry");
             return;
         };
         debug!(
-            "enter: selected={}, name={}, path={:?}, is_dir={}, synthetic={}",
-            self.selected, entry.name, entry.path, entry.is_dir, entry.synthetic
+            "enter: selected={}, name={}, path={:?}, is_dir={}, synthetic={}, pack={:?}",
+            self.active_nav().selected,
+            entry.name,
+            entry.path,
+            entry.is_dir,
+            entry.synthetic,
+            entry.pack_version
         );
         if entry.synthetic {
             self.back();
             return;
         }
         if !entry.is_dir {
+            //AI=== Manager：本地文件按包格式探测结果决定是否打开 / manager: open local files only when probed as a pack
+            if self.is_manager()
+                && self.focus == Focus::Local
+                && entry.pack_version.is_some()
+                && let Err(err) = self.open_pack(&entry.path)
+            {
+                warn!("open pack failed: {err}");
+                self.ui.error = Some(err);
+            }
+            //AI_END===
             return;
         }
-        self.cwd = entry.path.clone();
+        self.active_nav_mut().cwd = entry.path;
         self.reload();
     }
 
@@ -430,97 +703,190 @@ impl App {
             return;
         }
         let parent = self.parent_path();
-        debug!("back: {:?} -> {:?}", self.cwd, parent);
-        self.cwd = parent;
+        debug!("back: -> {:?}", parent);
+        self.active_nav_mut().cwd = parent;
         self.reload();
     }
 
     pub(crate) fn scroll(&mut self, delta: isize) {
         let max = self.max_offset() as isize;
-        self.offset = (self.offset as isize + delta).clamp(0, max) as usize;
+        let nav = self.active_nav_mut();
+        nav.offset = (nav.offset as isize + delta).clamp(0, max) as usize;
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize) {
-        if self.entries.is_empty() {
+        let nav = self.active_nav_mut();
+        if nav.entries.is_empty() {
             return;
         }
-        let max = self.entries.len().saturating_sub(1) as isize;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-        self.reveal_selected();
+        let max = nav.entries.len().saturating_sub(1) as isize;
+        nav.selected = (nav.selected as isize + delta).clamp(0, max) as usize;
+        Self::reveal_nav_selected(nav);
     }
 
     pub(crate) fn page_selection(&mut self, pages: isize) {
-        let step = self.height.max(1) as isize;
+        let step = self.active_nav().height.max(1) as isize;
         self.move_selection(pages * step);
     }
 
     pub(crate) fn select_first(&mut self) {
-        self.selected = 0;
-        self.offset = 0;
+        let nav = self.active_nav_mut();
+        nav.selected = 0;
+        nav.offset = 0;
     }
 
     pub(crate) fn select_last(&mut self) {
-        self.selected = self.entries.len().saturating_sub(1);
-        self.offset = self.max_offset();
+        let nav = self.active_nav_mut();
+        nav.selected = nav.entries.len().saturating_sub(1);
+        nav.offset = Self::nav_max_offset(nav);
     }
 
     pub(crate) fn select_index(&mut self, index: usize) {
-        if index < self.entries.len() {
-            self.selected = index;
-            self.reveal_selected();
+        let nav = self.active_nav_mut();
+        if index < nav.entries.len() {
+            nav.selected = index;
+            Self::reveal_nav_selected(nav);
         }
     }
 
-    fn reveal_selected(&mut self) {
-        let height = self.height.max(1);
-        if self.selected < self.offset {
-            self.offset = self.selected;
-        } else if self.selected >= self.offset.saturating_add(height) {
-            self.offset = self.selected + 1 - height;
+    fn reveal_nav_selected(nav: &mut Nav) {
+        let height = nav.height.max(1);
+        if nav.selected < nav.offset {
+            nav.offset = nav.selected;
+        } else if nav.selected >= nav.offset.saturating_add(height) {
+            nav.offset = nav.selected + 1 - height;
         }
-        self.clamp_offset();
     }
 
     pub(crate) fn max_offset(&self) -> usize {
-        self.entries.len().saturating_sub(self.height.max(1))
+        Self::nav_max_offset(self.active_nav())
+    }
+
+    fn nav_max_offset(nav: &Nav) -> usize {
+        nav.entries.len().saturating_sub(nav.height.max(1))
     }
 
     fn clamp_offset(&mut self) {
-        if self.offset > self.max_offset() {
-            self.offset = self.max_offset();
+        Self::clamp_nav_offset(&mut self.nav);
+    }
+
+    fn clamp_nav_offset(nav: &mut Nav) {
+        let max = Self::nav_max_offset(nav);
+        if nav.offset > max {
+            nav.offset = max;
         }
     }
 
     pub(crate) fn list_index_at(&self, column: u16, row: u16) -> Option<usize> {
-        let area = self.list_area;
-        if !area.contains(Position::new(column, row)) {
-            return None;
-        }
-        let inner_row = row.checked_sub(area.y.saturating_add(1))?;
-        if inner_row >= area.height.saturating_sub(2) {
-            return None;
-        }
-        let index = self.offset + usize::from(inner_row);
-        (index < self.entries.len()).then_some(index)
+        let nav = self.active_nav();
+        list_index_at(nav.list_area, nav.offset, nav.entries.len(), column, row)
     }
 
     pub(crate) fn selected_entry(&self) -> Option<&Entry> {
-        self.entries.get(self.selected)
+        let nav = self.active_nav();
+        nav.entries.get(nav.selected)
     }
 
     pub(crate) fn selected_size(&self) -> u64 {
         self.selected_entry().map(|e| e.size).unwrap_or(0)
     }
 
+    /// 把当前焦点条目复制到另一面板 / copy the focused entry to the other pane.
+    pub(crate) fn copy_to_other_pane(&mut self) {
+        self.transfer_to_other_pane(false);
+    }
+
+    /// 把当前焦点条目移动到另一面板 / move the focused entry to the other pane.
+    pub(crate) fn move_to_other_pane(&mut self) {
+        self.transfer_to_other_pane(true);
+    }
+
+    fn transfer_to_other_pane(&mut self, move_entry: bool) {
+        // shortcut: 单文件/目录同步执行；超大目录会阻塞 UI，后续改为后台 JobSpec::Transfer。
+        // shortcut: a single file/directory is transferred synchronously; very large directories
+        // block the UI. Move this to a background JobSpec::Transfer later.
+        if !self.is_manager() || self.jobs.running {
+            return;
+        }
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.synthetic {
+            return;
+        }
+        let source_local = self.focus == Focus::Local;
+        let Some(mut pack) = self.pack.clone() else {
+            self.ui.error = Some("没有打开包，无法跨面板复制/移动 / no pack is open".to_string());
+            return;
+        };
+        let dest_root = if source_local {
+            self.nav.cwd.clone()
+        } else {
+            self.local_nav.cwd.clone()
+        };
+        let dest = dest_root.join(&entry.name);
+        let dest_exists = if source_local {
+            pack.path_exists(&dest).unwrap_or(false)
+        } else {
+            fs::symlink_metadata(&dest).is_ok()
+        };
+        if dest_exists {
+            self.ui.error = Some(format!(
+                "目标已存在 / target already exists: {}",
+                dest.display()
+            ));
+            return;
+        }
+
+        let result = if source_local {
+            copy_local_to_pack(&mut pack, &entry.path, &dest)
+        } else {
+            copy_pack_to_local(&mut pack, &entry.path, &dest)
+        };
+        if let Err(err) = result {
+            self.ui.error = Some(err);
+            return;
+        }
+
+        if move_entry {
+            let delete_result = if source_local {
+                if entry.is_dir {
+                    fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())
+                } else {
+                    fs::remove_file(&entry.path).map_err(|e| e.to_string())
+                }
+            } else if entry.is_dir {
+                pack.delete_dir_all(&entry.path).map_err(|e| e.to_string())
+            } else {
+                pack.delete_file(&entry.path).map_err(|e| e.to_string())
+            };
+            if let Err(err) = delete_result {
+                self.ui.error = Some(format!(
+                    "已复制但删除源失败 / copied but failed to delete source: {err}"
+                ));
+            }
+        }
+
+        // 两侧都刷新，避免旧列表继续显示已移动的条目 / reload both panes after a transfer
+        if let Err(err) = self.load_local_dir() {
+            self.ui.error = Some(err);
+        }
+        if self.pack.is_some()
+            && let Err(err) = self.load_pack_dir()
+        {
+            self.ui.error = Some(err);
+        }
+    }
+
     pub(crate) fn status_of(&self, entry: &Entry) -> Option<RowStatus> {
         if entry.synthetic {
             return None;
         }
-        let own = self.statuses.get(&entry.path).copied();
+        let own = self.jobs.statuses.get(&entry.path).copied();
         if !entry.is_dir {
             return own;
         }
-        let aggregate = self.dir_agg.get(&entry.path).and_then(DirAgg::status);
+        let aggregate = self.jobs.dir_agg.get(&entry.path).and_then(DirAgg::status);
         match (own, aggregate) {
             (Some(RowStatus::Failed), _) | (_, Some(RowStatus::Failed)) => Some(RowStatus::Failed),
             (Some(RowStatus::Warning), _) | (_, Some(RowStatus::Warning)) => {
@@ -539,14 +905,14 @@ impl App {
             if ancestor.as_os_str().is_empty() {
                 break;
             }
-            let Some(status) = self.dir_agg.get(ancestor).and_then(DirAgg::status) else {
+            let Some(status) = self.jobs.dir_agg.get(ancestor).and_then(DirAgg::status) else {
                 break;
             };
             if status != RowStatus::Done {
                 break;
             }
-            let known = self.dir_paths.contains(ancestor);
-            let own = self.statuses.get(ancestor).copied();
+            let known = self.jobs.dir_paths.contains(ancestor);
+            let own = self.jobs.statuses.get(ancestor).copied();
             if known && matches!(own, None | Some(RowStatus::Pending | RowStatus::Running)) {
                 self.set_status(ancestor.to_path_buf(), RowStatus::Done);
             } else if matches!(own, Some(RowStatus::Failed | RowStatus::Warning)) {
@@ -560,18 +926,20 @@ impl App {
     /// After a successful job, finish directories without child events (for example empty pack source dirs).
     fn finish_pending_dirs(&mut self) {
         let pending: Vec<PathBuf> = self
+            .jobs
             .dir_paths
             .iter()
-            .filter(|path| matches!(self.statuses.get(*path), Some(RowStatus::Pending)))
+            .filter(|path| matches!(self.jobs.statuses.get(*path), Some(RowStatus::Pending)))
             .filter(|path| {
-                self.dir_agg
+                self.jobs
+                    .dir_agg
                     .get(*path)
                     .is_none_or(|aggregate| aggregate.pending == 0 && aggregate.running == 0)
             })
             .cloned()
             .collect();
         for path in pending {
-            if matches!(self.statuses.get(&path), Some(RowStatus::Pending)) {
+            if matches!(self.jobs.statuses.get(&path), Some(RowStatus::Pending)) {
                 self.set_status(path.clone(), RowStatus::Done);
                 self.complete_ancestors(&path);
             }
@@ -582,7 +950,7 @@ impl App {
     ///
     /// Update one path's state and push the transition into every ancestor directory's counters.
     fn set_status(&mut self, path: PathBuf, status: RowStatus) {
-        let old = self.statuses.insert(path.clone(), status);
+        let old = self.jobs.statuses.insert(path.clone(), status);
         if old == Some(status) {
             return;
         }
@@ -590,7 +958,7 @@ impl App {
             if ancestor.as_os_str().is_empty() {
                 break;
             }
-            let aggregate = self.dir_agg.entry(ancestor.to_path_buf()).or_default();
+            let aggregate = self.jobs.dir_agg.entry(ancestor.to_path_buf()).or_default();
             if let Some(old) = old {
                 aggregate.remove(old);
             }
@@ -599,10 +967,10 @@ impl App {
     }
 
     pub(crate) fn push_log(&mut self, line: LogLine) {
-        if self.logs.len() >= 1000 {
-            self.logs.pop_front();
+        if self.ui.logs.len() >= 1000 {
+            self.ui.logs.pop_front();
         }
-        self.logs.push_back(line);
+        self.ui.logs.push_back(line);
     }
 
     fn task_item(&self, path: &Path, total: u64) -> TaskItem {
@@ -619,63 +987,64 @@ impl App {
     }
 
     fn task_start(&mut self, path: PathBuf, total: u64) {
-        if self.dir_paths.contains(&path)
+        if self.jobs.dir_paths.contains(&path)
             || matches!(
-                self.statuses.get(&path),
+                self.jobs.statuses.get(&path),
                 Some(RowStatus::Done | RowStatus::Failed)
             )
         {
             return;
         }
-        if let Some(task) = self.active_tasks.iter_mut().find(|task| task.path == path) {
+        if let Some(task) = self.jobs.active.iter_mut().find(|task| task.path == path) {
             task.total = total;
             task.status = RowStatus::Running;
             return;
         }
-        self.done_tasks.retain(|task| task.path != path);
-        self.active_tasks.push_front(self.task_item(&path, total));
-        self.active_tasks.truncate(TASK_ACTIVE_CAP);
+        self.jobs.done.retain(|task| task.path != path);
+        self.jobs.active.push_front(self.task_item(&path, total));
+        self.jobs.active.truncate(TASK_ACTIVE_CAP);
     }
 
     fn task_progress(&mut self, path: PathBuf, done: u64, total: u64) {
-        if self.dir_paths.contains(&path)
+        if self.jobs.dir_paths.contains(&path)
             || matches!(
-                self.statuses.get(&path),
+                self.jobs.statuses.get(&path),
                 Some(RowStatus::Done | RowStatus::Failed)
             )
         {
             return;
         }
-        if let Some(task) = self.active_tasks.iter_mut().find(|task| task.path == path) {
+        if let Some(task) = self.jobs.active.iter_mut().find(|task| task.path == path) {
             task.done = done;
             task.total = total;
             task.status = RowStatus::Running;
             return;
         }
         self.task_start(path.clone(), total);
-        if let Some(task) = self.active_tasks.iter_mut().find(|task| task.path == path) {
+        if let Some(task) = self.jobs.active.iter_mut().find(|task| task.path == path) {
             task.done = done;
             task.total = total;
         }
     }
 
     fn task_done(&mut self, path: PathBuf, status: RowStatus) {
-        if self.dir_paths.contains(&path) {
+        if self.jobs.dir_paths.contains(&path) {
             return;
         }
         let mut task = self
-            .active_tasks
+            .jobs
+            .active
             .iter()
             .position(|task| task.path == path)
-            .and_then(|index| self.active_tasks.remove(index))
+            .and_then(|index| self.jobs.active.remove(index))
             .unwrap_or_else(|| self.task_item(&path, 0));
         task.status = status;
         if status == RowStatus::Done && task.total > 0 {
             task.done = task.total;
         }
-        self.done_tasks.retain(|task| task.path != path);
-        self.done_tasks.push_front(task);
-        self.done_tasks.truncate(TASK_DONE_CAP);
+        self.jobs.done.retain(|task| task.path != path);
+        self.jobs.done.push_front(task);
+        self.jobs.done.truncate(TASK_DONE_CAP);
     }
 
     fn finish_tasks(&mut self, success: bool) {
@@ -684,36 +1053,36 @@ impl App {
         } else {
             RowStatus::Failed
         };
-        while let Some(mut task) = self.active_tasks.pop_front() {
+        while let Some(mut task) = self.jobs.active.pop_front() {
             task.status = status;
             if success && task.total > 0 {
                 task.done = task.total;
             }
-            self.done_tasks.push_front(task);
+            self.jobs.done.push_front(task);
         }
-        self.done_tasks.truncate(TASK_DONE_CAP);
+        self.jobs.done.truncate(TASK_DONE_CAP);
     }
 
     /// 合并后台任务事件 / merge a background job event.
     pub(crate) fn apply_event(&mut self, event: JobEvent) {
         match event {
             JobEvent::Dir { path } => {
-                self.dir_paths.insert(path.clone());
+                self.jobs.dir_paths.insert(path.clone());
                 if !matches!(
-                    self.statuses.get(&path),
+                    self.jobs.statuses.get(&path),
                     Some(RowStatus::Done | RowStatus::Warning | RowStatus::Failed)
                 ) {
                     self.set_status(path, RowStatus::Pending);
                 }
             }
             JobEvent::File { path, .. } => {
-                if !self.statuses.contains_key(&path) {
+                if !self.jobs.statuses.contains_key(&path) {
                     self.set_status(path, RowStatus::Pending);
                 }
             }
             JobEvent::Start { path, total } => {
                 if !matches!(
-                    self.statuses.get(&path),
+                    self.jobs.statuses.get(&path),
                     Some(RowStatus::Done | RowStatus::Failed)
                 ) {
                     self.set_status(path.clone(), RowStatus::Running);
@@ -722,7 +1091,7 @@ impl App {
             }
             JobEvent::Progress { path, done, total } => {
                 if !matches!(
-                    self.statuses.get(&path),
+                    self.jobs.statuses.get(&path),
                     Some(RowStatus::Done | RowStatus::Failed)
                 ) {
                     self.set_status(path.clone(), RowStatus::Running);
@@ -730,10 +1099,10 @@ impl App {
                 self.task_progress(path, done, total);
             }
             JobEvent::Done { path, status, .. } => {
-                let previous = self.statuses.get(&path).copied();
+                let previous = self.jobs.statuses.get(&path).copied();
                 self.set_status(path.clone(), status);
                 if previous != Some(status)
-                    && let Some(job) = self.job.as_mut()
+                    && let Some(job) = self.jobs.state.as_mut()
                 {
                     match status {
                         RowStatus::Failed => job.failed = job.failed.saturating_add(1),
@@ -752,7 +1121,7 @@ impl App {
                 files_done,
                 files_total,
             } => {
-                if let Some(job) = self.job.as_mut() {
+                if let Some(job) = self.jobs.state.as_mut() {
                     job.done = done;
                     job.total = total;
                     job.files_done = files_done;
@@ -760,9 +1129,9 @@ impl App {
                 }
             }
             JobEvent::Finished { result } => {
-                self.job_running = false;
+                self.jobs.running = false;
                 let success = result.is_ok();
-                if let Some(job) = self.job.as_mut() {
+                if let Some(job) = self.jobs.state.as_mut() {
                     job.finished = true;
                     match result {
                         Ok(summary) => {
@@ -783,366 +1152,106 @@ impl App {
                     self.finish_pending_dirs();
                 }
                 self.finish_tasks(success);
-                if self.quit_after_job {
-                    self.should_quit = true;
+                if self.ui.quit_after_job {
+                    self.ui.should_quit = true;
                 }
             }
         }
     }
 
     pub(crate) fn last_logs(&self, count: usize) -> Vec<(Option<LogLevel>, &str)> {
-        let skip = self.logs.len().saturating_sub(count);
-        self.logs
+        let skip = self.ui.logs.len().saturating_sub(count);
+        self.ui
+            .logs
             .iter()
             .skip(skip)
             .map(|line| (line.level, line.text.as_str()))
             .collect()
     }
 }
+
+//AI=== 本地文件系统与包之间的复制 / copy between the local filesystem and a pack
+fn copy_local_to_pack(pack: &mut ManagerSync, src: &Path, dst: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(src)
+        .map_err(|e| format!("读取源文件失败 / failed to stat source: {e}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "跳过符号链接 / symlink is not supported: {}",
+            src.display()
+        ));
+    }
+    if metadata.is_dir() {
+        pack.create_dir_all(&dst)
+            .map_err(|e| format!("创建包内目录失败 / failed to create pack directory: {e}"))?;
+        for entry in fs::read_dir(src).map_err(|e| format!("读取源目录失败: {e}"))? {
+            let entry = entry.map_err(|e| format!("读取源目录项失败: {e}"))?;
+            let name = entry.file_name();
+            copy_local_to_pack(pack, &entry.path(), &dst.join(name))?;
+        }
+        Ok(())
+    } else if metadata.is_file() {
+        let mut input = fs::File::open(src)
+            .map_err(|e| format!("打开源文件失败 / failed to open source: {e}"))?;
+        let mut output = pack
+            .virtual_file_options()
+            .write(true)
+            .create_new(true)
+            .alloc_size(Some(metadata.len()))
+            .open(dst)
+            .map_err(|e| format!("创建包内文件失败 / failed to create pack file: {e}"))?;
+        output
+            .set_len(metadata.len())
+            .map_err(|e| format!("设置包内文件长度失败: {e}"))?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_millis());
+        output
+            .set_modified(modified)
+            .map_err(|e| format!("设置包内文件修改时间失败: {e}"))?;
+        std::io::copy(&mut input, &mut output)
+            .map_err(|e| format!("复制到包失败 / failed to copy into pack: {e}"))?;
+        Ok(())
+    } else {
+        Err(format!(
+            "不支持的源文件类型 / unsupported source type: {}",
+            src.display()
+        ))
+    }
+}
+
+fn copy_pack_to_local(pack: &mut ManagerSync, src: &Path, dst: &Path) -> Result<(), String> {
+    let item = pack
+        .get_pack_struct_item(&src)
+        .map_err(|e| format!("读取包内条目失败 / failed to read pack entry: {e}"))?;
+    match item.item_type() {
+        water_ball_tool_lib::wb_files_pack::PackStructItemType::Dir { .. } => {
+            fs::create_dir_all(dst)
+                .map_err(|e| format!("创建本地目录失败 / failed to create local directory: {e}"))?;
+            let names = pack
+                .get_struct_item_name_list(&src)
+                .map_err(|e| format!("读取包内目录失败 / failed to read pack directory: {e}"))?;
+            for name in names {
+                copy_pack_to_local(pack, &src.join(&name), &dst.join(&name))?;
+            }
+            Ok(())
+        }
+        water_ball_tool_lib::wb_files_pack::PackStructItemType::File { .. } => {
+            let mut buf = vec![0u8; 1024 * 1024];
+            common::extract_pack_file_to_disk(pack, src, dst, &mut buf, None)
+                .map_err(|e| format!("解包到本地失败 / failed to extract: {e}"))?;
+            Ok(())
+        }
+    }
+}
 //AI_END===
 
+//AI=== 测试拆分到独立文件 / tests split into separate files
 #[cfg(test)]
-impl App {
-    /// 测试用静态状态 / static state for tests.
-    pub(super) fn preview() -> Self {
-        let mut app = Self::new(Mode::Browse);
-        app.title = "D:\\packs\\game.wbfp".to_string();
-        app.pack_info = Some(PackInfo {
-            version: 1,
-            file_count: 3,
-            dir_count: 1,
-            data_len: 13_312,
-            cow: false,
-        });
-        app.cwd = PathBuf::from("assets");
-        app.entries = vec![
-            Entry {
-                name: "..".to_string(),
-                path: PathBuf::new(),
-                is_dir: true,
-                size: 0,
-                modified: 0,
-                hash: None,
-                synthetic: true,
-            },
-            Entry {
-                name: "fonts".to_string(),
-                path: PathBuf::from("assets/fonts"),
-                is_dir: true,
-                size: 0,
-                modified: 0,
-                hash: None,
-                synthetic: false,
-            },
-            Entry {
-                name: "hero_idle.png".to_string(),
-                path: PathBuf::from("assets/hero_idle.png"),
-                is_dir: false,
-                size: 12_684,
-                modified: 1_761_000_000_000,
-                hash: Some((1, vec![0x9f, 0x2c, 0xa7, 0x1b])),
-                synthetic: false,
-            },
-        ];
-        app.statuses
-            .insert(PathBuf::from("assets/hero_idle.png"), RowStatus::Done);
-        app.selected = 2;
-        app
-    }
-
-    /// 校验任务卡片的静态状态（无输出字段）/ static verify job card (no output field).
-    pub(super) fn preview_verify() -> Self {
-        let mut app = Self::preview();
-        app.mode = Mode::Verify;
-        app.job = Some(JobState::new(Mode::Verify.label(), String::new()));
-        app.job_running = false;
-        app
-    }
-}
-
+mod browse_test;
 #[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn selection_moves_and_clamps() {
-        let mut app = App::preview();
-        app.height = 3;
-        app.move_selection(1);
-        assert_eq!(app.selected, 2);
-        app.move_selection(10);
-        assert_eq!(app.selected, 2);
-        app.select_first();
-        assert_eq!(app.selected, 0);
-        app.select_last();
-        assert_eq!(app.selected, 2);
-        assert_eq!(app.offset, 0);
-    }
-
-    #[test]
-    fn job_events_fill_row_status_and_counts() {
-        let mut app = App::preview();
-        app.job = Some(JobState::new("test", String::new()));
-        let path = PathBuf::from("assets/fonts/new.ttf");
-        app.apply_event(JobEvent::Start {
-            path: path.clone(),
-            total: 5,
-        });
-        assert_eq!(app.statuses.get(&path), Some(&RowStatus::Running));
-        app.apply_event(JobEvent::Done {
-            path: path.clone(),
-            status: RowStatus::Failed,
-        });
-        assert_eq!(app.statuses.get(&path), Some(&RowStatus::Failed));
-        assert_eq!(app.job.as_ref().map(|job| job.failed), Some(1));
-    }
-
-    #[test]
-    fn directory_status_aggregates_descendants() {
-        let mut app = App::preview();
-        let fonts = app.entries.iter().position(|entry| entry.name == "fonts");
-        let Some(fonts) = fonts else {
-            panic!("preview fixture is missing the fonts directory");
-        };
-
-        let first = PathBuf::from("assets/fonts/a.ttf");
-        app.apply_event(JobEvent::File {
-            path: first.clone(),
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Running));
-        app.apply_event(JobEvent::Done {
-            path: first,
-            status: RowStatus::Done,
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Done));
-
-        let second = PathBuf::from("assets/fonts/b.ttf");
-        app.apply_event(JobEvent::File {
-            path: second.clone(),
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Running));
-        app.apply_event(JobEvent::Done {
-            path: second,
-            status: RowStatus::Failed,
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Failed));
-    }
-
-    #[test]
-    fn pending_child_directory_keeps_parent_running() {
-        let mut app = App::preview();
-        let fonts = app.entries.iter().position(|entry| entry.name == "fonts");
-        let Some(fonts) = fonts else {
-            panic!("preview fixture is missing the fonts directory");
-        };
-        let nested = PathBuf::from("assets/fonts/nested");
-        app.apply_event(JobEvent::Dir {
-            path: nested.clone(),
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Running));
-        app.apply_event(JobEvent::Done {
-            path: nested,
-            status: RowStatus::Done,
-        });
-        assert_eq!(app.status_of(&app.entries[fonts]), Some(RowStatus::Done));
-    }
-
-    #[test]
-    fn task_list_keeps_active_files_first_and_updates_by_path() {
-        let mut app = App::preview();
-        let first = PathBuf::from("assets/fonts/a.ttf");
-        let second = PathBuf::from("assets/fonts/b.ttf");
-
-        app.apply_event(JobEvent::Start {
-            path: first.clone(),
-            total: 100,
-        });
-        app.apply_event(JobEvent::Start {
-            path: second.clone(),
-            total: 200,
-        });
-        assert_eq!(app.active_tasks.len(), 2);
-        assert_eq!(app.active_tasks[0].path, second);
-        assert_eq!(app.active_tasks[1].path, first);
-
-        app.apply_event(JobEvent::Progress {
-            path: second.clone(),
-            done: 50,
-            total: 200,
-        });
-        assert_eq!(app.active_tasks[0].done, 50);
-        assert_eq!(app.done_tasks.len(), 0);
-
-        app.apply_event(JobEvent::Done {
-            path: first,
-            status: RowStatus::Done,
-        });
-        assert_eq!(app.active_tasks.len(), 1);
-        assert_eq!(app.done_tasks.len(), 1);
-        assert_eq!(app.done_tasks[0].status, RowStatus::Done);
-    }
-
-    #[test]
-    fn task_list_skips_directories_and_finishes_active_on_job_end() {
-        let mut app = App::preview();
-        app.job = Some(JobState::new("test", String::new()));
-        let dir = PathBuf::from("assets/fonts");
-        app.apply_event(JobEvent::Dir { path: dir.clone() });
-        app.apply_event(JobEvent::Start {
-            path: dir.clone(),
-            total: 0,
-        });
-        app.apply_event(JobEvent::Done {
-            path: dir,
-            status: RowStatus::Done,
-        });
-        assert!(app.active_tasks.is_empty());
-        assert!(app.done_tasks.is_empty());
-
-        let file = PathBuf::from("assets/fonts/c.ttf");
-        app.apply_event(JobEvent::Start {
-            path: file,
-            total: 10,
-        });
-        app.apply_event(JobEvent::Finished {
-            result: Ok(Default::default()),
-        });
-        assert!(app.active_tasks.is_empty());
-        assert_eq!(app.done_tasks.len(), 1);
-        assert_eq!(app.done_tasks[0].status, RowStatus::Done);
-    }
-
-    #[test]
-    fn display_cwd_is_relative_to_local_root() {
-        let mut app = App::new(Mode::Pack);
-        app.local_root = Some(PathBuf::from("src"));
-        app.cwd = PathBuf::from("src/sub");
-        assert_eq!(app.display_cwd(), "/sub");
-        assert!(!app.is_at_root());
-        app.cwd = PathBuf::from("src");
-        assert!(app.is_at_root());
-    }
-}
+mod test;
 #[cfg(test)]
-mod browse_test {
-    use super::*;
-    use std::fs;
-
-    fn prepare(dir: &Path) {
-        if dir.exists() {
-            let _ = fs::remove_dir_all(dir);
-        }
-        fs::create_dir_all(dir).expect("创建测试目录失败 / failed to create test dir");
-    }
-
-    #[test]
-    fn browse_loads_pack_and_navigates() -> Result<(), Box<dyn std::error::Error>> {
-        let base = Path::new(
-            "temp/test/command/wbfp/tui/app/browse_test/ok/browse_loads_pack_and_navigates",
-        );
-        prepare(base);
-        let pack_path = base.join("browse.wbfp");
-
-        let src = base.join("src");
-        fs::create_dir_all(src.join("sub"))?;
-        fs::write(src.join("sub/a.txt"), b"hello")?;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        crate::command::wbfp::ops::run_pack(&src, &pack_path, true, true, 2, &tx)?;
-
-        let args = WaterBallFilePackCommand::new(WaterBallFilePackCommands::Browse(
-            WaterBallFilePackCommandsBrowse {
-                pack_path: pack_path.to_string_lossy().into_owned(),
-            },
-        ));
-        let mut app = App::from_args(args)?;
-        assert_eq!(app.entries.len(), 1);
-        assert_eq!(app.entries[0].name, "sub");
-        assert!(app.entries[0].is_dir);
-
-        // 列表操作：Enter 进入子目录，Back 返回 / list operation: Enter enters, Back returns
-        app.enter();
-        assert_eq!(app.cwd, PathBuf::from("sub"));
-        assert_eq!(app.entries.len(), 2);
-        assert_eq!(app.entries[0].name, "..");
-        assert_eq!(app.entries[1].name, "a.txt");
-        assert_eq!(app.entries[1].size, 5);
-
-        app.back();
-        assert_eq!(app.cwd, PathBuf::new());
-        assert_eq!(app.entries.len(), 1);
-        assert_eq!(app.entries[0].name, "sub");
-
-        drop(app);
-        fs::remove_dir_all(base)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod unpack_job_test {
-    use super::*;
-    use crate::command::wbfp::WaterBallFilePackCommandsUnpack;
-    use std::fs;
-
-    fn prepare(dir: &Path) {
-        if dir.exists() {
-            let _ = fs::remove_dir_all(dir);
-        }
-        fs::create_dir_all(dir).expect("创建测试目录失败 / failed to create test dir");
-    }
-    #[test]
-    fn unpack_job_shares_pack_handle() -> Result<(), Box<dyn std::error::Error>> {
-        let base = Path::new(
-            "temp/test/command/wbfp/tui/app/unpack_job_test/ok/unpack_job_shares_pack_handle",
-        );
-        prepare(base);
-        let src = base.join("src");
-        let out = base.join("out");
-        let pack = base.join("pack.wbfp");
-        fs::create_dir_all(src.join("sub"))?;
-        fs::write(src.join("a.txt"), b"hello")?;
-        fs::write(src.join("sub/b.txt"), b"world")?;
-
-        let (pack_tx, _pack_rx) = std::sync::mpsc::channel();
-        crate::command::wbfp::ops::run_pack(&src, &pack, true, true, 2, &pack_tx)?;
-
-        let args = WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
-            WaterBallFilePackCommandsUnpack::new(
-                pack.to_string_lossy().into_owned(),
-                Some(out.to_string_lossy().into_owned()),
-                false,
-                Some(2),
-            ),
-        ));
-        let mut app = App::from_args(args)?;
-        let spec = app
-            .job_spec
-            .take()
-            .ok_or_else(|| std::io::Error::other("missing unpack job"))?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let handle = crate::command::wbfp::ops::spawn(spec, tx)?;
-        for event in rx {
-            app.apply_event(event);
-        }
-        handle
-            .join()
-            .map_err(|_| std::io::Error::other("unpack job panicked"))?;
-
-        assert_eq!(fs::read(out.join("a.txt"))?, b"hello");
-        assert_eq!(fs::read(out.join("sub/b.txt"))?, b"world");
-        assert_eq!(app.job.as_ref().map(|job| job.finished), Some(true));
-        assert_eq!(
-            app.statuses.get(&PathBuf::from("a.txt")),
-            Some(&RowStatus::Done)
-        );
-        let sub = app.entries.iter().position(|entry| entry.name == "sub");
-        let Some(sub) = sub else {
-            panic!("unpacked root is missing the sub directory");
-        };
-        assert_eq!(app.status_of(&app.entries[sub]), Some(RowStatus::Done));
-
-        drop(app);
-        fs::remove_dir_all(base)?;
-        Ok(())
-    }
-}
+mod unpack_job_test;
+//AI_END===

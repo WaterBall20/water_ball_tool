@@ -160,11 +160,11 @@ impl PackIO /*核心*/ {
     /// 算法：先将暂存条目追加到空闲列表，然后整体排序（batch sort），
     /// 最后单次扫描合并相邻块。整体 O((K+M) log(K+M))，避免原插入排序的 O(K·M)。
     //垃圾回收
-    pub(crate) fn file_gc(&mut self) -> Result<()> {
+    pub(crate) fn file_gc(&mut self) {
         //第1步：将暂存列表追加到空闲列表，然后整体按位置排序
         //Step 1: Append staged GC entries to the free list, then sort by position
-        let pos_list = &mut self.empty_data_list.list_mut();
-        pos_list.extend(self.run_data.gc_data_pos_list.list_mut().drain(..));
+        let pos_list = self.empty_data_list.list_mut();
+        pos_list.append(self.run_data.gc_data_pos_list.list_mut());
         pos_list.sort_unstable_by_key(|(pos, _)| *pos);
         //清空暂存缓存（drain 已清空）
         self.run_data.gc_data_pos_list.list_mut().clear();
@@ -189,7 +189,6 @@ impl PackIO /*核心*/ {
                 i += 1;
             }
         }
-        Ok(())
     }
 
     /// 分配文件空间：优先从空闲列表复用，无可用空间时从文件末尾扩容。
@@ -300,25 +299,25 @@ impl PackIO /*核心*/ {
             let mut chain: Vec<usize> = vec![start];
             //向前延伸：找结束于 lo 的碎片
             loop {
-                if let Some(&i) = end_map.get(&lo) {
-                    if !used[i] {
-                        lo = empty_data_pos[i].0;
-                        used[i] = true;
-                        chain.push(i);
-                        continue;
-                    }
+                if let Some(&i) = end_map.get(&lo)
+                    && !used[i]
+                {
+                    lo = empty_data_pos[i].0;
+                    used[i] = true;
+                    chain.push(i);
+                    continue;
                 }
                 break;
             }
             //向后延伸：找起始于 hi 的碎片
             loop {
-                if let Some(&i) = start_map.get(&hi) {
-                    if !used[i] {
-                        hi = empty_data_pos[i].0 + empty_data_pos[i].1;
-                        used[i] = true;
-                        chain.push(i);
-                        continue;
-                    }
+                if let Some(&i) = start_map.get(&hi)
+                    && !used[i]
+                {
+                    hi = empty_data_pos[i].0 + empty_data_pos[i].1;
+                    used[i] = true;
+                    chain.push(i);
+                    continue;
                 }
                 break;
             }
@@ -365,7 +364,7 @@ impl PackIO /*核心*/ {
                 if len == 0 || chosen_idx.contains(&i) {
                     continue;
                 }
-                if best.map_or(true, |bi| len > empty_data_pos[bi].1) {
+                if best.is_none_or(|bi| len > empty_data_pos[bi].1) {
                     best = Some(i);
                 }
             }
@@ -375,7 +374,7 @@ impl PackIO /*核心*/ {
             let (pos, len) = empty_data_pos[bi];
             //与已选段相邻则合并
             let mut merged = false;
-            for c in chosen.iter_mut() {
+            for c in &mut chosen {
                 if c.0 + c.1 == pos {
                     c.1 += len;
                     merged = true;

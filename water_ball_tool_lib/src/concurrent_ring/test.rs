@@ -1253,6 +1253,64 @@ fn lock_guard_push_wakes_blocked_reader() {
     assert_eq!(expect_ok(join_ok(reader)), 7);
 }
 
+//AI=== 主动唤醒阻塞读者：返回 ReadWoken 且不消费数据 / active reader wake returns ReadWoken without consuming data
+#[test]
+fn wake_blocked_readers_returns_read_woken_without_consuming_data() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+
+    let r = ring.clone();
+    let (tx, rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        let res = r.pop_wait();
+        send_ok(&tx, ());
+        res
+    });
+    wait_readers_blocked(&ring, 1);
+
+    assert_eq!(1, ring.wake_blocked_readers());
+    recv_timeout_ok(&rx, Duration::from_secs(2));
+    let err = expect_err(join_ok(reader));
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::ReadWoken),
+        "expected ReadWoken, got {err:?}"
+    );
+
+    // 唤醒不消费数据：随后仍能正常取到 / the wake consumed nothing, so data is still available
+    assert!(ring.push(7).is_ok());
+    assert_eq!(7, expect_ok(ring.pop_wait()));
+}
+
+#[test]
+fn wake_before_pop_wait_is_not_lost() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+
+    // 先唤醒再阻塞：粘性标志必须保留 / wake first, block later: the sticky flag must survive
+    assert_eq!(0, ring.wake_blocked_readers());
+    let err = expect_err(ring.pop_wait());
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::ReadWoken),
+        "expected ReadWoken, got {err:?}"
+    );
+
+    assert!(ring.push(9).is_ok());
+    assert_eq!(9, expect_ok(ring.pop_wait()));
+}
+
+#[test]
+fn wake_with_data_prioritizes_wake_and_keeps_data() {
+    let ring = expect_ok(ConcurrentRing::<u32>::new_max_capacity(2));
+    assert!(ring.push(3).is_ok());
+
+    assert_eq!(0, ring.wake_blocked_readers());
+    let err = expect_err(ring.pop_wait());
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::ReadWoken),
+        "expected ReadWoken, got {err:?}"
+    );
+    assert_eq!(3, expect_ok(ring.pop_wait()));
+}
+//AI_END===
+
 // ==================== 毒化解毒验证 ====================
 
 #[test]
@@ -1264,9 +1322,7 @@ fn poisoned_mutex_is_recovered() {
         assert!(g.push_back(1).is_ok());
         panic!("intentional panic while holding lock");
     });
-    if t.join().is_ok() {
-        panic!("expected thread to panic");
-    }
+    assert!(t.join().is_err(), "expected thread to panic");
 
     // helper 内部 clear_poison，后续访问不应 panic。
     {
@@ -1609,7 +1665,7 @@ fn concurrent_push_to_indefinite_mode() {
     while let Some(v) = ring.pop() {
         got.push(v);
     }
-    got.sort();
+    got.sort_unstable();
     assert_eq!(got, (0..total).collect::<Vec<_>>());
 }
 
@@ -1645,7 +1701,7 @@ fn concurrent_write_to_indefinite_mode() {
     while let Some(v) = ring.pop() {
         got.push(v);
     }
-    got.sort();
+    got.sort_unstable();
     assert_eq!(got, (0..total).collect::<Vec<_>>());
 }
 
@@ -1693,7 +1749,7 @@ fn concurrent_producer_consumer_indefinite() {
         join_ok(p);
     }
     let mut got = join_ok(consumer);
-    got.sort();
+    got.sort_unstable();
     assert_eq!(got, (0..total).collect::<Vec<_>>());
 }
 
@@ -1725,7 +1781,7 @@ fn concurrent_push_wait_to_indefinite_mode() {
     while let Some(v) = ring.pop() {
         got.push(v);
     }
-    got.sort();
+    got.sort_unstable();
     assert_eq!(got, (0..total as u32).collect::<Vec<_>>());
 }
 
@@ -1745,12 +1801,10 @@ fn wait_writers_blocked<T>(ring: &ConcurrentRing<T>, expected: usize) {
         if n >= expected {
             return;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timeout: expected at least {} blocked writers, got {}",
-                expected, n
-            );
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout: expected at least {expected} blocked writers, got {n}",
+        );
         spin_loop();
     }
 }
@@ -1763,12 +1817,10 @@ fn wait_readers_blocked<T>(ring: &ConcurrentRing<T>, expected: usize) {
         if n >= expected {
             return;
         }
-        if std::time::Instant::now() >= deadline {
-            panic!(
-                "timeout: expected at least {} blocked readers, got {}",
-                expected, n
-            );
-        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timeout: expected at least {expected} blocked readers, got {n}",
+        );
         spin_loop();
     }
 }
@@ -1820,9 +1872,10 @@ fn reject_single_blocked_writer_returns_value() {
 
     let res = recv_timeout_ok(&rx, Duration::from_secs(5));
     let err = expect_err(res);
-    if !matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(Some(42))) {
-        panic!("expected WriteRejected(Some(42)), got {:?}", err);
-    }
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(Some(42))),
+        "expected WriteRejected(Some(42)), got {err:?}"
+    );
 
     join_ok(handle);
     assert!(ring.is_empty(), "ring must be empty after reject");
@@ -1850,7 +1903,7 @@ fn reject_multiple_blocked_writers_all_rejected() {
 
     wait_writers_blocked(&ring, N as usize);
     let notified = ring.reject_waiting_writers();
-    assert!(notified >= N as usize, "notified {} < {}", notified, N);
+    assert!(notified >= N as usize, "notified {notified} < {N}");
 
     let mut seen = [false; N as usize];
     for rx in &receivers {
@@ -1859,16 +1912,16 @@ fn reject_multiple_blocked_writers_all_rejected() {
         match &err.kind {
             ConcurrentRingErrorKind::WriteRejected(Some(v)) => {
                 let v = *v;
-                assert!(v >= 100 && v < 100 + N, "unexpected value {}", v);
+                assert!((100..100 + N).contains(&v), "unexpected value {v}");
                 let idx = (v - 100) as usize;
-                assert!(!seen[idx], "duplicate writer value {}", v);
+                assert!(!seen[idx], "duplicate writer value {v}");
                 seen[idx] = true;
             }
-            _ => panic!("expected WriteRejected, got {:?}", err),
+            _ => panic!("expected WriteRejected, got {err:?}"),
         }
     }
     for (i, s) in seen.iter().enumerate() {
-        assert!(*s, "writer {} never returned", i);
+        assert!(*s, "writer {i} never returned");
     }
 
     for h in handles {
@@ -1897,9 +1950,10 @@ fn reject_blocked_write_wait_returns_none() {
 
     let res = recv_timeout_ok(&rx, Duration::from_secs(5));
     let err = expect_err(res);
-    if !matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(None)) {
-        panic!("expected WriteRejected(None), got {:?}", err);
-    }
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::WriteRejected(None)),
+        "expected WriteRejected(None), got {err:?}"
+    );
 
     join_ok(handle);
     assert!(ring.is_empty());
@@ -1928,10 +1982,7 @@ fn reject_write_all_partial_returns_written_count() {
         &err.kind,
         ConcurrentRingErrorKind::WriteRejectedPartial { written: 2 }
     ) {
-        panic!(
-            "expected WriteRejectedPartial {{ written: 2 }}, got {:?}",
-            err
-        );
+        panic!("expected WriteRejectedPartial {{ written: 2 }}, got {err:?}");
     }
 
     join_ok(handle);
@@ -1962,10 +2013,7 @@ fn reject_write_all_zero_written_returns_partial_zero() {
         &err.kind,
         ConcurrentRingErrorKind::WriteRejectedPartial { written: 0 }
     ) {
-        panic!(
-            "expected WriteRejectedPartial {{ written: 0 }}, got {:?}",
-            err
-        );
+        panic!("expected WriteRejectedPartial {{ written: 0 }}, got {err:?}");
     }
 
     join_ok(handle);
@@ -1991,9 +2039,10 @@ fn reject_does_not_affect_subsequent_writers() {
     let _ = ring.reject_waiting_writers();
     let res1 = recv_timeout_ok(&rx1, Duration::from_secs(5));
     let err1 = expect_err(res1);
-    if !matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))) {
-        panic!("expected first writer rejected with 10, got {:?}", err1);
-    }
+    assert!(
+        matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))),
+        "expected first writer rejected with 10, got {err1:?}"
+    );
     join_ok(h1);
     assert!(ring.is_empty());
 
@@ -2095,9 +2144,10 @@ fn multiple_rejects_are_independent() {
     let _ = ring.reject_waiting_writers();
     let res1 = recv_timeout_ok(&rx1, Duration::from_secs(5));
     let err1 = expect_err(res1);
-    if !matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))) {
-        panic!("expected first writer rejected with 10, got {:?}", err1);
-    }
+    assert!(
+        matches!(&err1.kind, ConcurrentRingErrorKind::WriteRejected(Some(10))),
+        "expected first writer rejected with 10, got {err1:?}"
+    );
     join_ok(h1);
     assert!(ring.is_empty());
 
@@ -2113,9 +2163,10 @@ fn multiple_rejects_are_independent() {
     let _ = ring.reject_waiting_writers();
     let res2 = recv_timeout_ok(&rx2, Duration::from_secs(5));
     let err2 = expect_err(res2);
-    if !matches!(&err2.kind, ConcurrentRingErrorKind::WriteRejected(Some(20))) {
-        panic!("expected second writer rejected with 20, got {:?}", err2);
-    }
+    assert!(
+        matches!(&err2.kind, ConcurrentRingErrorKind::WriteRejected(Some(20))),
+        "expected second writer rejected with 20, got {err2:?}"
+    );
     join_ok(h2);
     assert!(ring.is_empty());
 }
@@ -2182,28 +2233,25 @@ fn reject_error_debug_display() {
         "write rejected by reject_waiting_writers",
         ConcurrentRingErrorKind::WriteRejected(Some(7)),
     );
-    let debug = format!("{:?}", e);
+    let debug = format!("{e:?}");
     assert!(
         debug.contains("WriteRejected"),
-        "debug should contain WriteRejected, got: {}",
-        debug
+        "debug should contain WriteRejected, got: {debug}"
     );
-    let display = format!("{}", e);
+    let display = format!("{e}");
     assert!(
         display.contains("rejected"),
-        "display should contain message, got: {}",
-        display
+        "display should contain message, got: {display}"
     );
 
     let e2: ConcurrentRingError<u32> = ConcurrentRingError::new(
         "write rejected by reject_waiting_writers",
         ConcurrentRingErrorKind::WriteRejectedPartial { written: 3 },
     );
-    let debug2 = format!("{:?}", e2);
+    let debug2 = format!("{e2:?}");
     assert!(
         debug2.contains("WriteRejectedPartial"),
-        "debug should contain WriteRejectedPartial, got: {}",
-        debug2
+        "debug should contain WriteRejectedPartial, got: {debug2}"
     );
 }
 
@@ -2228,9 +2276,10 @@ fn reader_thread_death_makes_blocking_writer_fail() {
     // 读端已消失：写满后阻塞写必须立即报错而不是永久阻塞
     assert!(ring.push(2).is_ok());
     let err = expect_err(ring.push_wait(3));
-    if !matches!(&err.kind, ConcurrentRingErrorKind::ReadersClosed) {
-        panic!("expected ReadersClosed, got {:?}", err);
-    }
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::ReadersClosed),
+        "expected ReadersClosed, got {err:?}"
+    );
 }
 
 #[test]
@@ -2250,9 +2299,10 @@ fn writer_thread_death_makes_blocking_reader_fail() {
 
     // 写端已消失：空环上的阻塞读必须立即报错
     let err = expect_err(ring.pop_wait());
-    if !matches!(&err.kind, ConcurrentRingErrorKind::WritersClosed) {
-        panic!("expected WritersClosed, got {:?}", err);
-    }
+    assert!(
+        matches!(&err.kind, ConcurrentRingErrorKind::WritersClosed),
+        "expected WritersClosed, got {err:?}"
+    );
 }
 
 #[test]

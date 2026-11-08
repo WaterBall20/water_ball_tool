@@ -131,6 +131,11 @@ pub(super) fn run_pack(
     }
     let pack = if pack_path.exists() {
         info!("包文件已存在，将打开并修改 / opening the existing pack");
+        if write_optimization {
+            info!(
+                "已启用写入优化，未更改的文件将跳过 / write optimization enabled, unchanged files are skipped"
+            );
+        }
         ManagerSync::options()
             .read(true)
             .write(true)
@@ -201,7 +206,8 @@ pub(super) fn run_pack(
         };
         let status = match outcome {
             CopyOutcome::Written => RowStatus::Done,
-            CopyOutcome::Unchanged => RowStatus::Warning,
+            // 未变化是正常的跳过，不是警告 / unchanged is a normal skip, not a warning
+            CopyOutcome::Unchanged => RowStatus::Done,
             CopyOutcome::Failed => RowStatus::Failed,
         };
         let _ = tx.send(JobEvent::Done {
@@ -219,7 +225,7 @@ pub(super) fn run_pack(
             files_done: u64::from(outcome.is_success()),
             bytes,
             failed: u64::from(!outcome.is_success()),
-            warnings: u64::from(outcome == CopyOutcome::Unchanged),
+            warnings: 0,
         });
     }
 
@@ -537,7 +543,8 @@ fn run_copy_worker(
         );
         let status = match outcome {
             CopyOutcome::Written => RowStatus::Done,
-            CopyOutcome::Unchanged => RowStatus::Warning,
+            // 未变化是正常的跳过，不是警告 / unchanged is a normal skip, not a warning
+            CopyOutcome::Unchanged => RowStatus::Done,
             CopyOutcome::Failed => RowStatus::Failed,
         };
         let bytes = if outcome.is_success() {
@@ -1106,48 +1113,4 @@ fn metadata_len(item: &PackStructItem) -> u64 {
 }
 
 #[cfg(test)]
-mod test {
-    use super::*;
-    use std::fs;
-
-    fn prepare(dir: &Path) {
-        if dir.exists() {
-            let _ = fs::remove_dir_all(dir);
-        }
-        fs::create_dir_all(dir).expect("创建测试目录失败 / failed to create test dir");
-    }
-
-    #[test]
-    fn tui_ops_pack_verify_unpack_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-        let base =
-            Path::new("temp/test/command/wbfp/ops/test/ok/tui_ops_pack_verify_unpack_roundtrip");
-        prepare(base);
-        let src = base.join("src");
-        fs::create_dir_all(src.join("sub"))?;
-        fs::write(src.join("a.txt"), b"hello")?;
-        fs::write(src.join("sub/b.bin"), [0u8, 1, 2, 3])?;
-
-        let pack = base.join("pack.wbfp");
-        let out = base.join("out");
-        let (tx, _rx) = mpsc::channel();
-
-        let pack_summary = run_pack(&src, &pack, true, true, 2, &tx)?;
-        assert_eq!(pack_summary.files_done, 2);
-        assert_eq!(pack_summary.failed, 0);
-
-        let verify_pack = ManagerSync::open(&pack)?;
-        let verify_summary = run_verify(verify_pack, 2, &tx)?;
-        assert_eq!(verify_summary.failed, 0);
-
-        let unpack_pack = ManagerSync::open(&pack)?;
-        let unpack_summary = run_unpack(unpack_pack, &out, false, 2, &tx)?;
-        assert_eq!(unpack_summary.files_done, 2);
-        assert_eq!(unpack_summary.failed, 0);
-
-        assert_eq!(fs::read(out.join("a.txt"))?, b"hello");
-        assert_eq!(fs::read(out.join("sub/b.bin"))?, vec![0u8, 1, 2, 3]);
-
-        fs::remove_dir_all(base)?;
-        Ok(())
-    }
-}
+mod test;

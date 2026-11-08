@@ -1,7 +1,7 @@
 use crate::wb_files_pack::error::{PackFileError, Result};
 use crate::wb_files_pack::{
     DATA_DATA_BLOCK_LEN, ManifestDataBlockTrait, OverwriteStrategy, PackFileMetadataRun,
-    PackFileMetadataType, PackStruct, PackStructItemType,
+    PackFileMetadataType, PackStruct, PackStructItem, PackStructItemType,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -103,7 +103,7 @@ impl WBFPManager {
             ));
         }
 
-        let mut item = self
+        let item = self
             .manifest
             .root_struct_mut()
             .remove_item(file_name)
@@ -111,14 +111,7 @@ impl WBFPManager {
                 r#"虚拟路径"{file_name}"的结构项不存在"#
             )))?;
 
-        if !matches!(item.item_type(), PackStructItemType::File { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(file_name.clone(), item);
-            return Err(PackFileError::Format(format!(
-                r#"虚拟路径"{file_name}"不是文件"#
-            )));
-        }
+        let mut item = self.check_root_item_is_file(file_name, item)?;
 
         self.load_metadata_to_item(&this_path, &mut item)?;
 
@@ -216,7 +209,7 @@ impl WBFPManager {
             ));
         }
 
-        let mut item = self
+        let item = self
             .manifest
             .root_struct_mut()
             .remove_item(file_name)
@@ -224,14 +217,7 @@ impl WBFPManager {
                 r#"虚拟路径"{file_name}"的结构项不存在"#
             )))?;
 
-        if !matches!(item.item_type(), PackStructItemType::File { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(file_name.clone(), item);
-            return Err(PackFileError::Format(format!(
-                r#"虚拟路径"{file_name}"不是文件"#
-            )));
-        }
+        let mut item = self.check_root_item_is_file(file_name, item)?;
 
         self.load_metadata_to_item(&this_path, &mut item)?;
 
@@ -266,6 +252,22 @@ impl WBFPManager {
         Ok(())
     }
 
+    fn check_root_item_is_file(
+        &mut self,
+        file_name: &str,
+        item: PackStructItem,
+    ) -> Result<PackStructItem> {
+        if !matches!(item.item_type(), PackStructItemType::File { .. }) {
+            self.manifest
+                .root_struct_mut()
+                .add_item(file_name.to_string(), item);
+            return Err(PackFileError::Format(format!(
+                r#"虚拟路径"{file_name}"不是文件"#
+            )));
+        }
+        Ok(item)
+    }
+
     /// 擦除根目录下的目录及其全部内容 / Erase a directory and all contents under root
     fn erase_dir_all_root(
         &mut self,
@@ -281,7 +283,7 @@ impl WBFPManager {
             ));
         }
 
-        let mut item = self
+        let item = self
             .manifest
             .root_struct_mut()
             .remove_item(dir_name)
@@ -289,14 +291,7 @@ impl WBFPManager {
                 r#"虚拟路径"{dir_name}"的结构项不存在"#
             )))?;
 
-        if !matches!(item.item_type(), PackStructItemType::Dir { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(dir_name.clone(), item);
-            return Err(PackFileError::NotADirectory(format!(
-                r#"虚拟路径"{dir_name}"是文件不是目录"#
-            )));
-        }
+        let mut item = self.check_root_item_is_dir(dir_name, item)?;
 
         let (r, _gc_list) = if let PackStructItemType::Dir {
             struct_file_pos,
@@ -332,13 +327,29 @@ impl WBFPManager {
         Ok(r)
     }
 
+    fn check_root_item_is_dir(
+        &mut self,
+        dir_name: &str,
+        item: PackStructItem,
+    ) -> Result<PackStructItem> {
+        if !matches!(item.item_type(), PackStructItemType::Dir { .. }) {
+            self.manifest
+                .root_struct_mut()
+                .add_item(dir_name.to_string(), item);
+            return Err(PackFileError::NotADirectory(format!(
+                r#"虚拟路径"{dir_name}"是文件不是目录"#
+            )));
+        }
+        Ok(item)
+    }
+
     // ==================== 嵌套路径操作 / Nested Path Operations ====================
 
     /// 在嵌套路径中删除文件 / Delete a file at a nested path
     fn delete_file_nested(&mut self, path_list: &[String]) -> Result<()> {
         let first_name = &path_list[0];
         let s_path = PathBuf::from(first_name);
-        let mut first_item = self
+        let first_item = self
             .manifest
             .root_struct_mut()
             .remove_item(first_name)
@@ -346,15 +357,7 @@ impl WBFPManager {
                 r#"虚拟路径"{first_name}"的结构项不存在"#
             )))?;
 
-        // 检查路径的第一个元素是否为目录 / Check first path component is a directory
-        if !matches!(first_item.item_type(), PackStructItemType::Dir { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(first_name.clone(), first_item);
-            return Err(PackFileError::NotADirectory(format!(
-                r#"虚拟路径"{first_name}"是文件不是目录"#
-            )));
-        }
+        let mut first_item = self.check_root_item_is_dir(first_name, first_item)?;
 
         let (r, gc_list) = {
             let PackStructItemType::Dir {
@@ -420,7 +423,7 @@ impl WBFPManager {
     fn delete_dir_all_nested(&mut self, path_list: &[String]) -> Result<DirFileAddReturn> {
         let first_name = &path_list[0];
         let s_path = PathBuf::from(first_name);
-        let mut first_item = self
+        let first_item = self
             .manifest
             .root_struct_mut()
             .remove_item(first_name)
@@ -428,14 +431,7 @@ impl WBFPManager {
                 r#"虚拟路径"{first_name}"的结构项不存在"#
             )))?;
 
-        if !matches!(first_item.item_type(), PackStructItemType::Dir { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(first_name.clone(), first_item);
-            return Err(PackFileError::NotADirectory(format!(
-                r#"虚拟路径"{first_name}"是文件不是目录"#
-            )));
-        }
+        let mut first_item = self.check_root_item_is_dir(first_name, first_item)?;
 
         let (r, gc_list) = {
             let PackStructItemType::Dir {
@@ -504,7 +500,7 @@ impl WBFPManager {
     ) -> Result<()> {
         let first_name = &path_list[0];
         let s_path = PathBuf::from(first_name);
-        let mut first_item = self
+        let first_item = self
             .manifest
             .root_struct_mut()
             .remove_item(first_name)
@@ -512,14 +508,7 @@ impl WBFPManager {
                 r#"虚拟路径"{first_name}"的结构项不存在"#
             )))?;
 
-        if !matches!(first_item.item_type(), PackStructItemType::Dir { .. }) {
-            self.manifest
-                .root_struct_mut()
-                .add_item(first_name.clone(), first_item);
-            return Err(PackFileError::NotADirectory(format!(
-                r#"虚拟路径"{first_name}"是文件不是目录"#
-            )));
-        }
+        let mut first_item = self.check_root_item_is_dir(first_name, first_item)?;
 
         let (r, gc_list) = {
             let PackStructItemType::Dir {
@@ -702,7 +691,7 @@ impl WBFPManager {
 
             let data_pos_list = match metadata.file_type() {
                 PackFileMetadataType::File { data_pos_list, .. } => data_pos_list.list().clone(),
-                _ => unreachable!(),
+                PackFileMetadataType::Dir { .. } => unreachable!(),
             };
 
             let file_len = metadata.len();
@@ -923,7 +912,7 @@ impl WBFPManager {
                         PackFileMetadataType::File { data_pos_list, .. } => {
                             data_pos_list.list().clone()
                         }
-                        _ => unreachable!(),
+                        PackFileMetadataType::Dir { .. } => unreachable!(),
                     };
 
                     total_gc.extend(data_pos_list);
@@ -989,7 +978,7 @@ impl WBFPManager {
 
             let data_pos_list = match metadata.file_type() {
                 PackFileMetadataType::File { data_pos_list, .. } => data_pos_list.list().clone(),
-                _ => unreachable!(),
+                PackFileMetadataType::Dir { .. } => unreachable!(),
             };
 
             let file_len = metadata.len();

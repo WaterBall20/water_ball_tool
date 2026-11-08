@@ -360,14 +360,21 @@ impl WBFPManager {
                                 this_path.display()
                             )))?
                         } else {
-                            self.create_or_get_handle_for_item(
+                            //AI=== 锁定直属父目录：文件分支也必须给当前目录计数加一，与解锁路径对称
+                            // Lock the immediate parent: the file branch must also bump the current directory, mirroring unlock.
+                            let (handle, new_lock) = self.create_or_get_handle_for_item(
                                 item,
                                 full_path_list,
                                 &this_path,
                                 end_pos,
                                 manager_arc,
                                 pack_io,
-                            )
+                            )?;
+                            if new_lock {
+                                pack_struct.inc_child_locked_count();
+                            }
+                            Ok((handle, new_lock))
+                            //AI_END===
                         }
                     }
                 }

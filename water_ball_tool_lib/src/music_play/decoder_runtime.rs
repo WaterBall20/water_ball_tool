@@ -206,6 +206,7 @@ impl DecoderRuntime {
         event_list: &Arc<Mutex<Vec<Box<dyn EventSink<DecoderEvent>>>>>,
         out_buf: &mut Vec<f32>,
         poisoned: &Arc<AtomicBool>,
+        time_metrics: &TimeMetrics,
     ) {
         //AI=== EOF 写入失败必须上报错误，且不再发送 Eof 成功事件；主动拒绝（停止/切曲）不算错误 / an EOF push failure must be reported and no Eof success event may be emitted; an intentional rejection (stop/track change) is not an error
         let eof_outcome = match ring_buf.push_wait(AudioData::Eof) {
@@ -226,6 +227,11 @@ impl DecoderRuntime {
         drop(session_lock);
         match eof_outcome {
             EofPushOutcome::Pushed => {
+                //AI=== 本曲解码结束，内部缓冲不再计入延迟 / decoding for this track is done, so the internal buffer no longer counts
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(0, Ordering::Relaxed);
+                //AI_END===
                 Self::emit(
                     DecoderEvent {
                         result: Ok(DecoderEventType::Eof),
@@ -234,6 +240,11 @@ impl DecoderRuntime {
                 );
             }
             EofPushOutcome::Rejected => {
+                //AI=== 会话保留，内部缓冲仍有数据 / the session is kept, so its internal buffer still holds data
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(out_buf.len() as u64, Ordering::Relaxed);
+                //AI_END===
                 // 停止/切曲中的主动拒绝：不发送 Eof 成功事件，交由循环顶部处理 stop/resetting / intentional rejection during stop/track change: no Eof success event; the loop top handles stop/resetting
                 debug!(
                     "push Eof rejected by ring (stop/reset in progress) / 写入 EOF 被环拒绝（正在停止/重置）"
@@ -242,6 +253,10 @@ impl DecoderRuntime {
             EofPushOutcome::Failed(e) => {
                 //AI=== 上报错误并丢弃残留数据，线程保持存活等待下一首 / report the error and drop stale data; the thread stays alive waiting for the next track
                 out_buf.clear();
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(0, Ordering::Relaxed);
+                //AI_END===
                 error!("push Eof failed: {e:?} / 写入 EOF 失败: {e:?}");
                 poisoned.store(true, Ordering::Release);
                 Self::emit(DecoderEvent { result: Err(e) }, event_list);
@@ -274,12 +289,25 @@ impl DecoderRuntime {
                 // 使用新方法进行交错转换 / interleave the decoded samples
                 decoded.copy_to_vec_interleaved(buf);
                 out_buf.extend_from_slice(buf);
+                //AI=== 解码器内部累积缓冲：尚未写入前效果环 / decoder-side accumulation not yet written to the pre-effect ring
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(out_buf.len() as u64, Ordering::Relaxed);
+                //AI_END===
                 if out_buf.len() < session_ref.data.ring_buf_write_len {
                     return false;
                 }
                 // 阻塞写入前释放会话锁（保持原先写入前释放 engine/data 锁的行为）/ release the session lock before the blocking write (same as releasing the engine/data locks before)
                 drop(session_lock);
                 //AI=== 写入结果需区分成功/主动拒绝/停止/真实错误；失败时清空 out_buf，不带着旧数据继续 / distinguish written/rejected/stopped/failed; clear out_buf on failure so stale data is not reused
+                //AI=== 写入前先记入排队数：效果线程可能在 push 返回前就消费，事后再加会永久多计
+                // Count the block before the push; the effect thread may consume it before push returns, so adding afterwards would overcount.
+                let queued = out_buf.len();
+                time_metrics.add_pre_effect_queue_samples(queued);
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(0, Ordering::Relaxed);
+                //AI_END===
                 match Self::write_all_to_ring_buf(
                     ring_buf,
                     stop,
@@ -292,17 +320,38 @@ impl DecoderRuntime {
                     }
                     RingWriteOutcome::Rejected => {
                         // 停止/切曲/寻道中的主动拒绝：丢弃旧数据，由循环顶部处理 stop/resetting / intentional rejection during stop/track change/seek: discard stale data; the loop top handles stop/resetting
+                        //AI=== 未进环的块从排队数中撤回 / the rejected block never entered the ring, so take it back
+                        time_metrics.take_pre_effect_queue_samples(queued);
+                        //AI_END===
                         out_buf.clear();
+                        //AI=== 数据已丢弃 / the buffered data was dropped
+                        time_metrics
+                            .decoder_buffered_samples
+                            .store(0, Ordering::Relaxed);
+                        //AI_END===
                         return false;
                     }
                     RingWriteOutcome::Stopped => {
                         // 停止事件已由 write_all_to_ring_buf 上报 / the stop event was already emitted by write_all_to_ring_buf
+                        //AI=== 未进环的块从排队数中撤回 / the rejected block never entered the ring, so take it back
+                        time_metrics.take_pre_effect_queue_samples(queued);
+                        //AI_END===
                         out_buf.clear();
+                        //AI=== 停止后不再有内部缓冲 / no internal buffer remains after stop
+                        time_metrics
+                            .decoder_buffered_samples
+                            .store(0, Ordering::Relaxed);
+                        //AI_END===
                         return true;
                     }
                     RingWriteOutcome::Failed(e) => {
                         //AI=== 上报错误、丢弃会话与残留数据，线程保持存活等待下一首 / report the error, drop the session and stale data; the thread stays alive waiting for the next track
+                        time_metrics.take_pre_effect_queue_samples(queued);
                         out_buf.clear();
+                        time_metrics
+                            .decoder_buffered_samples
+                            .store(0, Ordering::Relaxed);
+                        //AI_END===
                         session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -347,6 +396,11 @@ impl DecoderRuntime {
                 let event_error = DecoderEventError::new(message, DecoderEventErrorKind::from(e));
                 session_lock.take();
                 out_buf.clear();
+                //AI=== 致命错误后内部缓冲清空 / the internal buffer is cleared after a fatal error
+                time_metrics
+                    .decoder_buffered_samples
+                    .store(0, Ordering::Relaxed);
+                //AI_END===
                 drop(session_lock);
                 //AI=== 不可恢复：标记毒化 / unrecoverable: mark poisoned
                 poisoned.store(true, Ordering::Release);
@@ -486,6 +540,11 @@ impl DecoderRuntime {
                             if resetting.load(Ordering::Acquire) {
                                 session_lock.take();
                                 resetting.store(false, Ordering::Release);
+                                //AI=== 换曲/重置时旧曲内部缓冲不再计入 / the old track's internal buffer no longer counts on reset
+                                time_metrics
+                                    .decoder_buffered_samples
+                                    .store(0, Ordering::Relaxed);
+                                //AI_END===
                             }
                             //AI_END===
                             //AI=== 没有会话时等待 condvar；原先“engine 有、data 无”的不配对状态已不可能出现 / wait on the condvar when there is no session; the previous unpaired "engine present, data missing" state is now impossible
@@ -493,6 +552,11 @@ impl DecoderRuntime {
                                 debug!("decoder runtime thread wait start");
                                 //AI=== 等待新曲目时重置重试预算 / reset the retry budget while waiting for a new track
                                 io_retry = 0;
+                                //AI_END===
+                                //AI=== 没有会话就没有内部缓冲 / no session means no internal buffer
+                                time_metrics
+                                    .decoder_buffered_samples
+                                    .store(0, Ordering::Relaxed);
                                 //AI_END===
                                 let _unused = condvar.wait(session_lock);
                                 debug!("decoder runtime thread wait end");
@@ -521,6 +585,7 @@ impl DecoderRuntime {
                                         &event_list,
                                         &mut out_buf,
                                         &poisoned,
+                                        &time_metrics,
                                     );
                                     continue;
                                 }
@@ -673,14 +738,13 @@ impl DecoderRuntime {
             })?;
 
         let decoder_format = AudioFormat::new(channels as u16, decoder_sample_rate);
-        let ring_buf_write_len = (decoder_sample_rate / 50) as usize;
         let data = DecoderData {
             track_id,
             path_buf: path.to_path_buf(),
             decoder_format,
             format_info,
             media_info,
-            ring_buf_write_len,
+            ring_buf_write_len: 0,
         };
 
         let engine = DecoderEngine { format, decoder };
@@ -695,7 +759,21 @@ impl DecoderRuntime {
             .replace(session);
         //AI_END===
         self.effect_runtime.reset(decoder_format)?;
+        {
+            let mut d = self
+                .session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(s) = &mut *d {
+                s.data.ring_buf_write_len = self.effect_runtime.min_input_len_work();
+            }
+        }
         self.resetting.store(false, Ordering::Release);
+        //AI=== 新曲开始前内部缓冲为空 / the internal buffer is empty before the new track starts
+        self.time_metrics
+            .decoder_buffered_samples
+            .store(0, Ordering::Relaxed);
+        //AI_END===
         //AI=== 换曲成功即自动解毒：前端无需清除，避免遗忘导致下次播放被误判为毒化而提前换曲 / a successful track change clears the poison automatically, so a forgotten clear cannot make the next play command skip a track
         self.poisoned.store(false, Ordering::Release);
         //AI_END===

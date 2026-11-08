@@ -19,8 +19,11 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 ```
 
 - `wbfp` runs a TUI when stdout and stdin are terminals; `--no-tui` (or a non-TTY stdout/stdin) keeps the classic progress-bar output.
-  `wbfp browse <pack>` opens the read-only browser without starting a job. The TUI file list is preview-only during
-  pack/unpack/verify.
+  Without a subcommand it opens the file manager: local filesystem on the left, an optional pack in the middle and
+  preview on
+  the right. `wbfp <pack>` opens that pack immediately; bare `wbfp` starts with the middle pane hidden. This form is
+  TUI-only (`--no-tui` and non-TTY input are rejected). `wbfp browse <pack>` remains the read-only single-pane browser,
+  and the pack/unpack/verify subcommands keep their preview-only layout.
 
 ## Build options
 
@@ -40,9 +43,15 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 
 ## Testing conventions
 
+- **Never swallow test output**: run tests directly (`cargo test ...`) and keep the full stream visible. Do not pipe the
+  command through filters such as `Select-String`, `grep`, or `rg` that discard progress and failure details; a filtered
+  run that hangs or times out leaves no evidence. If the output is too large, redirect it to a file and inspect that
+  file instead of dropping the stream.
 - Slow tests are marked `#[ignore = "longtime"]`. Skip them with `cargo test --workspace` (skipped by default). Use
   `--include-ignored` for the full suite on main-branch CI pushes. `--workspace` is required: `water_ball_tool_lib` is
   a workspace member, so a plain `cargo test` only covers the binary crate.
+- `#[ignore = "longtime"]` is allowed **only** for tests that are guaranteed to exceed 60 seconds. Never mark a test
+  ignored because it is flaky, occasionally hangs, or is inconvenient: fix or split the test instead.
 - `ff` and the classic `wbfp` path initialize logging through `crate::multi_progress_init(module)`, so tests that call
   their handlers get a working `MultiProgress` without extra setup. The `wbfp` TUI and `mp` install the TUI channel
   writer (`tui::channel_writer::init_logging`), so tests must not call `wbfp::run`/`music_play::args` expecting a

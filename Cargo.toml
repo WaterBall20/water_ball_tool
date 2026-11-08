@@ -48,7 +48,7 @@ unicode-width = "0.2.2"
 
 [profile.release]
 debug = true
-strip = false
+strip = "none"
 lto = "fat"
 codegen-units = 4  # 与 fat LTO 搭配，规避潜在的性能回退
 

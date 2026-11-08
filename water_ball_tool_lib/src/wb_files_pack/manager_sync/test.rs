@@ -1,5 +1,9 @@
 use crate::wb_files_pack::pack_io::pack_file::PackVirtualFile;
-use crate::wb_files_pack::{OverwriteStrategy, PackFileError};
+//AI=== 移动测试需要读取目录累计值 / move tests read directory cumulative stats
+use crate::wb_files_pack::{
+    OverwriteStrategy, PackFileError, PackFileMetadataRun, PackFileMetadataType,
+};
+//AI_END===
 use crate::{tools::TestTool, wb_files_pack::manager_sync::ManagerSync};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -8,7 +12,9 @@ use std::sync::Arc;
 use std::thread;
 
 static WBFP_TEST_TEMP_OK_DIR_PATH: &str = "./temp/test/wb_files_pack/manager_sync/ok";
-static _WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wb_files_pack/manager_sync/err";
+//AI=== 重命名错误用例使用独立 err 目录 / rename error tests use the err directory
+static WBFP_TEST_TEMP_ERR_DIR_PATH: &str = "./temp/test/wb_files_pack/manager_sync/err";
+//AI_END===
 
 // === 辅助函数 / Helpers ===
 
@@ -31,6 +37,40 @@ fn setup_ok_test(name: &str) -> (PathBuf, PathBuf) {
     let pack = dir.join("pack");
     (dir, pack)
 }
+
+//AI=== 错误场景测试目录 / error-case test directory
+fn setup_err_test(name: &str) -> (PathBuf, PathBuf) {
+    let dir = PathBuf::from(WBFP_TEST_TEMP_ERR_DIR_PATH).join(name);
+    TestTool::prepare_test_dir(&dir);
+    let pack = dir.join("pack");
+    (dir, pack)
+}
+//AI_END===
+
+//AI=== 移动测试辅助函数 / move test helpers
+/// 读取目录元数据中的累计值：文件数、目录数、数据长度。
+fn dir_counts(pack: &mut ManagerSync, path: &str) -> (u64, u64, u64) {
+    let item = pack.get_pack_struct_item(&path).expect("读取目录项失败");
+    let PackFileMetadataRun::Loaded(metadata) = item.metadata() else {
+        panic!("目录元数据未加载: {path}");
+    };
+    match metadata.file_type() {
+        PackFileMetadataType::Dir {
+            file_count,
+            dir_count,
+        } => (*file_count, *dir_count, metadata.len()),
+        PackFileMetadataType::File { .. } => panic!("路径不是目录: {path}"),
+    }
+}
+
+/// 读取包内文件全部内容 / read the whole content of an in-pack file.
+fn read_pack_file(pack: &mut ManagerSync, path: &str) -> Vec<u8> {
+    let mut file = pack.open_virtual_file(&path).expect("打开虚拟文件失败");
+    let mut buf = vec![0u8; file.get_len() as usize];
+    file.read_exact(&mut buf).expect("读取虚拟文件失败");
+    buf
+}
+//AI_END===
 
 /// 创建虚拟文件（读写模式）→ 写入数据 → 回读 → 断言一致（指定长度）
 ///
@@ -1436,3 +1476,636 @@ fn reopen_after_delete() {
     }
     TestTool::cleanup_test_dir(&dir);
 }
+
+//AI=== 包内同目录重命名 / in-pack same-directory rename
+// === 重命名成功场景 / successful rename cases ===
+
+#[test]
+fn rename_file_in_root_keeps_content() {
+    let (dir, pack) = setup_ok_test("rename_file_in_root_keeps_content");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = b"hello rename".to_vec();
+        write_then_read_back(&mut alloc, "old.txt", &data);
+
+        alloc
+            .rename(&"old.txt", &"new.txt")
+            .expect("根目录文件重命名失败");
+        assert!(
+            !alloc.path_exists(&"old.txt").expect("检查旧路径失败"),
+            "重命名后旧路径不应存在"
+        );
+        assert!(
+            alloc.path_exists(&"new.txt").expect("检查新路径失败"),
+            "重命名后新路径应存在"
+        );
+
+        let mut file = alloc
+            .open_virtual_file(&"new.txt")
+            .expect("打开重命名后的文件失败");
+        let mut buf = vec![0u8; data.len()];
+        file.read_exact(&mut buf).expect("读取重命名后的文件失败");
+        assert_eq!(buf, data, "重命名不能改变文件内容");
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_file_in_nested_dir_keeps_content() {
+    let (dir, pack) = setup_ok_test("rename_file_in_nested_dir_keeps_content");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = b"nested rename".to_vec();
+        write_then_read_back(&mut alloc, "dir/old.txt", &data);
+
+        alloc
+            .rename(&"dir/old.txt", &"dir/new.txt")
+            .expect("嵌套目录文件重命名失败");
+        assert!(!alloc.path_exists(&"dir/old.txt").expect("检查旧路径失败"));
+        assert!(alloc.path_exists(&"dir/new.txt").expect("检查新路径失败"));
+
+        let mut file = alloc
+            .open_virtual_file(&"dir/new.txt")
+            .expect("打开重命名后的文件失败");
+        let mut buf = vec![0u8; data.len()];
+        file.read_exact(&mut buf).expect("读取重命名后的文件失败");
+        assert_eq!(buf, data);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_directory_keeps_subtree() {
+    let (dir, pack) = setup_ok_test("rename_directory_keeps_subtree");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![1u8, 2, 3, 4, 5];
+        write_then_read_back(&mut alloc, "dir/sub/a.txt", &data);
+
+        alloc
+            .rename(&"dir/sub", &"dir/renamed")
+            .expect("目录重命名失败");
+        assert!(!alloc.path_exists(&"dir/sub").expect("检查旧路径失败"));
+        assert!(
+            alloc
+                .path_exists(&"dir/renamed/a.txt")
+                .expect("检查子文件新路径失败")
+        );
+
+        let mut file = alloc
+            .open_virtual_file(&"dir/renamed/a.txt")
+            .expect("打开重命名目录中的文件失败");
+        let mut buf = vec![0u8; data.len()];
+        file.read_exact(&mut buf)
+            .expect("读取重命名目录中的文件失败");
+        assert_eq!(buf, data, "目录重命名不能改变子树内容");
+
+        let attribute = alloc.get_manifest_attribute().expect("读取包属性失败");
+        assert_eq!(attribute.file_count(), 1, "目录重命名不能改变文件计数");
+        assert_eq!(attribute.dir_count(), 2, "目录重命名不能改变目录计数");
+        assert_eq!(attribute.data_len(), data.len() as u64);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_same_name_is_noop() {
+    let (dir, pack) = setup_ok_test("rename_same_name_is_noop");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "same.txt", &[7, 8, 9]);
+        alloc
+            .rename(&"same.txt", &"same.txt")
+            .expect("同名重命名应为无操作");
+        assert!(alloc.path_exists(&"same.txt").expect("检查路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_persists_after_reopen() {
+    let (dir, pack) = setup_ok_test("rename_persists_after_reopen");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = b"persisted".to_vec();
+        write_then_read_back(&mut alloc, "before.txt", &data);
+        alloc
+            .rename(&"before.txt", &"after.txt")
+            .expect("重命名失败");
+    }
+    {
+        let mut alloc = ManagerSync::open(&pack).expect("重新打开包文件失败");
+        assert!(
+            !alloc.path_exists(&"before.txt").expect("检查旧路径失败"),
+            "重新打开后旧路径不应存在"
+        );
+        assert!(
+            alloc.path_exists(&"after.txt").expect("检查新路径失败"),
+            "重新打开后新路径应存在"
+        );
+        let mut file = alloc
+            .open_virtual_file(&"after.txt")
+            .expect("打开重命名后的文件失败");
+        let mut buf = vec![0u8; 9];
+        file.read_exact(&mut buf).expect("读取重命名后的文件失败");
+        assert_eq!(buf, b"persisted");
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+// === 重命名错误场景 / rename error cases ===
+
+#[test]
+fn rename_rejects_open_file_handle() {
+    let (dir, pack) = setup_err_test("rename_rejects_open_file_handle");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[4, 5, 6]);
+        let held = alloc.open_virtual_file(&"a.txt").expect("打开虚拟文件失败");
+
+        let result = alloc.rename(&"a.txt", &"b.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Lock(_))),
+            "打开文件句柄时重命名必须返回 Lock，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a.txt").expect("检查旧路径失败"));
+        assert!(!alloc.path_exists(&"b.txt").expect("检查新路径失败"));
+
+        drop(held);
+        alloc
+            .rename(&"a.txt", &"b.txt")
+            .expect("句柄关闭后重命名失败");
+        assert!(!alloc.path_exists(&"a.txt").expect("检查旧路径失败"));
+        assert!(alloc.path_exists(&"b.txt").expect("检查新路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_rejects_directory_with_open_child_handle() {
+    let (dir, pack) = setup_err_test("rename_rejects_directory_with_open_child_handle");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "dir/a.txt", &[1, 2, 3]);
+        let held = alloc
+            .open_virtual_file(&"dir/a.txt")
+            .expect("打开虚拟文件失败");
+
+        let result = alloc.rename(&"dir", &"moved");
+        assert!(
+            matches!(result, Err(PackFileError::Lock(_))),
+            "子树存在打开句柄时重命名目录必须返回 Lock，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"dir/a.txt").expect("检查旧路径失败"));
+        assert!(!alloc.path_exists(&"moved").expect("检查新路径失败"));
+
+        drop(held);
+        alloc
+            .rename(&"dir", &"moved")
+            .expect("句柄关闭后重命名失败");
+        assert!(!alloc.path_exists(&"dir").expect("检查旧路径失败"));
+        assert!(alloc.path_exists(&"moved/a.txt").expect("检查新路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_rejects_cross_directory_move() {
+    let (dir, pack) = setup_err_test("rename_rejects_cross_directory_move");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "src/a.txt", &[9, 9, 9]);
+        alloc.create_dir_all(&"dst").expect("创建目标目录失败");
+
+        let result = alloc.rename(&"src/a.txt", &"dst/a.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Other(_))),
+            "rename 不允许跨目录移动，实际: {result:?}"
+        );
+        assert!(
+            alloc.path_exists(&"src/a.txt").expect("检查源路径失败"),
+            "被拒绝的移动不能改变源路径"
+        );
+        assert!(!alloc.path_exists(&"dst/a.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_rejects_existing_target() {
+    let (dir, pack) = setup_err_test("rename_rejects_existing_target");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[1]);
+        write_then_read_back(&mut alloc, "b.txt", &[2]);
+
+        let result = alloc.rename(&"a.txt", &"b.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Other(_))),
+            "目标已存在时必须拒绝重命名，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a.txt").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"b.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_rejects_invalid_names() {
+    let (dir, pack) = setup_err_test("rename_rejects_invalid_names");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[1, 2]);
+
+        for name in ["", ".", ".."] {
+            let result = alloc.rename(&"a.txt", &name);
+            assert!(
+                matches!(result, Err(PackFileError::Format(_))),
+                "非法名称 {name:?} 必须返回 Format，实际: {result:?}"
+            );
+        }
+
+        let long_name = "x".repeat(usize::from(u16::MAX) + 1);
+        let result = alloc.rename(&"a.txt", &long_name);
+        assert!(
+            matches!(result, Err(PackFileError::Format(_))),
+            "超过 65535 字节的名称必须返回 Format，实际: {result:?}"
+        );
+        assert!(
+            alloc.path_exists(&"a.txt").expect("检查原路径失败"),
+            "失败的重命名不能改变原条目"
+        );
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn rename_read_only_manager_is_rejected() {
+    let (dir, pack) = setup_err_test("rename_read_only_manager_is_rejected");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[3]);
+    }
+    {
+        let mut alloc = ManagerSync::open(&pack).expect("以只读模式打开包失败");
+        let result = alloc.rename(&"a.txt", &"b.txt");
+        assert!(
+            matches!(result, Err(PackFileError::PermissionDenied(_))),
+            "只读模式重命名必须返回 PermissionDenied，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a.txt").expect("检查原路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+//AI_END===
+
+//AI=== 包内跨目录移动 / in-pack cross-directory move
+// === 移动成功场景 / successful move cases ===
+
+#[test]
+fn move_file_across_dirs_keeps_content() {
+    let (dir, pack) = setup_ok_test("move_file_across_dirs_keeps_content");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![1u8, 2, 3, 4];
+        write_then_read_back(&mut alloc, "src/a.txt", &data);
+        alloc.create_dir_all(&"dst").expect("创建目标目录失败");
+
+        alloc
+            .move_entry(&"src/a.txt", &"dst/renamed.txt")
+            .expect("跨目录移动 + 改名失败");
+        assert!(
+            !alloc.path_exists(&"src/a.txt").expect("检查源路径失败"),
+            "移动后源路径不应存在"
+        );
+        assert!(
+            alloc
+                .path_exists(&"dst/renamed.txt")
+                .expect("检查目标路径失败"),
+            "移动后目标路径应存在"
+        );
+        assert_eq!(
+            read_pack_file(&mut alloc, "dst/renamed.txt"),
+            data,
+            "移动 + 改名不能改变文件内容"
+        );
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_file_updates_directory_counts() {
+    let (dir, pack) = setup_ok_test("move_file_updates_directory_counts");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![1u8, 2, 3, 4];
+        write_then_read_back(&mut alloc, "src/a.txt", &data);
+        alloc.create_dir_all(&"dst").expect("创建目标目录失败");
+
+        alloc
+            .move_entry(&"src/a.txt", &"dst/a.txt")
+            .expect("跨目录移动失败");
+        assert_eq!(dir_counts(&mut alloc, "src"), (0, 0, 0));
+        assert_eq!(dir_counts(&mut alloc, "dst"), (1, 0, data.len() as u64));
+
+        let attribute = alloc.get_manifest_attribute().expect("读取包属性失败");
+        assert_eq!(attribute.file_count(), 1);
+        assert_eq!(attribute.dir_count(), 2);
+        assert_eq!(attribute.data_len(), data.len() as u64);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_directory_keeps_subtree() {
+    let (dir, pack) = setup_ok_test("move_directory_keeps_subtree");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![9u8, 8, 7];
+        write_then_read_back(&mut alloc, "a/b/file.txt", &data);
+        alloc.create_dir_all(&"c").expect("创建目标目录失败");
+
+        alloc.move_entry(&"a/b", &"c/d").expect("移动目录失败");
+        assert!(
+            !alloc.path_exists(&"a/b").expect("检查源路径失败"),
+            "移动后源目录不应存在"
+        );
+        assert!(
+            alloc
+                .path_exists(&"c/d/file.txt")
+                .expect("检查目标子文件失败"),
+            "移动后目标目录应保留子树"
+        );
+        assert_eq!(read_pack_file(&mut alloc, "c/d/file.txt"), data);
+
+        assert_eq!(dir_counts(&mut alloc, "a"), (0, 0, 0));
+        assert_eq!(dir_counts(&mut alloc, "c"), (1, 1, data.len() as u64));
+        assert_eq!(dir_counts(&mut alloc, "c/d"), (1, 0, data.len() as u64));
+        let attribute = alloc.get_manifest_attribute().expect("读取包属性失败");
+        assert_eq!(attribute.file_count(), 1);
+        assert_eq!(attribute.dir_count(), 3);
+        assert_eq!(attribute.data_len(), data.len() as u64);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_directory_up_to_ancestor() {
+    let (dir, pack) = setup_ok_test("move_directory_up_to_ancestor");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![1u8, 2];
+        write_then_read_back(&mut alloc, "a/b/c/file.txt", &data);
+
+        alloc
+            .move_entry(&"a/b/c", &"a/d")
+            .expect("向上移动目录失败");
+        assert!(
+            !alloc.path_exists(&"a/b/c").expect("检查源路径失败"),
+            "移动后源目录不应存在"
+        );
+        assert!(
+            alloc
+                .path_exists(&"a/d/file.txt")
+                .expect("检查目标子文件失败")
+        );
+        assert_eq!(read_pack_file(&mut alloc, "a/d/file.txt"), data);
+
+        assert_eq!(dir_counts(&mut alloc, "a"), (1, 2, data.len() as u64));
+        assert_eq!(dir_counts(&mut alloc, "a/b"), (0, 0, 0));
+        assert_eq!(dir_counts(&mut alloc, "a/d"), (1, 0, data.len() as u64));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_file_from_root_to_nested() {
+    let (dir, pack) = setup_ok_test("move_file_from_root_to_nested");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![4u8];
+        write_then_read_back(&mut alloc, "x.txt", &data);
+        alloc.create_dir_all(&"dst").expect("创建目标目录失败");
+
+        alloc
+            .move_entry(&"x.txt", &"dst/x.txt")
+            .expect("从根目录移入子目录失败");
+        assert!(!alloc.path_exists(&"x.txt").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"dst/x.txt").expect("检查目标路径失败"));
+        assert_eq!(read_pack_file(&mut alloc, "dst/x.txt"), data);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_file_to_root() {
+    let (dir, pack) = setup_ok_test("move_file_to_root");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![5u8];
+        write_then_read_back(&mut alloc, "src/x.txt", &data);
+
+        alloc
+            .move_entry(&"src/x.txt", &"x.txt")
+            .expect("从子目录移动到根目录失败");
+        assert!(!alloc.path_exists(&"src/x.txt").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"x.txt").expect("检查目标路径失败"));
+        assert_eq!(read_pack_file(&mut alloc, "x.txt"), data);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_persists_after_reopen() {
+    let (dir, pack) = setup_ok_test("move_persists_after_reopen");
+    {
+        let mut alloc = create_new_rw(&pack);
+        let data = vec![6u8, 7];
+        write_then_read_back(&mut alloc, "a/x.txt", &data);
+        alloc.create_dir_all(&"b").expect("创建目标目录失败");
+        alloc.move_entry(&"a/x.txt", &"b/y.txt").expect("移动失败");
+    }
+    {
+        let mut alloc = ManagerSync::open(&pack).expect("重新打开包文件失败");
+        assert!(
+            !alloc.path_exists(&"a/x.txt").expect("检查源路径失败"),
+            "重新打开后源路径不应存在"
+        );
+        assert!(
+            alloc.path_exists(&"b/y.txt").expect("检查目标路径失败"),
+            "重新打开后目标路径应存在"
+        );
+        assert_eq!(read_pack_file(&mut alloc, "b/y.txt"), vec![6u8, 7]);
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+// === 移动错误场景 / move error cases ===
+
+#[test]
+fn move_rejects_same_directory() {
+    let (dir, pack) = setup_err_test("move_rejects_same_directory");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/x.txt", &[1]);
+
+        let result = alloc.move_entry(&"a/x.txt", &"a/y.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Other(_))),
+            "同目录改名必须由 rename 处理，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+        assert!(!alloc.path_exists(&"a/y.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_rejects_directory_into_itself() {
+    let (dir, pack) = setup_err_test("move_rejects_directory_into_itself");
+    {
+        let mut alloc = create_new_rw(&pack);
+        alloc.create_dir_all(&"a/b").expect("创建目录失败");
+
+        let result = alloc.move_entry(&"a", &"a/b/c");
+        assert!(
+            matches!(result, Err(PackFileError::Other(_))),
+            "目录不能移动到自己的子树，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/b").expect("检查原目录失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_rejects_missing_destination_parent() {
+    let (dir, pack) = setup_err_test("move_rejects_missing_destination_parent");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/x.txt", &[2]);
+
+        let result = alloc.move_entry(&"a/x.txt", &"missing/y.txt");
+        assert!(
+            matches!(result, Err(PackFileError::NotFound(_))),
+            "目标父目录不存在必须返回 NotFound，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_rejects_existing_target() {
+    let (dir, pack) = setup_err_test("move_rejects_existing_target");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/x.txt", &[3]);
+        write_then_read_back(&mut alloc, "b/x.txt", &[4]);
+
+        let result = alloc.move_entry(&"a/x.txt", &"b/x.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Other(_))),
+            "目标已存在时必须拒绝移动，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"b/x.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_rejects_open_file_handle() {
+    let (dir, pack) = setup_err_test("move_rejects_open_file_handle");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/x.txt", &[5]);
+        alloc.create_dir_all(&"b").expect("创建目标目录失败");
+        let held = alloc
+            .open_virtual_file(&"a/x.txt")
+            .expect("打开虚拟文件失败");
+
+        let result = alloc.move_entry(&"a/x.txt", &"b/x.txt");
+        assert!(
+            matches!(result, Err(PackFileError::Lock(_))),
+            "打开文件句柄时移动必须返回 Lock，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+        assert!(!alloc.path_exists(&"b/x.txt").expect("检查目标路径失败"));
+
+        drop(held);
+        alloc
+            .move_entry(&"a/x.txt", &"b/x.txt")
+            .expect("句柄关闭后移动失败");
+        assert!(!alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"b/x.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_rejects_directory_with_open_child_handle() {
+    let (dir, pack) = setup_err_test("move_rejects_directory_with_open_child_handle");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/dir/x.txt", &[6]);
+        alloc.create_dir_all(&"b").expect("创建目标目录失败");
+        let held = alloc
+            .open_virtual_file(&"a/dir/x.txt")
+            .expect("打开虚拟文件失败");
+
+        let result = alloc.move_entry(&"a/dir", &"b/dir");
+        assert!(
+            matches!(result, Err(PackFileError::Lock(_))),
+            "子树存在打开句柄时移动目录必须返回 Lock，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/dir/x.txt").expect("检查源路径失败"));
+        assert!(!alloc.path_exists(&"b/dir").expect("检查目标路径失败"));
+
+        drop(held);
+        alloc
+            .move_entry(&"a/dir", &"b/dir")
+            .expect("句柄关闭后移动失败");
+        assert!(!alloc.path_exists(&"a/dir").expect("检查源路径失败"));
+        assert!(alloc.path_exists(&"b/dir/x.txt").expect("检查目标路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn move_read_only_manager_is_rejected() {
+    let (dir, pack) = setup_err_test("move_read_only_manager_is_rejected");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a/x.txt", &[7]);
+        alloc.create_dir_all(&"b").expect("创建目标目录失败");
+    }
+    {
+        let mut alloc = ManagerSync::open(&pack).expect("以只读模式打开包失败");
+        let result = alloc.move_entry(&"a/x.txt", &"b/x.txt");
+        assert!(
+            matches!(result, Err(PackFileError::PermissionDenied(_))),
+            "只读模式移动必须返回 PermissionDenied，实际: {result:?}"
+        );
+        assert!(alloc.path_exists(&"a/x.txt").expect("检查源路径失败"));
+    }
+    TestTool::cleanup_test_dir(&dir);
+}
+//AI_END===
+
+//AI=== 包探测不获取 .lock / pack probe without .lock
+#[test]
+fn probe_pack_reads_header_without_lock() -> Result<(), Box<dyn std::error::Error>> {
+    let (dir, pack) = setup_ok_test("probe_pack_reads_header_without_lock");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[1, 2, 3]);
+    }
+    let probe = crate::wb_files_pack::probe_pack(&pack)?.expect("pack header should match");
+    assert_eq!(probe.format_version, 2);
+    let invalid = dir.join("not-a-pack.txt");
+    fs::write(&invalid, b"not a pack")?;
+    assert!(crate::wb_files_pack::probe_pack(&invalid)?.is_none());
+    TestTool::cleanup_test_dir(&dir);
+    Ok(())
+}
+//AI_END===

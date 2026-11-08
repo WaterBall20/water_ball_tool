@@ -11,16 +11,22 @@
   `--no-tui` keeps the classic indicatif output; a non-TTY stdout falls back automatically.
 - Added `wbfp browse <pack>` (alias `b`) for read-only browsing without starting a job. Directories load lazily through
   `ManagerSync`; pack mode browses the local source tree.
+- `wbfp <pack>` without a subcommand now opens the file manager; the pack path is optional and this form is TUI-only:
+  `--no-tui` and non-TTY input are rejected. The later entry below describes the manager layout.
 - The TUI uses its own job thread and `JobEvent` channel; the UI opens a second read-only `ManagerSync` handle so manifest
   reads do not contend with pack/unpack/verify file handles. `q` during a job quits after it finishes.
 - `wbfp.rs` was split into `classic.rs` (unchanged progress-bar path), `common.rs` (shared path/copy/extract),
   `events.rs`, `ops.rs` and `tui/` (state, rendering, lazy directory loading).
-- The log and help popups now toggle closed with the same key that opened them (`d`/F12, `?`); `Esc` closes both.
+- The debug (log) and help popups are mutually exclusive and toggle closed with the same key that opened them (`F12`,
+  `?`); `Esc` closes the open window. `d` no longer opens the debug popup.
 - Directory rows aggregate descendant states, so a parent stays `⟳` until every child is finished and turns red/yellow if a
   child failed/was skipped. Hash verify's task card no longer shows an output field.
-- Windows TUI input is keyboard-only: crossterm splits SGR mouse reports into literal keys and floods the event loop.
-  Startup now clears stale mouse reporting; non-Windows platforms keep mouse select/double-click/wheel. TUI diagnostics
-  (route, keys, directory loads, job start/finish, per-GiB progress) are written to the debug log under `temp/logs/wbfp/`.
+- `mp` and `wbfp` now share `command/tui_input.rs`: mouse capture, the Windows VT report parser, raw stdin reader,
+  double-click state, bordered-list hit-testing and the wheel step. `wbfp` therefore supports mouse input on Windows
+  instead of starting keyboard-only; if capture fails it continues keyboard-only. Under VT input both TUIs read raw
+  stdin bytes, fixing the main view not receiving keys when crossterm 0.29 drops control characters. TUI diagnostics
+  (route, keys, directory loads, job start/finish, per-GiB progress) are written to the debug log under
+  `temp/logs/wbfp/`.
 - Pack no longer emits directory events, so an empty source directory no longer shows a permanent in-progress icon.
 - The preview pane now shows a live task list during jobs: active files first with per-file progress, completed files
   below. Worker threads enqueue rate-limited progress on a non-blocking channel; the UI keeps bounded queues and never
@@ -28,6 +34,30 @@
 - File-list and task-list columns use fixed display widths (`unicode-width`), a fixed progress bar/percent/size column,
   and a fixed-height job summary, so fast small files no longer make the layout jump. Sizes now use separate right-aligned
   number and fixed-width unit columns, so the one-cell `B` unit cannot shift the number.
+- The job card and per-file task bars now share `mp`'s eighth-block bar (`█▉▊▋▌▍▎▏`), resolving progress to 1/8 of a
+  cell; the classic indicatif bars use the same character set.
+- Write-optimization skips (same size and mtime) now report `Done` instead of a warning, and pack summaries no longer
+  count them as warnings. The TUI also logs the write-optimization notice when opening an existing pack, matching the
+  classic path. The job-card progress bar now keeps a full-width bar with its label on the next row, so the centered
+  label no longer leaves a text-shaped hole in the bar.
+- Without a subcommand, `wbfp` is now a file manager with local filesystem on the left, an optional pack in the middle,
+  and preview on the right. The pack path is optional; bare `wbfp` hides the middle pane. The preview folds first, then
+  the local pane; the pack pane stays. `Tab` switches panes, `Enter` opens a probed local pack, `Ctrl+W` closes it,
+  `c`/`m` copy/move the selected entry to the other pane. `browse`, pack, unpack and verify keep their old layout.
+- Local files are probed by the WBFilesPack header (not extension); valid packs show a magenta `◆`. The new
+  `probe_pack` reads only the header and does not acquire `.lock`.
+
+### WBFP Library
+
+- Added `ManagerSync::rename(from, to)` for in-pack, same-directory leaf renames. It rewrites only the containing
+  `PackStruct` block — data blocks, metadata positions and hashes are untouched — and rejects cross-directory moves;
+  relocation will use a separate move API. The call returns `PackFileError::Lock` while the file or any descendant of
+  a directory has an open virtual-file handle. Also fixed `child_locked_count` not counting the immediate parent
+  directory when a directly contained file was opened.
+- Added `ManagerSync::move_entry(from, to)` for cross-directory relocation with an optional leaf rename. The
+  destination parent must already exist, same-directory calls are rejected (use `rename`), and missing/existing
+  targets, moves into a directory's own subtree, open handles and read-only managers are rejected. It updates the
+  cumulative counts on both ancestor chains and writes the destination `PackStruct` before the source one.
 
 ### Music Player TUI
 
@@ -46,12 +76,60 @@
 - Startup initialization is mode-aware: sequential modes load the first track immediately; `shuffle` and
   `periodic-shuffle` wait for 5 tracks and fall back to initializing with the available tracks when the scan ends early.
   Manual `n`/play before that point cancels the automatic initialization.
-- `d`/F12 toggles a debug popup with the pre-effect/audio buffer lengths, the path and format currently being decoded,
-  playlist state, `lock_fail`/`underrun` counters and the `TimeMetrics` windows for decode, effect and callback stages.
-  `DecoderRuntime::decoder_path()` was added to expose the decoding path.
+- `F12` toggles a two-column debug popup with the pre-effect/audio buffer occupancy over capacity, the path and format
+  currently being decoded, the playback (device) format, playlist state, `lock_fail`/`underrun` counters and the
+  `TimeMetrics` windows for decode, effect and callback
+  stages on the left; the live log is on the right. `DecoderRuntime::decoder_path()` was added to expose the decoding
+  path.
+- The decoder batches interleaved samples in its internal buffer up to the pre-effect chain's `min_input_len_work()`
+  hint
+  before pushing a block; the hint is advisory and a smaller input may still produce output depending on the effect.
+- The debug popup now shows buffer-based latency estimates: decoder-internal buffer, decode→pre-effect queue, pre-effect
+  delay lines, playback ring plus the last callback block, and their total. The estimate is drawn as a proportional
+  pipeline bar from decode (left) to playback (right). Device/OS latency is not included yet.
+- Fixed the latency estimate accumulating across track changes: clearing the pre-effect input ring (skip/seek/restart)
+  now
+  also resets the queued-sample gauge, since the discarded blocks are never popped by the effect thread.
+- Added an effects window (`e` or `:effects`): a two-column view with pre- and post-effects on the left (name and
+  enabled state only) and the selected effect's chain, delay, description and settings placeholder on the right.
+  `↑`/`↓` and `PageUp`/`PageDown` move the selection. Rows come only from `PreEffect`/`PostEffect` trait methods
+  (`display_name`, `description`, `enabled`, `buffered_samples`), so new effects appear without UI changes. `Space`/
+  `Enter`
+  toggles the selected effect's enabled state through the same trait, and other settings editing is not implemented yet.
+- Effect toggles are now applied safely. Pre-effect toggles go through a dedicated command channel and are applied by
+  the
+  effect thread; `ConcurrentRing::wake_blocked_readers` wakes a blocked `pop_wait` with the new `ReadWoken` error
+  without consuming data. Disabling a pre effect drains it via `PreEffectDiscontinuity::DisableSelf` and passes the
+  drained samples through downstream `UpstreamDisabled { distance }` handlers; downstream is not reset unless the
+  effective format changes. The resampler is statically non-disableable (`DisablePolicy::Forbidden`) because bypassing
+  it would change the device-format output. Post effects are strictly synchronous and toggle directly. `reset` now takes
+  a `ResetReason` so an effect can distinguish a track start from a format change or toggle. The UI no longer updates
+  optimistically; disabled effects report zero latency and the detail pane marks forbidden effects as fixed.
+- Split-ring `write_all` now returns a dedicated `WriteAllError { written, kind }` so every failure reports how many
+  elements were written. `wake_blocked_writers` is non-destructive (`Interrupted`; the caller can resume from
+  `written`),
+  while `reject_pending_writers` keeps clear-and-reject (`Rejected`). The pre-effect thread caches the unwritten
+  remainder,
+  applies the queued toggle, and resumes the cache before new audio, so a control wake cannot truncate a block.
+- Fixed the effects window staying empty: the pre-effect thread now drops the effect-chain lock before writing to the
+  output ring, so a paused/full ring cannot block `effect_summaries()` indefinitely. The chain lock is still held for
+  `process`, and the UI keeps the last successful snapshot.
+- The footer is narrower: `←`/`→` seek hints moved to the progress gauge, `↑`/`↓` scroll hints to the playlist title,
+  and volume moved to a compact percentage gauge on the right of the progress row. The now-playing title no longer
+  carries the volume. The effects button is kept in the footer as `e 效果`; debug uses `F12`.
+- The main progress bar now uses eighth blocks (`█▉▊▋▌▍▎▏`), so the position moves in 1/8-cell steps instead of whole
+  cells; the time/percent label sits to the right of the bar so the bar stays continuous. The shared helper also drives
+  the `wbfp` job card and task bars.
+- Logs moved from the main page into the right pane of the `F12` debug window; the main page's right side is now a
+  reserved panel. Debug, effects and help windows are mutually exclusive, and `Esc` closes the active window first.
+- TUI state was grouped into `playback`, `playlist`, `scan`, `seek`, `footer`, `mouse`, `command`, `effects` and
+  `debug`; a single `Window` enum replaces the window booleans. Keys route exclusively by active window: command input
+  first, `Esc` closes it, `Window::None` goes to the main view, and open windows never fall through to main keys.
 - The playlist panel now renders only the visible rows and supports scrolling: `↑`/`↓` scroll one line,
-  `PageUp`/`PageDown` one page, `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left click on a
-  row plays that track. The viewport follows the current track on track changes. `PlayList::jump_to` and
+  `PageUp`/`PageDown` one page, `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left
+  double-click
+  on a row plays that track (a single click is ignored to avoid misfires). The viewport follows the current track on
+  track changes. `PlayList::jump_to` and
   `Runtime::play_at` were added for index jumps, and the TUI enables mouse capture while it runs.
 - Fixed mouse movement quitting the TUI on Windows/ConPTY. The terminal can deliver mouse reports as bare X10 payload
   bytes, so a coordinate byte such as `q` was handled as the quit key. Windows now enables

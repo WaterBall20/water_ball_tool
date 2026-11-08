@@ -147,8 +147,11 @@ fn write_all_returns_cannot_wait_on_reader_drop() {
     thread::sleep(WAIT);
     drop(r);
     match h.join().expect("writer thread should not panic") {
-        Err(e) => assert!(matches!(e.kind, Kind::CannotWait)),
-        Ok(_) => panic!("expected CannotWait"),
+        Err(e) => {
+            assert!(matches!(e.kind, WriteAllErrorKind::PeerClosed));
+            assert_eq!(0, e.written);
+        }
+        Ok(_) => panic!("expected PeerClosed"),
     }
 }
 

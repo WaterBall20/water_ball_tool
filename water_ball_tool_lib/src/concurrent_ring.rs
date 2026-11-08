@@ -111,6 +111,14 @@ pub struct Inner<T> {
     /// 之后进入等待的写者加载到的 `gen_before` 已是新值，不会被误拒。
     write_reject_gen: AtomicUsize,
 
+    //AI=== 主动唤醒阻塞读者：粘性标志由 pop_wait 取走 / active reader wake: a sticky flag consumed by pop_wait
+    /// 读者主动唤醒标志。任何 `pop_wait` 在阻塞前看到它都会返回 `ReadWoken`，
+    /// 因此即使唤醒发生在读者进入等待之前也不会丢失。
+    ///
+    /// Sticky reader-wake flag. Any `pop_wait` that sees it before blocking returns
+    /// `ReadWoken`, so a wake issued before the reader starts waiting is not lost.
+    read_wake_pending: AtomicBool,
+    //AI_END===
     /// 当前共享此 `Inner` 的 [`ConcurrentRing`] 实例数（含自身）。
     ref_count: AtomicUsize,
 
@@ -249,6 +257,9 @@ impl<T> ConcurrentRing<T> {
                 max_cap: AtomicUsize::new(0),
                 is_max_cap: AtomicBool::new(false),
                 write_reject_gen: AtomicUsize::new(0),
+                //AI=== 初始没有待处理的读者唤醒 / no pending reader wake initially
+                read_wake_pending: AtomicBool::new(false),
+                //AI_END===
                 //AI=== 方向端点计数初始为 0（没人登记方向）/ the directional counters start at 0
                 read_handles: AtomicUsize::new(0),
                 write_handles: AtomicUsize::new(0),
@@ -281,6 +292,9 @@ impl<T> ConcurrentRing<T> {
                 max_cap: AtomicUsize::new(cap),
                 is_max_cap: AtomicBool::new(true),
                 write_reject_gen: AtomicUsize::new(0),
+                //AI=== 初始没有待处理的读者唤醒 / no pending reader wake initially
+                read_wake_pending: AtomicBool::new(false),
+                //AI_END===
                 //AI=== 方向端点计数初始为 0（没人登记方向）/ the directional counters start at 0
                 read_handles: AtomicUsize::new(0),
                 write_handles: AtomicUsize::new(0),
@@ -1060,12 +1074,21 @@ impl<T> ConcurrentRing<T> {
     /// # Error
     /// - `SingleInstance` / `AllWaiting`：同原语义。
     /// - `WritersClosed`：该环曾经有写者，但当前已无任何登记写端的句柄。
+    /// - `ReadWoken`：被 [`Inner::wake_blocked_readers`] 主动唤醒；**未消费任何数据**。
     pub fn pop_wait(&self) -> ConcurrentRingResult<T, T> {
         //AI=== 阻塞读方法登记本句柄为读端 / a blocking read registers this handle as a reader
         self.adopt_role(ROLE_READER);
         //AI_END===
         let mut guard = self.lock_wait_lock();
         loop {
+            //AI=== 主动唤醒优先于取数据，且不消费缓冲区内容 / an active wake wins over data and consumes nothing
+            if self.read_wake_pending.swap(false, Ordering::AcqRel) {
+                return Err(ConcurrentRingError::new(
+                    "read woken by wake_blocked_readers",
+                    ConcurrentRingErrorKind::ReadWoken,
+                ));
+            }
+            //AI_END===
             let result = {
                 let _rg = self.lock_read_gate_write();
                 self.pop_inner()
@@ -1418,6 +1441,37 @@ impl<T> Inner<T> {
 
     /// 清空缓冲区并拒绝所有当前阻塞的写者。
     ///
+    //AI=== 主动唤醒阻塞读者：不清空数据，只让 pop_wait 返回 ReadWoken / actively wake blocked readers without clearing data
+    /// 主动唤醒所有阻塞读者。
+    ///
+    /// 与 [`Inner::reject_waiting_writers`] 不同，本方法**不修改、不清空缓冲区**：
+    /// 它只设置一个粘性唤醒标志并 `notify_all`。阻塞读者随后从
+    /// [`ConcurrentRing::pop_wait`] 得到 [`ConcurrentRingErrorKind::ReadWoken`]，
+    /// 数据仍留在环中，调用方处理完外部事件后重试即可。
+    ///
+    /// 粘性标志保证“唤醒发生在读者开始等待之前”也不会丢失；标志由
+    /// `pop_wait` 取走，因此多次唤醒可合并为一次。该语义面向单读者场景
+    /// （当前前效果器输入环即如此）；多读者时只保证至少一个等待者看到唤醒。
+    ///
+    /// Actively wake blocked readers without touching the buffer. A sticky flag
+    /// guarantees a wake issued before the reader starts waiting is not lost; the
+    /// flag is consumed by `pop_wait`, so repeated wakes collapse into one. Intended
+    /// for the single-reader case (the pre-effect input ring); with multiple readers
+    /// only at least one waiter is guaranteed to observe the wake.
+    ///
+    /// # 返回值
+    /// 唤醒前登记的等待读者数，仅供日志/统计；不保证它们已退出等待。
+    pub fn wake_blocked_readers(&self) -> usize {
+        let _wl = self.lock_wait_lock();
+        self.read_wake_pending.store(true, Ordering::Release);
+        let waiters = self.lock_content.read_waiters.load(Ordering::Acquire);
+        if waiters > 0 {
+            self.lock_content.not_empty.notify_all();
+        }
+        waiters
+    }
+    //AI_END===
+
     /// 语义（“清空 + 拒绝”）：
     /// 1. **清空**：本函数返回时，在其持锁清空的瞬间，缓冲区逻辑上为空
     ///    （`read_pos == write_pos`，`[r, w)` 内已初始化槽位已 drop）。
@@ -1542,6 +1596,9 @@ impl<T> Debug for ConcurrentRingError<T> {
             ConcurrentRingErrorKind::ReadersClosed => "ReadersClosed",
             ConcurrentRingErrorKind::WritersClosed => "WritersClosed",
             //AI_END===
+            //AI=== 主动唤醒读者 / active reader wake
+            ConcurrentRingErrorKind::ReadWoken => "ReadWoken",
+            //AI_END===
         };
         write!(
             f,
@@ -1596,6 +1653,13 @@ pub enum ConcurrentRingErrorKind<T> {
     ReadersClosed,
     /// 写端已关闭：阻塞读者无法再被唤醒，立即返回。
     WritersClosed,
+    //AI_END===
+
+    //AI=== 读者被主动唤醒：不是错误，数据未消费 / the reader was actively woken; not a failure, no data consumed
+    /// 阻塞读者被 [`Inner::wake_blocked_readers`] 主动唤醒。
+    ///
+    /// 缓冲区内容保持不变；调用方应处理外部事件后重试 `pop_wait`。
+    ReadWoken,
     //AI_END===
 }
 

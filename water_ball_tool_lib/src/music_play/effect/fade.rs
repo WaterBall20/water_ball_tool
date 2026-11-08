@@ -1,4 +1,6 @@
-use crate::music_play::effect::{AudioFormat, Decision, PlayCmd, PostEffect, TransportAware};
+use crate::music_play::effect::{
+    AudioFormat, Decision, PlayCmd, PostEffect, ResetReason, TransportAware,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -123,7 +125,7 @@ impl Default for FadeEffect {
 // ---------------------------------------------------------------------------
 impl PostEffect for FadeEffect {
     fn init(&mut self, audio_format: AudioFormat) {
-        self.reset(audio_format);
+        self.reset(audio_format, ResetReason::TrackStart);
     }
 
     fn process(&mut self, buffer: &mut [f32]) {
@@ -169,9 +171,12 @@ impl PostEffect for FadeEffect {
         }
     }
 
-    fn reset(&mut self, audio_format: AudioFormat) {
+    fn reset(&mut self, audio_format: AudioFormat, _reason: ResetReason) {
         self.audio_format = audio_format;
         self.reset_duration_samples();
+        self.pos = 0;
+        self.pending_pause = false;
+        self.pause_done = false;
     }
 
     fn transport_hook(&mut self) -> Option<&mut dyn TransportAware> {
@@ -183,12 +188,29 @@ impl PostEffect for FadeEffect {
     }
 
     fn set_enabled(&mut self, enabled: bool) {
+        //AI=== 禁用期间不能再走完淡出：立即释放已 defer 的暂停，避免暂停永远不确认
+        // Disabling cannot finish the fade, so release a deferred pause immediately.
+        if !enabled && self.pending_pause {
+            self.pending_pause = false;
+            self.pause_done = true;
+        }
+        //AI_END===
         self.enabled = enabled;
     }
 
     fn name(&self) -> &'static str {
         "FadeEffect"
     }
+
+    //AI=== 效果器窗口显示信息 / effects-window metadata
+    fn display_name(&self) -> &'static str {
+        "淡入淡出"
+    }
+
+    fn description(&self) -> &'static str {
+        "播放/暂停时对输出做半正弦淡入淡出。"
+    }
+    //AI_END===
 }
 
 // ---------------------------------------------------------------------------

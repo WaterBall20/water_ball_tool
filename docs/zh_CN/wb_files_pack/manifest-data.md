@@ -229,6 +229,10 @@ A/B half 最小占用 = 8 + 4 + 8 + data_len + 4  = 24 + data_len 字节
 
 总长度 = `27 + name_len`。
 
+名称只存在于 `PackStructItem` 中。同目录重命名只重写所在的 `PackStruct` 块并修改条目名称；
+`metadata_file_pos`、`struct_file_pos`、数据块与哈希都保持不变。跨目录移动会重写源与目标两个 `PackStruct` 块，
+并调整受影响祖先目录的累计元数据；它仍然不复制数据、不重算哈希。
+
 ---
 
 ## 九、虚拟文件元数据 PackFileMetadata

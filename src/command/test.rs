@@ -238,60 +238,100 @@ fn wbfp_create_new_pack_m_no_s_data_file() -> Result<(), Box<dyn std::error::Err
 // wbfp 解包测试 / wbfp unpack tests
 // =========================================================================
 
-/// 打包 + 哈希校验 + 解包 完整流程 / Pack + hash verify + unpack full flow
+/// 用稳定小夹具打包，返回 (测试临时目录, 包路径)。
+///
+/// Pack the stable small fixture and return `(temp dir, pack path)`.
+fn pack_small_fixture(
+    test_name: &str,
+    fixture: &Path,
+) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let out_dir = PathBuf::from(WBFP_TEST_TEMP_OK_DIR_PATH).join(test_name);
+    prepare_test_dir(&out_dir);
+    let pack_path = out_dir.join("pack.wbfp");
+    commands(WaterBallFilePackCommand::new(
+        WaterBallFilePackCommands::Pack(WaterBallFilePackCommandsPack::new(
+            fixture
+                .to_str()
+                .ok_or("fixture path is not UTF-8")?
+                .to_string(),
+            Some(pack_path.to_string_lossy().into_owned()),
+            true,
+            Some(1),
+            true,
+        )),
+    ))?;
+    Ok((out_dir, pack_path))
+}
+
+/// 打包小夹具：所有文件与目录都进入包 / pack the small fixture with every file and dir.
 #[test]
-fn wbfp_create_new_pack_m_no_s_data_file_s() -> Result<(), Box<dyn std::error::Error>> {
-    let mut out_dir_path = String::from(WBFP_TEST_TEMP_OK_DIR_PATH);
-    out_dir_path.push_str("/wbfp_create_new_pack_m_no_s_data_file_s");
-    prepare_test_dir(Path::new(&out_dir_path));
-
+fn wbfp_pack_small_fixture_packs_all_files() -> Result<(), Box<dyn std::error::Error>> {
+    const NAME: &str = "wbfp_pack_small_fixture_packs_all_files";
     // ===== TEST-ONLY RESOURCE GENERATION: START =====
-    let fixture = get_small_fixture("wbfp_create_new_pack_m_no_s_data_file_s");
+    let fixture = get_small_fixture(NAME);
     // ===== TEST-ONLY RESOURCE GENERATION: END =====
-    let fixture_str = fixture.to_str().expect("转换夹具路径失败").to_string();
+    let (out_dir, pack_path) = pack_small_fixture(NAME, &fixture)?;
 
-    let mut out_file_path = out_dir_path.clone();
-    out_file_path.push_str("/pack");
-    let r = || -> Result<(), Box<dyn std::error::Error>> {
-        //前提：打包
-        {
-            commands(WaterBallFilePackCommand::new(
-                WaterBallFilePackCommands::Pack(WaterBallFilePackCommandsPack::new(
-                    fixture_str,
-                    Some(out_file_path.clone()),
-                    true,
-                    None,
-                    true,
-                )),
-            ))?;
+    let pack = ManagerSync::open(&pack_path)?;
+    let attribute = pack.get_manifest_attribute()?;
+    assert_eq!(attribute.file_count(), 15);
+    assert_eq!(attribute.dir_count(), 3);
+    drop(pack);
+
+    fs::remove_dir_all(&out_dir).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    Ok(())
+}
+
+/// 哈希校验小夹具包 / hash-verify the small-fixture pack.
+#[test]
+fn wbfp_hash_verify_small_fixture_pack() -> Result<(), Box<dyn std::error::Error>> {
+    const NAME: &str = "wbfp_hash_verify_small_fixture_pack";
+    // ===== TEST-ONLY RESOURCE GENERATION: START =====
+    let fixture = get_small_fixture(NAME);
+    // ===== TEST-ONLY RESOURCE GENERATION: END =====
+    let (out_dir, pack_path) = pack_small_fixture(NAME, &fixture)?;
+
+    let mut verify =
+        WaterBallFilePackCommandsHashVerify::new(pack_path.to_string_lossy().into_owned(), false);
+    verify.thread_count = Some(1);
+    commands(WaterBallFilePackCommand::new(
+        WaterBallFilePackCommands::HashVerify(verify),
+    ))?;
+
+    fs::remove_dir_all(&out_dir).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    Ok(())
+}
+
+/// 解包小夹具包并校验内容 / unpack the small-fixture pack and check contents.
+#[test]
+fn wbfp_unpack_small_fixture_pack() -> Result<(), Box<dyn std::error::Error>> {
+    const NAME: &str = "wbfp_unpack_small_fixture_pack";
+    // ===== TEST-ONLY RESOURCE GENERATION: START =====
+    let fixture = get_small_fixture(NAME);
+    // ===== TEST-ONLY RESOURCE GENERATION: END =====
+    let (out_dir, pack_path) = pack_small_fixture(NAME, &fixture)?;
+    let out = out_dir.join("s");
+
+    commands(WaterBallFilePackCommand::new(
+        WaterBallFilePackCommands::Unpack(WaterBallFilePackCommandsUnpack::new(
+            pack_path.to_string_lossy().into_owned(),
+            Some(out.to_string_lossy().into_owned()),
+            false,
+            Some(1),
+        )),
+    ))?;
+
+    let mut count = 0;
+    for i in 0..3 {
+        for j in 0..5 {
+            let path = out.join(format!("sub_{i}")).join(format!("file_{j}.txt"));
+            assert_eq!(fs::read_to_string(&path)?, format!("content_{i}_{j}\n"));
+            count += 1;
         }
-        out_file_path.push_str(".wbfp");
-        //哈希校验（仅需包路径）
-        {
-            commands(WaterBallFilePackCommand::new(
-                WaterBallFilePackCommands::HashVerify(WaterBallFilePackCommandsHashVerify::new(
-                    out_file_path.clone(),
-                    false,
-                )),
-            ))?;
-        }
-        //解包
-        {
-            let mut s_out_path = out_dir_path.clone();
-            s_out_path.push_str("/s");
-            commands(WaterBallFilePackCommand::new(
-                WaterBallFilePackCommands::Unpack(WaterBallFilePackCommandsUnpack::new(
-                    out_file_path.clone(),
-                    Some(s_out_path),
-                    false,
-                    None,
-                )),
-            ))?;
-        }
-        Ok(())
-    }();
-    r?;
-    fs::remove_dir_all(&out_dir_path).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
+    }
+    assert_eq!(count, 15);
+
+    fs::remove_dir_all(&out_dir).map_err(|e| format!("测试通过后清理临时目录失败: {e}"))?;
     Ok(())
 }
 
@@ -534,6 +574,7 @@ use crate::command::wbfp::{
 use std::io;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 
 const SYMLINK_TEST_DIR: &str = "./temp/test/command/ok";
 

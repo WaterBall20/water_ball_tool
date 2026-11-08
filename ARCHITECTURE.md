@@ -79,6 +79,7 @@ water_ball_tool (binary crate, root package)
   │   │       ├── events.rs    ← TUI job events + row status
   │   │       ├── ops.rs       ← TUI pack/unpack/verify workers
   │   │       └── tui/         ← TUI (tui.rs, app.rs, ui.rs, browse.rs)
+  │   ├── command/tui_input.rs   ← shared TUI input (mouse capture, VT parser, hit-test)
   │   ├── command/music_play.rs  ← clap args + TUI wiring
   │   │   └── command/music_play/
   │   │       ├── runtime.rs         ← playback runtime (event sinks, snapshot)
@@ -442,6 +443,11 @@ drives `stream.play()` / `stream.pause()`.
   `DecoderSession` stored in a single `Arc<Mutex<Option<DecoderSession>>>`. Track changes replace or take the whole
   session under that one lock, so an "engine present but data missing" state cannot occur. The old split
   `engine`/`data` `Option` pair and its missing-data branch are gone.
+- The decoder batches interleaved samples in its internal `out_buf` until it reaches the pre-effect chain's
+  `min_input_len_work()` hint (the chain takes the maximum over its effects) before pushing a `Block`. The hint is
+  advisory, not a guarantee that smaller inputs produce no output: that depends on the effect, and an effect without
+  internal buffering may process every packet; `0` means no accumulation is required. Debug readings include the
+  decoder-internal buffer, the decode→pre-effect queue, the pre-effect delay lines and the playback ring.
 - `DecoderRuntime::run()` and `PreEffectRuntime::run()` return `Result`; a failed thread spawn aborts `Player::new()`
   with an error instead of being logged and ignored.
 - Decode-loop error policy:
@@ -465,7 +471,8 @@ drives `stream.play()` / `stream.pause()`.
   discontinuity, emits `PreEffectRuntimeEventErrorKind::Runtime`, backs off 10 ms and keeps consuming (a closed write
   side therefore parks instead of spinning); a hard output-write error is reported the same way and the block is
   dropped. Only the `stop` flag ends the loop. The binary logs these events through a
-  `PreEffectRuntimeEventChannelSink` (informational — playback may continue).
+  `PreEffectRuntimeEventChannelSink` (informational — playback may continue). The chain lock is released before the
+  blocking output-ring write, so the UI can snapshot effect metadata even while paused with a full ring.
 - Event-channel sink constructors (`PlayerEventChannelSink::create`, `DecoderEventChannelSink::create`,
   `PreEffectRuntimeEventChannelSink::create`) return `Result`; direct sinks construct infallibly. `Player::new()` and
   `Runtime::new()` propagate sink and thread spawn failures.
@@ -503,27 +510,62 @@ Failures at any step are logged, not propagated; `Runtime::run_stop` additionall
 **Files**: `src/command/music_play/tui/` (`tui.rs`, `app.rs`, `ui.rs`, `channel_writer.rs`)
 
 - `tui::run` polls every 50 ms, drains log and scan messages, applies `Runtime::snapshot()` and renders now playing /
-  progress / playlist / logs / key hints
+  progress with a compact volume gauge / playlist / reserved right pane / key hints
+- TUI state is grouped in `App` by responsibility (`playback`, `playlist`, `scan`, `seek`, `footer`, `mouse`, `command`,
+  `effects`, `debug`). A single `Window` enum (`None`/`Help`/`Debug`/`Effects`) replaces the window booleans. Key
+  routing
+  is exclusive: command input first, then `Esc` closes the active window; `Window::None` goes to the main-view handler
+  and
+  each open window has its own handler, so window keys never fall through to the main view.
 - Playlist viewport: only the visible rows are rendered; `↑`/`↓` scroll one line, `PageUp`/`PageDown` one page,
-  `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left click on a row switches to and plays
-  that track (`Runtime::play_at` → `PlayList::jump_to`). The footer hint labels are clickable buttons for quit, next,
-  seek, play/pause, one-line scroll, volume, debug and command mode. The viewport follows the current track when the
-  track changes; manual scrolling is kept until then. Mouse capture is enabled around the TUI loop and released before
-  the terminal is restored. On Windows the TUI enables `ENABLE_VIRTUAL_TERMINAL_INPUT`, requests SGR mouse reporting and
-  parses the VT byte stream with `vtparse` (`VtInput`); this avoids crossterm's console mouse records, which some
-  ConPTY terminals deliver as bare X10 payload bytes. Under VT input the TUI reads stdin bytes directly (a dedicated
-  reader thread) instead of `crossterm::event`, because crossterm 0.29 drops control characters such as ESC and CR
-  from synthesized VT input; a lone ESC becomes the Esc key only after a short timeout. If VT input cannot be enabled,
-  the mouse is disabled and keyboard input keeps working
+  `Home`/`End` jump to the ends, the mouse wheel scrolls three lines and a left double-click on a row switches to and
+  plays that track (`Runtime::play_at` → `PlayList::jump_to`). The footer hint labels are clickable buttons for quit,
+  next,
+  play/pause, debug, effects and command mode. The viewport follows the current track when the track changes; manual
+  scrolling is kept until then. Mouse capture, the VT parser (`VtInput`/`VtEvent`), double-click state (`MouseState`),
+  the bordered-list hit-test (`list_index_at`) and the wheel step live in `command/tui_input.rs` and are shared with
+  `wbfp`. Capture is enabled around the TUI loop and released before the terminal is restored. On Windows the TUI
+  enables `ENABLE_VIRTUAL_TERMINAL_INPUT`, requests SGR mouse reporting and parses the VT byte stream with `vtparse`;
+  this avoids crossterm's console mouse records, which some ConPTY terminals
+  deliver as bare X10 payload bytes. Under VT input the TUI reads stdin bytes directly (a dedicated reader thread)
+  instead of `crossterm::event`, because crossterm 0.29 drops control characters such as ESC and CR from synthesized VT
+  input; a lone ESC becomes the Esc key only after a short timeout. If VT input cannot be enabled, the mouse is disabled
+  and keyboard input keeps working
 - Startup: sequential modes initialize (load the first track) on the first track; shuffle modes wait for 5 tracks, with
   a `ScanMessage::Done` fallback that initializes with fewer tracks when the scan ends
 - Key map: `n` next, `←`/`→` seek (5 s per tap; repeats during a hold only move the preview and the target is
   committed on release), space play/pause, `p` pause, `P` play, `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the
-  playlist, `+`/`-` volume, `d`/F12 toggle the debug popup, `:` command mode, `q`/`Esc`/`Ctrl+C` quit. The popup shows
-  buffer lengths, the decoding path/format, playlist state, per-stage timings (`TimeMetrics` windows), `lock_fail` and `underrun`
+  playlist, `+`/`-` volume, `F12` toggles the debug popup, `e` toggles the effects window, `:` command mode,
+  `q`/`Esc`/`Ctrl+C` quit. Debug/effects/help windows are mutually exclusive: opening one closes the others, and `Esc`
+  closes the active window before quitting. The Debug window is two-column: buffers, decoder state, latency pipeline and
+  `TimeMetrics` on the left; the live log on the right. It shows each buffer's occupancy over capacity, the decoding
+  path/format and the playback (device) format, playlist
+  state, buffer-based latency estimates (decoder-internal buffer, decode→pre-effect queue, pre-effect delay lines,
+  playback ring plus the last callback block, and their sum, drawn as a proportional pipeline bar from decode to
+  playback), per-stage timings (`TimeMetrics` windows), `lock_fail` and `underrun`
+- Progress row: the position bar is drawn per cell with eighth blocks (`█▉▊▋▌▍▎▏`), so it resolves to 1/8 of a cell;
+  the time/percent label sits to the right of the bar, so no text is drawn over it and the bar stays continuous (a long
+  label leaves at least 8 cells for the bar and is truncated). The shared `command::render_eighth_block_bar` helper is
+  also used by the `wbfp` job card. The volume gauge stays a plain bar.
+- Effects window: `e` (or `:effects`) opens a two-column view. The left column lists the pre-effect chain first and the
+  post-effect chain after it, showing only the human-readable name and enabled state; `↑`/`↓` and
+  `PageUp`/`PageDown` move the selection, and the window title repeats the `↑`/`↓` hint. The right column shows the
+  selected effect's chain, current delay, description and a settings section. `Space`/`Enter` asks for a toggle; the UI
+  does not update optimistically and waits for the next snapshot. Pre-effect toggles are queued on a dedicated command
+  channel and applied by the effect thread before the next audio block; a disable first lets the effect drain its
+  internal buffer via `PreEffectDiscontinuity::DisableSelf`, then passes the drained samples through downstream
+  `UpstreamDisabled { distance }` handlers. A non-destructive writer wake interrupts a blocked output write without
+  clearing it; the effect thread keeps the unwritten remainder in a pending output cache, handles the command, and then
+  resumes writing the cache before new audio, so a toggle cannot truncate a block. Downstream is not reset unless the
+  effective format changes, and a
+  format-changing effect (the resampler) is statically `Forbidden` instead of being bypassed. Post effects are strictly
+  synchronous and toggle directly. Rows are built only from `PreEffect`/`PostEffect` trait methods (`display_name`,
+  `description`, `enabled`, `disable_policy`, `buffered_samples`, with the manager-registered input format), so a newly
+  added effect appears without changing the UI. Other settings are deferred to a dedicated trait design.
 - Command mode: `:` turns the footer into an input line (`Enter` runs, `Esc` cancels, `Backspace` edits). Commands match
   by unique prefix: `quit`, `play`, `pause`, `toggle`, `next`, `prev`, `seek <mm:ss|+N|-N>`, `vol <0-100|+N|-N>`,
-  `mode <name>`, `goto <n>`, `debug` and `help`/`?`; an unknown or ambiguous name is reported in the footer. `help` opens
+  `mode <name>`, `goto <n>`, `debug`, `effects` and `help`/`?`; an unknown or ambiguous name is reported in the footer.
+  `help` opens
   a popup listing the command table, `prev` steps back through `PlayList::prev`'s history, `goto` reuses
   `Runtime::play_at` and `mode` calls `Runtime::set_loop_mode`. `:seek` calls `Runtime::seek` → `Player::try_seek`,
   which clears the output ring, runs the decoder's accurate seek with a basic `Seek` effect reset, invalidates the EOF
@@ -669,6 +711,12 @@ pub struct DataPosList {
     list: Vec<(u64, u64)>,                      // (position, length) pairs / (
 }
 ```
+
+`PackStruct.items` is keyed by the item name, while `PackStructItem.name` is the field serialized into the block.
+A same-directory rename must update both; it rewrites only the containing `PackStruct` block and leaves
+`metadata_file_pos`, `struct_file_pos`, data blocks and hashes untouched. A cross-directory move rewrites the source and
+destination `PackStruct` blocks and adjusts the cumulative directory metadata on both ancestor chains; the entry's data
+and hash are still untouched.
 
 ### 8.4 Manifest Data Block — A/B Dual-Block Mechanism
 
@@ -818,7 +866,7 @@ Flow
 
 ### 8.8 Public API Layer — ManagerSync
 
-| **File**: `water_ball_tool_lib/src/wb_files_pack/manager_sync.rs` (438 lines)
+| **File**: `water_ball_tool_lib/src/wb_files_pack/manager_sync.rs` (553 lines)
 
 `ManagerSync` is the thread-safe wrapper around `WBFPManager` + `PackIO`:
 
@@ -843,6 +891,9 @@ pub struct ManagerSync {
 |                 | `virtual_file_options() -> VirtualFileOpenOptions`                               | Builder: `read()`/`write()`/`create_new()`/`end_pos()`/`alloc_size()`                    |
 | **Read**        | `get_manifest_attribute` / `get_root_struct_items` / `get_dir` / `load_all_data` |                                                                                          |
 | **Write**       | `create_dir_all` / `delete_file` / `delete_dir_all`                              |                                                                                          |
+| **Rename**      | `rename(from, to)`                                                               | Same-directory leaf rename only; cross-directory moves use `move_entry`                  |
+| **Move**        | `move_entry(from, to)`                                                           | Relocate to another existing parent and optionally rename the leaf                       |
+| **Probe**       | `probe_pack(path)`                                                               | Header-only pack detection; does not acquire `.lock`                                     |
 | **Delete**      | `delete_file` / `delete_dir_all`                                                 | Remove metadata + structure, GC data blocks (no overwrite)                               |
 | **Erase**       | `erase_file(strategy)` / `erase_dir_all(strategy)`                               | Overwrite data + manifest blocks → GC → remove                                           |
 | **Verify**      | `verify_all_file_hash`                                                           | Recursively hash-verify all files                                                        |
@@ -855,8 +906,13 @@ pub struct ManagerSync {
 | `Random`  | 1      | Single pass of random bytes                                     |
 | `Dod5220` | 3      | DoD 5220.22-M: 0x00 → 0xFF → random (each pass written to disk) |
 
-> `child_locked_count` on `PackStruct` tracks how many descendant files have active write handles. A directory can only
-> be deleted/erased when `child_locked_count == 0`.
+> `child_locked_count` on `PackStruct` tracks how many descendant files have active virtual-file handles. A directory
+> can only be deleted/erased or renamed/moved when `child_locked_count == 0`. `rename` rejects the operation while the
+> file itself is locked; a read-only `PackVirtualFile` also holds the handle. `rename` never relocates an entry: `from`
+> and `to` must share the same parent. `move_entry` requires a different parent; it may also change the leaf name,
+> rejects moving a directory into its own subtree, and updates the cumulative `file_count`/`dir_count`/`len` of every
+> affected ancestor on both the source and destination chains. The destination `PackStruct` is written before the
+> source one: a crash between the two writes can leave a duplicate reference, but cannot lose the entry.
 
 **Design notes**
 
@@ -898,6 +954,10 @@ read/write.
 1. Compute and persist file hash
 2. Release pre-allocated but unused space (via `set_len(metadata_len)`)
 3. Return metadata to `WBFPManager.file_metadata_update()`
+
+`PackFileHandle` captures `path_list` when it opens and `commit_data()` uses that path to locate the item for the
+metadata write-back. Renaming or relocating an open entry is therefore forbidden: `WBFPManager::rename` returns
+`PackFileError::Lock` while the file, or any descendant file of a directory, is open. Read-only handles count too.
 
 ### 8.10 Hash System
 
@@ -1034,15 +1094,32 @@ flowchart TD
 
 - **Routing**: `wbfp::run` selects the TUI when stdout and stdin are terminals and `--no-tui` is absent; otherwise it calls the
   classic `indicatif` path. `wbfp::commands` always takes the classic path (tests use it). `browse` has no classic
-  equivalent and requires an interactive terminal.
-- **Layout**: yazi-inspired header/path line, file list, reserved preview pane (metadata now, file content later), status
-  line and key hints. Wide terminals split list/preview; narrow terminals show one pane and `p` toggles it. The list is
-  read-only in every mode — pack/unpack/verify add no edit actions.
-- **Navigation**: `ManagerSync` lazily loads one directory at a time (`get_struct_item_name_list` +
-  `get_pack_struct_item`); pack mode browses the local source directory instead. Directories sort first; `..` is a
-  navigation row. Keyboard navigation is always available; non-Windows platforms also enable mouse select/double-click/
-  wheel. On Windows/ConPTY crossterm splits SGR mouse reports into literal keys, so the TUI starts keyboard-only and
-  clears stale mouse reporting with `MouseCapture::keyboard_only`.
+  equivalent and requires an interactive terminal. Without a subcommand the file manager is TUI-only: the pack path is
+  optional (`wbfp <pack>` opens it immediately, bare `wbfp` starts with the middle pane hidden), and `--no-tui`/non-TTY
+  input are rejected. `wbfp browse <pack>` remains the read-only single-pane browser; pack/unpack/verify keep their
+  existing single-pane layout.
+- **Layout**: Manager mode has three panes — local filesystem, pack, preview. At width >= 110 three panes are shown
+  (30/40/30); at >= 80 the preview folds and local/pack remain (35/65); below 80 the pack pane stays alone. With no
+  pack,
+  the middle pane is omitted: local/preview at >= 80, local only below that. Preview folds before the local pane; the
+  pack
+  pane is never folded while a pack is open. Subcommand modes keep the old single list + preview layout.
+- **State**: `App` groups `ui` (mode, title, pack info, logs, quit flags, error), `nav` (primary pane; pack in manager
+  mode and the only pane in subcommands), `local_nav` (manager's filesystem pane), `focus` (`Local`/`Pack`), and `jobs`.
+  Popups remain a `Window` enum. Pack files on disk are probed by header, never by extension; a probe result is stored
+  in
+  `Entry.pack_version` and rendered as a magenta `◆`.
+- **Navigation**: `ManagerSync` lazily loads one pack directory at a time; the local pane uses `std::fs`. `Tab` switches
+  focus, `Enter` enters a directory or opens a probed local pack, `Ctrl+W` closes the pack. Mouse hit-testing selects
+  the
+  pane under the cursor; select/double-click/wheel is shared with `mp` through `command/tui_input.rs`. On Windows the
+  TUI
+  uses the same VT input path as `mp`; if mouse capture cannot start it continues keyboard-only.
+- **Copy/move**: `c`/`m` transfer the focused entry to the other pane (local ↔ pack). The destination name must not
+  exist;
+  directory copies preserve empty directories; a move copies first and deletes the source only after success. Transfers
+  currently run synchronously on the UI thread (`shortcut:`), so a very large directory blocks the UI until it finishes.
+  Pack writes require the manager's read-write handle; `wbfp browse` stays read-only.
 - **Jobs**: `ops::spawn` runs pack/unpack/verify on a background thread and sends `JobEvent::{Dir, File, Start,
   Progress, Done, Total, Finished}` over a bounded mpsc channel. `app::App::apply_event` updates row statuses and the task
   card. Unpack/verify open one read-only `ManagerSync` and share a clone with the job: the pack's `.lock` rejects a second
@@ -1062,12 +1139,14 @@ flowchart TD
   columns or the task area jump.
 - **Progress**: the TUI never writes `indicatif` output while in the alternate screen. `common::copy_file_into_pack` and
   `common::extract_pack_file_to_disk` are shared with the classic path; TUI workers report per-file progress and a
-  rate-limited global `Total` instead.
+  rate-limited global `Total` instead. The job card and task rows use the same `command::eighth_block_bar` as
+  `mp`, so both TUIs resolve progress to 1/8 of a cell. The job card draws the bar on its own row and the label below
+  it, so the text never masks progress; write-optimization skips are reported as `Done`, not warnings.
 - **Shutdown**: operations are not cancellable. `q`/`Ctrl+C` during a job sets `quit_after_job`; the loop exits only after
   `Finished`, so a pack write is never abandoned mid-flight. Mouse capture is released by a Drop guard and the terminal
   is restored on every exit path, matching `mp`.
 - **Logging**: the TUI installs `music_play::tui::channel_writer::init_logging("wbfp")`; logs go to a bounded channel and
-  the `d` popup. The classic path keeps `multi_progress_init`.
+  the `F12` debug popup. The classic path keeps `multi_progress_init`.
 
 ---
 
@@ -1076,7 +1155,8 @@ flowchart TD
 **Core design**: every non-TUI subcommand path creates its own `indicatif::MultiProgress` via
 `multi_progress_init(module)`; all child bars of that command are registered in it. The terminal log writer wraps the same
 `MultiProgress`, so `suspend()` keeps log lines from tearing the bars. The `wbfp` TUI does not use indicatif; it draws
-progress through ratatui and `JobEvent` (see §8.16).
+progress through ratatui and `JobEvent` (see §8.16). Classic `ProgressStyle`s built by `progress_style` and the TUI bars
+share the eighth-block character set (`█▉▊▋▌▍▎▏ `), so both resolve a cell to 1/8.
 
 **Hierarchy**
 
@@ -1175,10 +1255,20 @@ dropped the opposite side gets `ReadersClosed` / `WritersClosed` (mirroring `spl
 `CannotWait`). There is no separate reader/writer handle type and no manual close/reopen call; a ring whose handles
 never called a blocking method is never reported closed.
 
+`wake_blocked_readers` actively wakes a blocked `pop_wait` without touching the buffer: it sets a sticky flag under the
+wait lock and notifies the readers. The woken call returns `ReadWoken` and leaves all queued data intact; the flag
+survives a wake issued before the reader starts waiting, so the pre-effect thread can be woken for a control command
+even when no audio block arrives. The wake is one-shot and intended for a single reader (the pre-effect input ring).
+
 ### 12.2 `split_ring_buffer`
 
 A split read/write ring buffer where each end can independently be locked or lock-free (`locked_ring_buffer`,
-`unlocked_read_locked_write_ring_buffer`, …); the audio callback uses the lock-free reader. `LockedWriter::resize` /
+`unlocked_read_locked_write_ring_buffer`, …); the audio callback uses the lock-free reader. `write_all` returns a
+dedicated `WriteAllError { written, kind }`: `Interrupted` comes from the non-destructive `wake_blocked_writers` (the
+buffer is intact, so the caller may resume from `written`), `Rejected` comes from `reject_pending_writers` (the buffer
+was cleared, so the prefix is gone), and `PeerClosed` means the reader disappeared. `wake_blocked_writers` bumps a
+separate wake epoch and only notifies; `reject_pending_writers` keeps the existing clear-and-reject semantics.
+`LockedWriter::resize` /
 `UnlockedWriter::resize` (Copy only) change the logical capacity: growing past the physical allocation allocates new
 A/B buffers, blocks new writers and waits for in-flight writers (readers keep running and only see "no data" during
 the tiny swap window), copies the live range into the new A at the same logical positions, swaps the buffers and

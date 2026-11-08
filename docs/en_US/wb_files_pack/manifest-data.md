@@ -212,6 +212,11 @@ Each item carries its own length prefix for traversal; the entire struct data is
 
 Total length = `27 + name_len`.
 
+The name exists only in `PackStructItem`. A same-directory rename rewrites the containing `PackStruct` block and
+changes the item name; `metadata_file_pos`, `struct_file_pos`, data blocks and hashes are unchanged. A cross-directory
+move rewrites the source and destination `PackStruct` blocks and adjusts the cumulative metadata of the affected
+ancestor directories; it still does not copy data or recompute hashes.
+
 ## 9. PackFileMetadata
 
 One per virtual file/directory, stored in its own manifest data block.

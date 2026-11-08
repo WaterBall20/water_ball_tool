@@ -31,7 +31,8 @@ pub enum Kind<T> {
     Locked,
     /// 等待期间对端 drop / 关闭，无法继续等待。
     CannotWait,
-    /// `reject_pending_writers` 拒绝写入，不携带元素。
+    /// `reject_pending_writers` 拒绝 `write_wait`，不携带元素。`write_all`
+    /// 使用专用 [`WriteAllError`]。
     WriteRejected,
     /// `reject_pending_writers` 拒绝写入，归还元素。
     WriteRejectedValue(T),
@@ -111,8 +112,9 @@ impl<T> Error<T> {
         Self::new("peer closed while waiting", Kind::CannotWait)
     }
 
-    /// 构造“写入被拒绝”错误，不携带元素。`write_wait` / `write_all` 被
-    /// `reject_pending_writers` 拒绝时返回。
+    /// 构造“写入被拒绝”错误，不携带元素。`write_wait` 被
+    /// `reject_pending_writers` 拒绝时返回；`write_all` 使用专用
+    /// [`WriteAllError`] 并携带已写入数量。
     ///
     /// # 示例
     ///
@@ -268,3 +270,102 @@ impl<T> fmt::Display for Error<T> {
 }
 
 impl<T: fmt::Debug> std::error::Error for Error<T> {}
+
+//AI=== write_all 专用错误：所有失败都携带已写入元素数 / dedicated write_all error: every failure carries the written element count
+/// `write_all` 的失败种类 / failure kind of `write_all`
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteAllErrorKind {
+    /// 被 [`crate::split_ring_buffer::LockedWriter::wake_blocked_writers`] 唤醒；
+    /// 缓冲区内容未变，可从 `written` 处续写。
+    ///
+    /// Woken by `wake_blocked_writers`; the buffer is intact and the caller may
+    /// resume from `written`.
+    Interrupted,
+    /// 被 `reject_pending_writers` 拒绝并清空；已写入的前缀已失效，不能续写。
+    ///
+    /// Rejected by `reject_pending_writers`; the buffer was cleared, so the written
+    /// prefix is gone and must not be resumed.
+    Rejected,
+    /// 读端已消失，无法继续。
+    ///
+    /// The reader is gone; the write cannot continue.
+    PeerClosed,
+}
+
+/// `write_all` 专用错误。`written` 是本次调用已成功写入的元素数。
+///
+/// Dedicated `write_all` error. `written` is the number of elements successfully
+/// written by this call.
+pub struct WriteAllError {
+    /// 人类可读的错误描述。 / Human-readable description.
+    pub message: Cow<'static, str>,
+    /// 已成功写入的元素数（与输入 slice 单位一致）。 / Written elements, in input-slice units.
+    pub written: usize,
+    /// 失败种类。 / Failure kind.
+    pub kind: WriteAllErrorKind,
+}
+
+impl WriteAllError {
+    #[must_use]
+    pub fn new(
+        message: impl Into<Cow<'static, str>>,
+        written: usize,
+        kind: WriteAllErrorKind,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            written,
+            kind,
+        }
+    }
+
+    #[must_use]
+    pub fn interrupted(written: usize) -> Self {
+        Self::new(
+            "write_all interrupted by wake_blocked_writers",
+            written,
+            WriteAllErrorKind::Interrupted,
+        )
+    }
+
+    #[must_use]
+    pub fn rejected(written: usize) -> Self {
+        Self::new(
+            "write_all rejected by reject_pending_writers",
+            written,
+            WriteAllErrorKind::Rejected,
+        )
+    }
+
+    #[must_use]
+    pub fn peer_closed(written: usize) -> Self {
+        Self::new(
+            "peer closed while waiting in write_all",
+            written,
+            WriteAllErrorKind::PeerClosed,
+        )
+    }
+}
+
+impl fmt::Debug for WriteAllError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WriteAllError")
+            .field("message", &self.message)
+            .field("written", &self.written)
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+impl fmt::Display for WriteAllError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} (written {} elements, {:?})",
+            self.message, self.written, self.kind
+        )
+    }
+}
+
+impl std::error::Error for WriteAllError {}
+//AI_END===
