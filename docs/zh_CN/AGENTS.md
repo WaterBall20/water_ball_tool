@@ -21,7 +21,7 @@ cargo test --workspace -- --include-ignored # 包含长时间测试（主分支�
 - `wbfp` 在 stdout/stdin 为终端时运行 TUI；`--no-tui`（或非 TTY stdout）保留经典进度条输出。无子命令时打开文件管理器：
   左侧文件系统、中间可选包视图、最右预览；`wbfp <pack>` 立即打开该包，裸 `wbfp` 隐藏中间视图。该形式仅支持 TUI
   （`--no-tui` 与非 TTY 输入会被拒绝）。`wbfp browse <pack>` 仍是只读单栏浏览器；打包/解包/校验子命令保持原来的
-  预览式单栏布局。
+  预览式单栏布局。管理器中的复制/移动在后台任务中运行，并显示与子命令相同的任务卡片（细节见 ARCHITECTURE §8.16）。
 
 ## 构建选项
 

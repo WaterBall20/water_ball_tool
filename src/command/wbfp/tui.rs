@@ -84,23 +84,15 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     // 任务事件队列不阻塞 IO：工作线程只做入队，进度事件按 4 MiB 限流；UI 侧对任务列表设上限。
     // shortcut: unbounded queue + rate-limited progress; switch to a bounded lock-free queue if a job can outpace the UI by millions of events.
     let (tx, rx) = mpsc::channel();
-    let job = match app.jobs.spec.take() {
-        Some(spec) => match super::ops::spawn(spec, tx) {
-            Ok(handle) => {
-                info!("wbfp TUI: 后台任务已启动 / background job started");
-                Some(handle)
-            }
-            Err(e) => {
-                error!("wbfp TUI: 后台任务启动失败 / job spawn failed: {e}");
-                drop(mouse);
-                if let Err(restore) = ratatui::try_restore() {
-                    eprintln!("恢复终端失败 / failed to restore terminal: {restore}");
-                }
-                return Err(e.into());
-            }
-        },
-        None => None,
-    };
+    app.set_job_sender(tx);
+    if let Err(e) = app.start_pending_job() {
+        error!("wbfp TUI: 后台任务启动失败 / job spawn failed: {e}");
+        drop(mouse);
+        if let Err(restore) = ratatui::try_restore() {
+            eprintln!("恢复终端失败 / failed to restore terminal: {restore}");
+        }
+        return Err(e.into());
+    }
 
     let mut result = event_loop(&mut terminal, &mut app, &logs, &rx, &stdin_rx);
     if let Err(e) = &result {
@@ -109,12 +101,12 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     drop(mouse);
     let restore = ratatui::try_restore();
 
-    if let Some(handle) = job
-        && handle.join().is_err()
-        && result.is_ok()
-    {
-        error!("wbfp TUI: 任务线程 panic / job thread panicked");
-        result = Err(io::Error::other("wbfp 任务线程异常退出 / wbfp job thread panicked").into());
+    for handle in app.take_job_handles() {
+        if handle.join().is_err() && result.is_ok() {
+            error!("wbfp TUI: 任务线程 panic / job thread panicked");
+            result =
+                Err(io::Error::other("wbfp 任务线程异常退出 / wbfp job thread panicked").into());
+        }
     }
     if let Err(e) = restore {
         if result.is_ok() {
@@ -219,10 +211,16 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
         app.active_nav().entries.len(),
         app.display_cwd()
     );
+    // 上一轮的错误只保留到下一次按键 / keep the previous error until the next key press
+    app.ui.error = None;
+
+    // 重命名输入框优先消费所有按键 / the rename editor consumes every key
+    if app.rename_key(code, modifiers) {
+        return;
+    }
     // Esc 与退出键对所有窗口通用；其余按键按窗口枚举分发，避免互相串键。
     // Esc and the quit keys are common to every window; other keys dispatch by the window enum.
-    if code == KeyCode::Esc && app.ui.window != Window::None {
-        app.ui.window = Window::None;
+    if code == KeyCode::Esc && app.cancel_transient() {
         return;
     }
     if code == KeyCode::Char('q')
@@ -243,6 +241,11 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
                 app.ui.window = Window::None;
             }
         }
+        Window::Confirm => match code {
+            KeyCode::Char('y') | KeyCode::Enter => app.confirm_delete(),
+            KeyCode::Char('n') => app.cancel_delete(),
+            _ => {}
+        },
         Window::None => match code {
             KeyCode::Tab => app.switch_focus(),
             KeyCode::BackTab => app.switch_focus(),
@@ -256,9 +259,20 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
             KeyCode::Home => app.select_first(),
             KeyCode::End => app.select_last(),
             KeyCode::Char('p') => app.nav.show_preview = !app.nav.show_preview,
-            //AI=== 跨面板复制/移动 / cross-pane copy and move
-            KeyCode::Char('c') => app.copy_to_other_pane(),
-            KeyCode::Char('m') => app.move_to_other_pane(),
+            //AI=== 跨系统标记确认与同系统操作 / cross-pane confirmation and same-namespace actions
+            KeyCode::Char('v') => {
+                if app.picker.is_some() {
+                    app.confirm_picker();
+                } else if app.pending.is_some() {
+                    app.confirm_pending();
+                }
+            }
+            KeyCode::Char('y') if app.is_manager() => app.copy_cross_namespace(),
+            KeyCode::Char('x') if app.is_manager() => app.move_cross_namespace(),
+            KeyCode::Char('c') if app.is_manager() => app.copy_same_namespace(),
+            KeyCode::Char('m') if app.is_manager() => app.move_same_namespace(),
+            KeyCode::Char('r') if app.is_manager() => app.start_rename(),
+            KeyCode::Delete if app.is_manager() => app.request_delete(),
             //AI_END===
             KeyCode::F(12) => app.ui.window = Window::Debug,
             KeyCode::Char('?') => app.ui.window = Window::Help,
@@ -272,6 +286,10 @@ fn focus_pane_at(app: &mut App, column: u16, row: u16) -> bool {
         return true;
     }
     let position = ratatui::layout::Position::new(column, row);
+    // 目标选择器/待执行传输激活时只允许操作目标列表 / only the target pane is interactive during a picker or pending transfer
+    if app.picker.is_some() || app.pending.is_some() {
+        return app.active_nav().list_area.contains(position);
+    }
     if app.local_nav.list_area.contains(position) {
         app.focus = Focus::Local;
         return true;
@@ -289,7 +307,7 @@ fn handle_mouse(mouse: MouseEvent, app: &mut App) {
 
 fn handle_mouse_kind(kind: MouseEventKind, column: u16, row: u16, app: &mut App) {
     // 弹层是模态的：打开时鼠标不再操作背后的列表 / popups are modal; the list behind them ignores the mouse
-    if app.ui.window != Window::None {
+    if app.ui.window != Window::None || app.rename.is_some() {
         return;
     }
     debug!(

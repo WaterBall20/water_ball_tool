@@ -42,8 +42,15 @@
   label no longer leaves a text-shaped hole in the bar.
 - Without a subcommand, `wbfp` is now a file manager with local filesystem on the left, an optional pack in the middle,
   and preview on the right. The pack path is optional; bare `wbfp` hides the middle pane. The preview folds first, then
-  the local pane; the pack pane stays. `Tab` switches panes, `Enter` opens a probed local pack, `Ctrl+W` closes it,
-  `c`/`m` copy/move the selected entry to the other pane. `browse`, pack, unpack and verify keep their old layout.
+  the local pane; the pack pane stays. `Tab` switches panes, `Enter` opens a probed local pack, `Ctrl+W` closes it.
+- In the manager, `y`/`x` copy/move across namespaces (directly when both lists are visible; otherwise the app switches
+  to the other list, shows the operation and source path in the header, and waits for `v`). `c`/`m` copy/move inside one
+  namespace through a same-kind target pane; the source list becomes read-only and `v` confirms. `Esc` cancels a picker,
+  pending transfer, rename, or delete confirmation before navigating to the parent.
+- Copy/move runs as a background `JobSpec::Transfer` job using the recommended worker count; the right pane shows the
+  same task card and per-file progress as pack/unpack/verify, including pack↔pack and local↔local transfers.
+- `r` renames in place with a prefilled, fully selected input; `Del` asks for `y/n` confirmation. Directories cannot be
+  copied/moved into their own subtree (blocked while navigating and rendered red).
 - Local files are probed by the WBFilesPack header (not extension); valid packs show a magenta `◆`. The new
   `probe_pack` reads only the header and does not acquire `.lock`.
 

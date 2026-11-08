@@ -33,6 +33,7 @@ const MANAGER_TWO_PANE_MIN_WIDTH: u16 = 80;
 //AI_END===
 
 pub(super) fn render(app: &mut App, frame: &mut Frame) {
+    app.frame_width = frame.area().width;
     let [header, path, body, status, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -55,6 +56,7 @@ pub(super) fn render(app: &mut App, frame: &mut Frame) {
     match app.ui.window {
         Window::Help => render_help(frame),
         Window::Debug => render_logs(app, frame),
+        Window::Confirm => render_confirm(app, frame),
         Window::None => {}
     }
 }
@@ -67,14 +69,14 @@ fn render_single(app: &mut App, frame: &mut Frame, body: Rect) {
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(body);
             prepare_nav(&mut app.nav, list);
-            render_list(app, &app.nav, frame, list, " 文件 / Files ", true);
+            render_list(app, &app.nav, false, frame, list, " 文件 / Files ", true);
             render_preview(app, frame, preview);
         } else {
             render_preview(app, frame, body);
         }
     } else {
         prepare_nav(&mut app.nav, body);
-        render_list(app, &app.nav, frame, body, " 文件 / Files ", true);
+        render_list(app, &app.nav, false, frame, body, " 文件 / Files ", true);
     }
 }
 
@@ -86,15 +88,187 @@ fn prepare_nav(nav: &mut Nav, area: Rect) {
 /// Manager 模式：左文件系统、中包、右预览；先折叠预览，再折叠文件系统。
 /// Manager: filesystem left, pack middle, preview right; preview folds first, then filesystem.
 fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
+    // 隐藏面板不接收鼠标 / hidden panes must not receive mouse hits
+    app.local_nav.list_area = Rect::ZERO;
+    app.nav.list_area = Rect::ZERO;
+    if let Some(picker) = app.picker.as_mut() {
+        picker.nav.list_area = Rect::ZERO;
+    }
+
     let has_pack = app.pack.is_some();
     let want_preview = app.nav.show_preview;
     let width = body.width;
 
-    // 焦点不能停在被折叠的面板上 / focus must not stay on a folded pane
-    if !has_pack {
-        app.focus = Focus::Local;
-    } else if width < MANAGER_TWO_PANE_MIN_WIDTH && app.focus == Focus::Local {
-        app.focus = Focus::Pack;
+    // 焦点不能停在被折叠的面板上；目标选择器/待执行传输/重命名/删除确认时保持当前面板。
+    // Focus must not stay on a folded pane; keep the current pane during a picker, pending transfer, rename or delete confirm.
+    if app.picker.is_none() && app.pending.is_none() && app.rename.is_none() && app.delete.is_none()
+    {
+        if !has_pack {
+            app.focus = Focus::Local;
+        } else if width < MANAGER_TWO_PANE_MIN_WIDTH && app.focus == Focus::Local {
+            app.focus = Focus::Pack;
+        }
+    }
+
+    // 目标选择器：源面板 + 同类型目标面板 / destination picker: source pane + same-kind target pane.
+    if let Some(source_local) = app.picker.as_ref().map(|picker| picker.source_local) {
+        let move_entry = app.picker.as_ref().is_some_and(|picker| picker.move_entry);
+        let title = if move_entry {
+            " 目标 / Target · 移动 / Move "
+        } else {
+            " 目标 / Target · 复制 / Copy "
+        };
+        let (source_area, target_area, preview_area) =
+            if width >= MANAGER_THREE_PANE_MIN_WIDTH && want_preview {
+                let [a, b, c] = Layout::horizontal([
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(40),
+                    Constraint::Percentage(30),
+                ])
+                .areas(body);
+                if source_local {
+                    (a, b, Some(c))
+                } else {
+                    (b, a, Some(c))
+                }
+            } else if width >= MANAGER_TWO_PANE_MIN_WIDTH {
+                let [a, b] =
+                    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+                        .areas(body);
+                if source_local {
+                    (a, b, None)
+                } else {
+                    (b, a, None)
+                }
+            } else {
+                (Rect::ZERO, body, None)
+            };
+
+        if source_local {
+            if source_area.width > 0 {
+                prepare_nav(&mut app.local_nav, source_area);
+            }
+        } else if source_area.width > 0 {
+            prepare_nav(&mut app.nav, source_area);
+        }
+        if let Some(picker) = app.picker.as_mut() {
+            prepare_nav(&mut picker.nav, target_area);
+        }
+
+        let source_title = if source_local {
+            " 文件系统 / Filesystem "
+        } else {
+            " 包 / Pack "
+        };
+        if source_area.width > 0 {
+            if source_local {
+                render_list(
+                    app,
+                    &app.local_nav,
+                    true,
+                    frame,
+                    source_area,
+                    source_title,
+                    false,
+                );
+            } else {
+                render_list(
+                    app,
+                    &app.nav,
+                    false,
+                    frame,
+                    source_area,
+                    source_title,
+                    false,
+                );
+            }
+        }
+        if let Some(picker) = app.picker.as_ref() {
+            render_list(
+                app,
+                &picker.nav,
+                source_local,
+                frame,
+                target_area,
+                title,
+                true,
+            );
+        }
+        if let Some(preview) = preview_area {
+            render_preview(app, frame, preview);
+        }
+        return;
+    }
+
+    // 任务运行时把任务卡片固定在右侧 / pin the job card to the right while a job runs.
+    if app.jobs.running {
+        if has_pack && width >= MANAGER_THREE_PANE_MIN_WIDTH {
+            let [local, pack, job] = Layout::horizontal([
+                Constraint::Percentage(30),
+                Constraint::Percentage(40),
+                Constraint::Percentage(30),
+            ])
+            .areas(body);
+            prepare_nav(&mut app.local_nav, local);
+            prepare_nav(&mut app.nav, pack);
+            render_list(
+                app,
+                &app.local_nav,
+                true,
+                frame,
+                local,
+                " 文件系统 / Filesystem ",
+                app.focus == Focus::Local,
+            );
+            render_list(
+                app,
+                &app.nav,
+                false,
+                frame,
+                pack,
+                " 包 / Pack ",
+                app.focus == Focus::Pack,
+            );
+            render_preview(app, frame, job);
+        } else if width >= MANAGER_TWO_PANE_MIN_WIDTH {
+            let [list, job] =
+                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .areas(body);
+            match app.focus {
+                Focus::Local => {
+                    prepare_nav(&mut app.local_nav, list);
+                    render_list(
+                        app,
+                        &app.local_nav,
+                        true,
+                        frame,
+                        list,
+                        " 文件系统 / Filesystem ",
+                        true,
+                    );
+                }
+                Focus::Pack if has_pack => {
+                    prepare_nav(&mut app.nav, list);
+                    render_list(app, &app.nav, false, frame, list, " 包 / Pack ", true);
+                }
+                Focus::Pack => {
+                    prepare_nav(&mut app.local_nav, list);
+                    render_list(
+                        app,
+                        &app.local_nav,
+                        true,
+                        frame,
+                        list,
+                        " 文件系统 / Filesystem ",
+                        true,
+                    );
+                }
+            }
+            render_preview(app, frame, job);
+        } else {
+            render_preview(app, frame, body);
+        }
+        return;
     }
 
     if has_pack && width >= MANAGER_THREE_PANE_MIN_WIDTH && want_preview {
@@ -109,6 +283,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.local_nav,
+            true,
             frame,
             local,
             " 文件系统 / Filesystem ",
@@ -117,6 +292,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.nav,
+            false,
             frame,
             pack,
             " 包 / Pack ",
@@ -132,6 +308,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.local_nav,
+            true,
             frame,
             local,
             " 文件系统 / Filesystem ",
@@ -140,14 +317,35 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.nav,
+            false,
             frame,
             pack,
             " 包 / Pack ",
             app.focus == Focus::Pack,
         );
     } else if has_pack {
-        prepare_nav(&mut app.nav, body);
-        render_list(app, &app.nav, frame, body, " 包 / Pack ", true);
+        let show_local = if let Some(rename) = &app.rename {
+            rename.source_local
+        } else if let Some((local, _)) = &app.delete {
+            *local
+        } else {
+            app.focus == Focus::Local
+        };
+        if show_local {
+            prepare_nav(&mut app.local_nav, body);
+            render_list(
+                app,
+                &app.local_nav,
+                true,
+                frame,
+                body,
+                " 文件系统 / Filesystem ",
+                true,
+            );
+        } else {
+            prepare_nav(&mut app.nav, body);
+            render_list(app, &app.nav, false, frame, body, " 包 / Pack ", true);
+        }
     } else if want_preview && width >= MANAGER_TWO_PANE_MIN_WIDTH {
         let [local, preview] =
             Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -156,6 +354,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.local_nav,
+            true,
             frame,
             local,
             " 文件系统 / Filesystem ",
@@ -167,6 +366,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
         render_list(
             app,
             &app.local_nav,
+            true,
             frame,
             body,
             " 文件系统 / Filesystem ",
@@ -176,6 +376,22 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
 }
 
 fn render_header(app: &App, frame: &mut Frame, area: Rect) {
+    if let Some(banner) = app.operation_banner() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    " wbfp ",
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    banner,
+                    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            area,
+        );
+        return;
+    }
     let mut left = vec![
         Span::styled(
             " wbfp ",
@@ -217,7 +433,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
 fn render_path(app: &App, frame: &mut Frame, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(22)]).areas(area);
-    let (tag, tag_color) = if app.ui.mode == Mode::Manager {
+    let (tag, tag_color) = if app.picker.is_some() || app.pending.is_some() {
+        ("[目标 / TARGET] ", Color::Yellow)
+    } else if app.ui.mode == Mode::Manager {
         match app.focus {
             Focus::Local => ("[文件系统 / FS] ", Color::Cyan),
             Focus::Pack => ("[包 / PACK] ", Color::Magenta),
@@ -256,7 +474,15 @@ fn render_path(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_list(app: &App, nav: &Nav, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+fn render_list(
+    app: &App,
+    nav: &Nav,
+    nav_is_local: bool,
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    focused: bool,
+) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(if focused {
@@ -299,23 +525,47 @@ fn render_list(app: &App, nav: &Nav, frame: &mut Frame, area: Rect, title: &str,
         .enumerate()
         .skip(nav.offset)
         .take(nav.height)
-        .map(|(index, entry)| list_item(app, entry, index == nav.selected, show_size, name_max))
+        .map(|(index, entry)| {
+            list_item(
+                app,
+                nav_is_local,
+                entry,
+                index == nav.selected,
+                show_size,
+                name_max,
+            )
+        })
         .collect();
     frame.render_widget(List::new(items), inner);
 }
 
 fn list_item(
     app: &App,
+    nav_is_local: bool,
     entry: &Entry,
     selected: bool,
     show_size: bool,
     name_max: usize,
 ) -> ListItem<'static> {
+    let picker = app
+        .picker
+        .as_ref()
+        .filter(|picker| picker.source_local == nav_is_local);
+    let is_source = picker.is_some_and(|picker| entry.path == picker.source.path);
+    let forbidden = picker.is_some_and(|picker| {
+        picker.source.is_dir
+            && entry.path != picker.source.path
+            && entry.path.starts_with(&picker.source.path)
+    });
     let style = if selected {
         Style::new()
             .bg(Color::Cyan)
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD)
+    } else if forbidden {
+        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if is_source {
+        Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else if entry.is_dir {
         Style::new()
             .fg(Color::LightBlue)
@@ -329,6 +579,10 @@ fn list_item(
     };
     let marker = if entry.synthetic {
         "↑ "
+    } else if is_source {
+        "→ "
+    } else if forbidden {
+        "× "
     } else if entry.is_dir {
         "▸ "
     } else if entry.pack_version.is_some() {
@@ -338,8 +592,19 @@ fn list_item(
     } else {
         "  "
     };
-    let name = fit_width(&entry.name, name_max);
-    let mut spans = vec![Span::styled(format!(" {marker}{name}"), style)];
+
+    let renaming = app
+        .rename
+        .as_ref()
+        .filter(|rename| rename.source_local == nav_is_local && rename.path == entry.path);
+    let name = if let Some(rename) = renaming {
+        rename_spans(rename, name_max)
+    } else {
+        vec![Span::styled(fit_width(&entry.name, name_max), style)]
+    };
+
+    let mut spans = vec![Span::styled(format!(" {marker}"), style)];
+    spans.extend(name);
     if show_size {
         let size = if entry.is_dir {
             pad_left_width("—", SIZE_WIDTH)
@@ -369,6 +634,27 @@ fn list_item(
         spans.push(Span::raw("  "));
     }
     ListItem::new(Line::from(spans)).style(style)
+}
+
+/// 重命名输入框的文本与光标 / rename editor text with its cursor.
+fn rename_spans(rename: &super::app::RenameEdit, name_max: usize) -> Vec<Span<'static>> {
+    if rename.selected_all {
+        return vec![Span::styled(
+            fit_width(&rename.name, name_max),
+            Style::new()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )];
+    }
+    let chars: Vec<char> = rename.name.chars().collect();
+    let cursor = rename.cursor.min(chars.len());
+    let before: String = chars[..cursor].iter().collect();
+    let after: String = chars[cursor..].iter().collect();
+    vec![Span::styled(
+        fit_width(&format!("{before}▏{after}"), name_max),
+        Style::new().fg(Color::Yellow),
+    )]
 }
 
 fn status_glyph(status: RowStatus) -> (&'static str, Color) {
@@ -703,23 +989,84 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
-    let text = if app.jobs.running {
-        " ↑↓ 滚动   F12 调试   ? 帮助   q 完成后退出 "
+    let (text, color) = if let Some(error) = &app.ui.error {
+        (error.clone(), Color::Red)
+    } else if app.ui.window == Window::Confirm {
+        (
+            " y 确认删除 / confirm   n 或 Esc 取消 / cancel ".to_string(),
+            Color::Red,
+        )
+    } else if app.rename.is_some() {
+        (
+            " 输入新名称 · ⏎ 确认 · Esc 取消 / type a name · Enter confirm · Esc cancel "
+                .to_string(),
+            Color::Yellow,
+        )
+    } else if app.picker.is_some() {
+        (
+            " ↑↓ 选择目标目录 · ⏎ 进入 · v 确认 · Esc 取消 / choose target · Enter open · v confirm · Esc cancel "
+                .to_string(),
+            Color::Yellow,
+        )
+    } else if app.pending.is_some() {
+        (
+            " 导航到目标目录后按 v 执行 · Esc 取消 / navigate to the target directory, then v · Esc cancel "
+                .to_string(),
+            Color::Yellow,
+        )
+    } else if app.jobs.running {
+        (
+            " ↑↓ 滚动 · F12 调试 · ? 帮助 · q 完成后退出 / scroll · debug · help · quit after job "
+                .to_string(),
+            Color::DarkGray,
+        )
     } else if app.ui.mode == Mode::Manager {
         if app.pack.is_some() {
-            " Tab 切换面板   ⏎ 进入/打开   c 复制   m 移动   Ctrl+W 关闭包   p 预览   F12 调试   ? 帮助   q 退出 "
+            (
+                " Tab 切换 · ⏎ 进入/打开 · y 跨系统复制 · x 跨系统移动 · v 粘贴 · c/m 同系统复制/移动 · r 改名 · Del 删除 · Ctrl+W 关包 · ? 帮助 "
+                    .to_string(),
+                Color::DarkGray,
+            )
         } else {
-            " ⏎ 打开包/进入目录   ↑↓ 移动   ← 上级   p 预览   F12 调试   ? 帮助   q 退出 "
+            (
+                " ⏎ 打开包/进入目录 · c 复制 · m 移动 · r 改名 · Del 删除 · p 预览 · ? 帮助 · q 退出 "
+                    .to_string(),
+                Color::DarkGray,
+            )
         }
     } else {
-        " q 退出   ↑↓ 移动   ⏎ 进入   ← 上级   p 预览   F12 调试   ? 帮助 "
+        (
+            " q 退出 · ↑↓ 移动 · ⏎ 进入 · ← 上级 · p 预览 · F12 调试 · ? 帮助 ".to_string(),
+            Color::DarkGray,
+        )
     };
     frame.render_widget(
         Paragraph::new(Line::from(text))
             .alignment(Alignment::Center)
-            .style(Style::new().fg(Color::DarkGray)),
+            .style(Style::new().fg(color)),
         area,
     );
+}
+
+fn render_confirm(app: &App, frame: &mut Frame) {
+    let area = centered(frame.area(), 64, 7);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Red))
+        .title(Line::from(" 删除确认 / Confirm delete ").style(Style::new().fg(Color::Red)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let text = app.delete.as_ref().map_or_else(
+        || "没有待删除项 / nothing to delete".to_string(),
+        |(_, entry)| {
+            format!(
+                "删除 / Delete: {}\n\n按 y 或 ⏎ 确认，n 或 Esc 取消 / press y or Enter to confirm, n or Esc to cancel",
+                entry.name
+            )
+        },
+    );
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), inner);
 }
 
 fn render_help(frame: &mut Frame) {
@@ -731,13 +1078,17 @@ fn render_help(frame: &mut Frame) {
         .title(Line::from(" 帮助 / Help ").style(Style::new().fg(Color::Cyan)));
     let lines = vec![
         Line::from("q / Ctrl+C   退出 / quit（任务运行中会等完成）"),
-        Line::from("Esc          关闭弹层 / 返回上级 / close popup / parent"),
+        Line::from("Esc          取消当前操作；无操作时返回上级 / cancel; otherwise parent"),
         Line::from("Tab          切换文件系统与包面板 / switch panes"),
         Line::from("↑↓ / j k     移动 / move"),
         Line::from("PgUp PgDn    翻页 / page"),
         Line::from("Home End     首尾 / first last"),
         Line::from("⏎ / → / l    进入目录；本地包文件打开 / enter; open a local pack"),
-        Line::from("c / m        复制 / 移动到另一面板 / copy / move to the other pane"),
+        Line::from("y / x        跨系统复制 / 移动（宽屏直接执行）/ cross-pane copy / move"),
+        Line::from("v            执行待传输或确认目标面板 / paste or confirm"),
+        Line::from("c / m        同系统复制 / 移动（打开目标面板）/ same-namespace copy / move"),
+        Line::from("r            原地重命名 / inline rename"),
+        Line::from("Del          删除（确认 y/n）/ delete with confirmation"),
         Line::from("Ctrl+W       关闭当前包 / close the open pack"),
         Line::from("左键 / 双击  选择 / 进入 / select / open"),
         Line::from("← / h        上级 / parent"),

@@ -1099,32 +1099,40 @@ flowchart TD
   input are rejected. `wbfp browse <pack>` remains the read-only single-pane browser; pack/unpack/verify keep their
   existing single-pane layout.
 - **Layout**: Manager mode has three panes — local filesystem, pack, preview. At width >= 110 three panes are shown
-  (30/40/30); at >= 80 the preview folds and local/pack remain (35/65); below 80 the pack pane stays alone. With no
-  pack,
-  the middle pane is omitted: local/preview at >= 80, local only below that. Preview folds before the local pane; the
-  pack
-  pane is never folded while a pack is open. Subcommand modes keep the old single list + preview layout.
+  (30/40/30); at >= 80 the preview folds and local/pack remain (35/65); below 80 the focused pane stays alone. With no
+  pack, the middle pane is omitted: local/preview at >= 80, local only below that. Preview folds before the local pane;
+  the pack pane is never folded while a pack is open. A copy/move picker places a same-kind target pane next to the
+  source (right of a local source, left of a pack source) and folds to the target pane below 80. While a transfer job
+  runs, the job card is pinned to the right: three panes at >= 110, active list + job card at >= 80, job card alone
+  below that. Subcommand modes keep the old single list + preview layout.
 - **State**: `App` groups `ui` (mode, title, pack info, logs, quit flags, error), `nav` (primary pane; pack in manager
-  mode and the only pane in subcommands), `local_nav` (manager's filesystem pane), `focus` (`Local`/`Pack`), and `jobs`.
-  Popups remain a `Window` enum. Pack files on disk are probed by header, never by extension; a probe result is stored
-  in
+  mode and the only pane in subcommands), `local_nav` (manager's filesystem pane), `focus` (`Local`/`Pack`), `pending`
+  (narrow cross-namespace transfer awaiting `v`), `picker` (same-namespace destination pane), `rename` (inline editor),
+  `delete` (confirmation target), the job sender/handles, and `jobs`. Popups remain a `Window` enum with a `Confirm`
+  variant for deletion. Pack files on disk are probed by header, never by extension; a probe result is stored in
   `Entry.pack_version` and rendered as a magenta `◆`.
 - **Navigation**: `ManagerSync` lazily loads one pack directory at a time; the local pane uses `std::fs`. `Tab` switches
   focus, `Enter` enters a directory or opens a probed local pack, `Ctrl+W` closes the pack. Mouse hit-testing selects
-  the
-  pane under the cursor; select/double-click/wheel is shared with `mp` through `command/tui_input.rs`. On Windows the
-  TUI
-  uses the same VT input path as `mp`; if mouse capture cannot start it continues keyboard-only.
-- **Copy/move**: `c`/`m` transfer the focused entry to the other pane (local ↔ pack). The destination name must not
-  exist;
-  directory copies preserve empty directories; a move copies first and deletes the source only after success. Transfers
-  currently run synchronously on the UI thread (`shortcut:`), so a very large directory blocks the UI until it finishes.
-  Pack writes require the manager's read-write handle; `wbfp browse` stays read-only.
-- **Jobs**: `ops::spawn` runs pack/unpack/verify on a background thread and sends `JobEvent::{Dir, File, Start,
-  Progress, Done, Total, Finished}` over a bounded mpsc channel. `app::App::apply_event` updates row statuses and the task
-  card. Unpack/verify open one read-only `ManagerSync` and share a clone with the job: the pack's `.lock` rejects a second
-  open in the same process, so the UI cannot keep a separate handle. Reads serialize on the manager lock; the UI stays
-  responsive because each directory load is short.
+  the pane under the cursor; during a picker or pending transfer only the target pane is hit-testable. Select/
+  double-click/wheel is shared with `mp` through `command/tui_input.rs`. On Windows the TUI uses the same VT input path
+  as `mp`; if mouse capture cannot start it continues keyboard-only.
+- **Copy/move**: `y`/`x` copy/move the focused entry to the other namespace. When both lists are visible they start the
+  transfer immediately; otherwise the app switches focus to the other list, shows the operation and source path in the
+  header, and waits for `v` (`Esc` cancels). `c`/`m` copy/move inside the same namespace: the source list becomes
+  read-only, focus moves to a same-kind target pane, and `v` confirms. A directory cannot enter its own subtree; such
+  rows are rejected while navigating and rendered red. The destination name must not exist; directory copies preserve
+  empty directories; a move copies first and deletes the source only when every file succeeded. Same-volume local moves
+  and in-pack moves use `fs::rename`/`move_entry` (metadata only).
+- **Rename/delete**: `r` opens an inline editor prefilled with the current leaf name and fully selected; `Enter`
+  commits, `Esc` cancels. Local renames use `fs::rename`, pack renames use `ManagerSync::rename` (same directory only).
+  `Del` requests a `y/n` confirmation before removing the entry.
+- **Jobs**: `ops::spawn` runs pack/unpack/verify and copy/move transfers on background threads and sends
+  `JobEvent::{Dir, File, Start, Progress, Done, Total, Finished}` over a bounded mpsc channel.
+  `app::App::apply_event` updates row statuses and the task card. `JobSpec::Transfer` uses the recommended worker count
+  (`common::get_thread_count(None)`), discovers the tree, copies files in parallel, and deletes the source after a
+  successful move. Unpack/verify open one read-only `ManagerSync` and share a clone with the job: the pack's `.lock`
+  rejects a second open in the same process, so the UI cannot keep a separate handle. Reads serialize on the manager
+  lock; the UI stays responsive because each directory load is short.
 - **Status aggregation**: directory rows aggregate descendant file states incrementally (`failed` > `warning` >
   `running/pending` > `done`); a parent is never shown done while a child is unfinished. Unpack/verify empty directories
   receive an explicit `Done` event; pack does not emit directory events because it never copies directories, so an empty
@@ -1142,7 +1150,8 @@ flowchart TD
   rate-limited global `Total` instead. The job card and task rows use the same `command::eighth_block_bar` as
   `mp`, so both TUIs resolve progress to 1/8 of a cell. The job card draws the bar on its own row and the label below
   it, so the text never masks progress; write-optimization skips are reported as `Done`, not warnings.
-- **Shutdown**: operations are not cancellable. `q`/`Ctrl+C` during a job sets `quit_after_job`; the loop exits only after
+- **Shutdown**: `Esc` cancels a picker, pending transfer, rename, or delete confirmation before any write starts; a
+  running job is not interruptible. During a job, `q`/`Ctrl+C` sets `quit_after_job`; the loop exits only after
   `Finished`, so a pack write is never abandoned mid-flight. Mouse capture is released by a Drop guard and the terminal
   is restored on every exit path, matching `mp`.
 - **Logging**: the TUI installs `music_play::tui::channel_writer::init_logging("wbfp")`; logs go to a bounded channel and

@@ -113,13 +113,17 @@ water_ball_tool wbfp my.pack
 ```
 
 Without a subcommand, `wbfp` is a TUI-only file manager: local filesystem on the left, an optional pack in the middle
-and
-preview on the right. A pack path is optional; bare `wbfp` starts with the middle pane hidden. Preview folds first when
-the terminal is narrow, then the local pane; the pack pane stays visible. Local files are probed by their WBFilesPack
-header (not by extension) and valid packs are marked with `◆`; pressing `⏎` on one opens it. `c` copies and `m` moves
-the
-selected entry to the other pane. In-pack rename/move is available through the library; the remaining TUI actions
-(delete/mkdir) are planned. `--no-tui` and non-TTY stdout/stdin are rejected for this form.
+and preview on the right. A pack path is optional; bare `wbfp` starts with the middle pane hidden. Preview folds first
+when the terminal is narrow, then the local pane; the pack pane stays visible. Local files are probed by their
+WBFilesPack header (not by extension) and valid packs are marked with `◆`; pressing `⏎` on one opens it.
+
+`y`/`x` copy/move the selected entry to the other namespace: when both lists are visible they start the transfer
+directly; on a narrow terminal the app switches to the other list, shows the operation and source path in the header,
+and waits for `v`. `c`/`m` copy/move inside the same namespace and open a same-kind destination pane (the source list
+becomes read-only); `v` confirms and `Esc` cancels. `r` renames in place with a prefilled, fully selected input; `Del`
+deletes after a `y/n` confirmation. Every copy/move runs as a background job with the recommended worker count, and the
+right pane shows the same task card and per-file progress as the subcommand modes. `--no-tui` and non-TTY stdout/stdin
+are rejected for this form.
 
 `p`, `u` and `h` keep their existing single-pane layout: the file list is read-only, per-file status is shown beside
 each
@@ -130,10 +134,10 @@ back
 to it automatically.
 
 TUI keys: `q`/`Ctrl+C` quit, `↑`/`↓` move, `⏎` enter a directory or open a probed pack, `←` go to the parent,
-`PageUp`/`PageDown` page, `Home`/`End` jump, `Tab` switch panes in the manager, `c`/`m` copy/move to the other pane,
-`Ctrl+W` close the pack, `p` toggle the preview, `F12` opens the debug popup, `?` help. While a job runs, `q` quits
-after
-it finishes.
+`PageUp`/`PageDown` page, `Home`/`End` jump, `Tab` switch panes in the manager, `y`/`x` cross-namespace copy/move,
+`v` paste or confirm, `c`/`m` same-namespace copy/move, `r` rename, `Del` delete, `Ctrl+W` close the pack, `p` toggle
+the preview, `F12` opens the debug popup, `?` help. `Esc` cancels the current operation (picker, pending transfer,
+rename, or delete confirmation) before going to the parent. While a job runs, `q` quits after it finishes.
 Windows uses the same VT mouse input as `mp`; all platforms support left-click select, double-click open and wheel
 scroll. If mouse capture cannot start, the TUI stays keyboard-only.
 
@@ -190,6 +194,7 @@ A custom binary archive format with the following key features:
 | **Garbage collection**      | Auto-merges adjacent free blocks and reuses freed space                                                                                                                                                                                                                    |
 | **Virtual file add/delete** | `create_dir_all`/`create_file` to create; `delete_file`/`delete_dir_all`/`erase_file`/`erase_dir_all` to delete/erase: delete removes metadata only (data blocks are GC'd, not overwritten), erase overwrites to disk first (Zero/Random/DoD 5220 strategies) then removes |
 | **TUI file manager**        | No-subcommand TUI: local filesystem left, optional pack middle, preview right; preview folds first, then the local pane; pack files are probed by header and marked `◆`                                                                                                    |
+| **Background transfer**     | `y`/`x` and `c`/`m` copy/move local ↔ pack or within one namespace through `JobSpec::Transfer`; uses the recommended worker count and shows the subcommand-style job card                                                   |
 | **Header probe**            | `probe_pack(path)` reads only the file header and does not acquire `.lock`; used by the manager to mark pack files before opening                                                                                                                                          |
 | **Same-directory rename**   | `rename(from, to)` changes the leaf name in place and rewrites only the containing `PackStruct` block; cross-directory moves require a separate API; rejected while a handle is open                                                                                       |
 | **Move + rename**           | `move_entry(from, to)` relocates to an existing parent and may also change the leaf name; updates ancestor directory counts; no data copy or hash recompute                                                                                                                |

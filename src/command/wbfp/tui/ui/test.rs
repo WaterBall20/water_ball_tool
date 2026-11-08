@@ -79,6 +79,63 @@ fn probed_pack_file_uses_pack_marker() -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+#[test]
+fn manager_job_card_is_pinned_to_the_right() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+    app.jobs.state = Some(JobState {
+        label: "复制 / Copy".to_string(),
+        output: "D:\\dst".to_string(),
+        ..JobState::default()
+    });
+    app.jobs.running = true;
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 25))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Filesystem"), "buffer:\n{text}");
+    assert!(text.contains("Copy"), "buffer:\n{text}");
+    assert!(text.contains("D:\\dst"), "buffer:\n{text}");
+    Ok(())
+}
+
+#[test]
+fn picker_shows_target_pane_and_source_banner() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::path::PathBuf::from(
+        "./temp/test/command/wbfp/tui/ui/ok/picker_shows_target_pane_and_source_banner",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"x")?;
+
+    let mut app = App::manager_no_pack();
+    app.local_nav.cwd = dir.clone();
+    app.local_nav.entries = vec![Entry {
+        name: "a.txt".to_string(),
+        path: file.clone(),
+        is_dir: false,
+        size: 1,
+        modified: 0,
+        hash: None,
+        pack_version: None,
+        synthetic: false,
+    }];
+    app.local_nav.selected = 0;
+    app.focus = Focus::Local;
+    app.copy_same_namespace();
+    assert!(app.picker.is_some(), "picker should open");
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 25))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Target"), "buffer:\n{text}");
+    assert!(text.contains("Copy"), "buffer:\n{text}");
+    assert!(text.contains("src:"), "buffer:\n{text}");
+
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
 fn buffer_text(
     terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
 ) -> Result<String, Box<dyn std::error::Error>> {

@@ -1,25 +1,32 @@
 //! wbfp TUI 状态 / wbfp TUI state
 //!
-//! `App` 按职责分为 `Ui`、`Nav`、`Jobs` 三组状态；后台任务只通过
-//! [`JobEvent`] 修改任务状态。
+//! `App` 以 `Ui`、`Nav`、`Jobs` 为核心，另有目标面板、待执行传输、重命名与删除确认等临时状态；
+//! 后台任务只通过 [`JobEvent`] 修改任务状态。
 //!
-//! `App` groups its state into `Ui`, `Nav` and `Jobs`; background jobs only
-//! modify job state through [`JobEvent`].
+//! `App` is centered on `Ui`, `Nav` and `Jobs`, with transient state for the
+//! destination picker, pending transfer, inline rename and delete confirmation;
+//! background jobs only modify job state through [`JobEvent`].
 
 //AI=== TUI 状态、目录导航与事件归并 / TUI state, navigation and event merging
+const MANAGER_TWO_PANE_MIN_WIDTH: u16 = 80;
+
 use super::browse::{self, Entry, PackInfo};
 use crate::command::music_play::tui::channel_writer::{LogLevel, LogLine};
 use crate::command::tui_input::{MouseState, list_index_at};
 use crate::command::wbfp::common;
 use crate::command::wbfp::events::{JobEvent, JobSummary, RowStatus};
-use crate::command::wbfp::ops::JobSpec;
+use crate::command::wbfp::ops::{self, JobSpec, TransferEndpoint};
 use crate::command::wbfp::{
     WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsBrowse,
 };
+use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
 use tracing::{debug, error, warn};
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 
@@ -165,6 +172,8 @@ pub(crate) enum Window {
     None,
     Help,
     Debug,
+    /// 删除确认 / delete confirmation
+    Confirm,
 }
 
 /// 浏览与导航状态 / browsing and navigation state.
@@ -196,6 +205,32 @@ impl Default for Nav {
     }
 }
 
+/// 跨系统待执行传输 / pending cross-namespace transfer.
+pub(crate) struct PendingTransfer {
+    pub source_local: bool,
+    pub source: Entry,
+    pub move_entry: bool,
+}
+
+/// 同系统目标选择器 / same-namespace destination picker.
+pub(crate) struct Picker {
+    pub move_entry: bool,
+    pub source_local: bool,
+    pub source: Entry,
+    pub nav: Nav,
+}
+
+/// 原地重命名编辑 / inline rename editor.
+pub(crate) struct RenameEdit {
+    pub source_local: bool,
+    pub path: PathBuf,
+    pub original: String,
+    pub name: String,
+    /// 光标（按字符计）/ cursor measured in characters
+    pub cursor: usize,
+    pub selected_all: bool,
+}
+
 /// 任务卡片与逐行状态 / job card and per-row state.
 #[derive(Default)]
 pub(crate) struct Jobs {
@@ -211,6 +246,20 @@ pub(crate) struct Jobs {
     dir_agg: HashMap<PathBuf, DirAgg>,
     /// 已发现的目录路径 / discovered directory paths
     dir_paths: HashSet<PathBuf>,
+}
+
+impl Jobs {
+    /// 清空上一次任务，准备启动新任务 / clear the previous job before starting a new one.
+    fn reset(&mut self) {
+        self.state = None;
+        self.active.clear();
+        self.done.clear();
+        self.running = false;
+        self.spec = None;
+        self.statuses.clear();
+        self.dir_agg.clear();
+        self.dir_paths.clear();
+    }
 }
 
 /// 界面壳状态 / UI shell state.
@@ -240,6 +289,20 @@ pub(crate) struct App {
     /// Canonical path and header version of the open pack (for the left-pane marker).
     pub pack_path: Option<PathBuf>,
     pub pack_format_version: Option<u16>,
+    /// 跨系统待执行传输（窄屏切换对方列表后按 `v`）/ pending cross-pane transfer.
+    pub pending: Option<PendingTransfer>,
+    /// 同系统目标选择器 / same-namespace destination picker.
+    pub picker: Option<Picker>,
+    /// 原地重命名编辑 / inline rename editor.
+    pub rename: Option<RenameEdit>,
+    /// 等待确认删除的条目（命名空间，条目）/ entry awaiting delete confirmation (namespace, entry).
+    pub delete: Option<(bool, Entry)>,
+    /// 最近一帧的终端宽度 / terminal width of the latest frame.
+    pub frame_width: u16,
+    /// 后台任务事件发送端（由 TUI 主循环注入）/ job event sender injected by the TUI loop.
+    pub job_tx: Option<Sender<JobEvent>>,
+    /// 已启动任务线程 / spawned job threads.
+    pub job_handles: Vec<JoinHandle<()>>,
 }
 
 impl App {
@@ -262,6 +325,13 @@ impl App {
             pack: None,
             pack_path: None,
             pack_format_version: None,
+            pending: None,
+            picker: None,
+            rename: None,
+            delete: None,
+            frame_width: 120,
+            job_tx: None,
+            job_handles: Vec::new(),
         }
     }
 
@@ -372,8 +442,147 @@ impl App {
         }
     }
 
+    /// 注入后台任务事件发送端 / inject the job event sender.
+    pub(crate) fn set_job_sender(&mut self, tx: Sender<JobEvent>) {
+        self.job_tx = Some(tx);
+    }
+
+    /// 启动 `from_args` 准备的任务 / start the job prepared by `from_args`.
+    pub(crate) fn start_pending_job(&mut self) -> io::Result<()> {
+        let Some(spec) = self.jobs.spec.take() else {
+            return Ok(());
+        };
+        self.spawn(spec)
+    }
+
+    /// 取出任务线程以便退出时 join / take job threads so the caller can join them.
+    pub(crate) fn take_job_handles(&mut self) -> Vec<JoinHandle<()>> {
+        std::mem::take(&mut self.job_handles)
+    }
+
+    fn spawn(&mut self, spec: JobSpec) -> io::Result<()> {
+        let tx = self.job_tx.clone().ok_or_else(|| {
+            io::Error::other("后台任务通道未初始化 / job channel is not initialized")
+        })?;
+        match ops::spawn(spec, tx) {
+            Ok(handle) => {
+                self.job_handles.push(handle);
+                Ok(())
+            }
+            Err(e) => {
+                self.jobs.running = false;
+                let message = format!("启动后台任务失败 / failed to start job: {e}");
+                error!("{message}");
+                if let Some(job) = self.jobs.state.as_mut() {
+                    job.finished = true;
+                    job.error = Some(message.clone());
+                }
+                self.ui.error = Some(message);
+                Err(e)
+            }
+        }
+    }
+
+    fn both_panes_visible(&self) -> bool {
+        self.pack.is_some() && self.frame_width >= MANAGER_TWO_PANE_MIN_WIDTH
+    }
+
+    fn transfer_spec(
+        &self,
+        source_local: bool,
+        dest_local: bool,
+        source: &Entry,
+        dest: PathBuf,
+        move_entry: bool,
+    ) -> Option<JobSpec> {
+        let pack = self.pack.clone();
+        let source_endpoint = if source_local {
+            TransferEndpoint::Local(source.path.clone())
+        } else {
+            TransferEndpoint::Pack {
+                pack: pack.clone()?,
+                path: source.path.clone(),
+            }
+        };
+        let dest_endpoint = if dest_local {
+            TransferEndpoint::Local(dest)
+        } else {
+            TransferEndpoint::Pack {
+                pack: pack?,
+                path: dest,
+            }
+        };
+        Some(JobSpec::Transfer {
+            source: source_endpoint,
+            dest: dest_endpoint,
+            move_entry,
+            thread_count: common::get_thread_count(None),
+        })
+    }
+
+    fn transfer_output(&self, dest_local: bool, dest: &Path) -> String {
+        if dest_local {
+            dest.display().to_string()
+        } else {
+            format!("{}:{}", self.ui.title, dest.display())
+        }
+    }
+
+    /// 启动后台复制/移动任务；目标已存在或参数无效时返回 `false`。
+    /// Start a background copy/move job; returns `false` when the target exists or input is invalid.
+    fn start_transfer_job(
+        &mut self,
+        source_local: bool,
+        dest_local: bool,
+        source: &Entry,
+        dest: PathBuf,
+        move_entry: bool,
+    ) -> bool {
+        if source_local == dest_local && dest == source.path {
+            self.ui.error = Some("目标与源相同 / target is the same as the source".to_string());
+            return false;
+        }
+        let exists = if dest_local {
+            fs::symlink_metadata(&dest).is_ok()
+        } else {
+            self.pack
+                .as_mut()
+                .map(|pack| pack.path_exists(&dest).unwrap_or(false))
+                .unwrap_or(false)
+        };
+        if exists {
+            self.ui.error = Some(format!(
+                "目标已存在 / target already exists: {}",
+                dest.display()
+            ));
+            return false;
+        }
+        let Some(spec) =
+            self.transfer_spec(source_local, dest_local, source, dest.clone(), move_entry)
+        else {
+            self.ui.error = Some("没有打开包 / no pack is open".to_string());
+            return false;
+        };
+        let label = if move_entry {
+            "移动 / Move"
+        } else {
+            "复制 / Copy"
+        };
+        let output = self.transfer_output(dest_local, &dest);
+        self.jobs.reset();
+        self.jobs.state = Some(JobState::new(label, output));
+        self.jobs.running = true;
+        if let Err(e) = self.spawn(spec) {
+            debug!("spawn transfer job failed: {e}");
+        }
+        true
+    }
+
     /// Manager 模式下的活动面板 / active pane in manager mode.
     pub(crate) fn active_nav(&self) -> &Nav {
+        if let Some(picker) = &self.picker {
+            return &picker.nav;
+        }
         if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
             &self.local_nav
         } else {
@@ -382,6 +591,9 @@ impl App {
     }
 
     pub(crate) fn active_nav_mut(&mut self) -> &mut Nav {
+        if let Some(picker) = self.picker.as_mut() {
+            return &mut picker.nav;
+        }
         if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
             &mut self.local_nav
         } else {
@@ -452,6 +664,10 @@ impl App {
         self.pack = None;
         self.pack_path = None;
         self.pack_format_version = None;
+        self.pending = None;
+        self.picker = None;
+        self.rename = None;
+        self.delete = None;
         self.ui.pack_info = None;
         self.ui.title = "manager".to_string();
         self.nav.cwd = PathBuf::new();
@@ -521,9 +737,50 @@ impl App {
         Ok(())
     }
 
+    fn load_picker_dir(&mut self) -> Result<(), String> {
+        let (source_local, cwd) = match self.picker.as_ref() {
+            Some(picker) => (picker.source_local, picker.nav.cwd.clone()),
+            None => return Ok(()),
+        };
+        debug!("load_picker_dir: local={source_local}, cwd={cwd:?}");
+        let entries = if source_local {
+            browse::local_dir(&cwd)?
+        } else {
+            let Some(pack) = self.pack.as_mut() else {
+                return Err("包未打开 / pack is not open".to_string());
+            };
+            browse::pack_dir(pack, &cwd)?
+        };
+        let at_root = if source_local {
+            cwd.parent().is_none()
+        } else {
+            cwd.as_os_str().is_empty()
+        };
+        let entries = if at_root {
+            entries
+        } else if source_local {
+            browse::with_parent(
+                entries,
+                cwd.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| cwd.clone()),
+            )
+        } else {
+            browse::with_parent(entries, cwd.parent().unwrap_or(Path::new("")).to_path_buf())
+        };
+        if let Some(picker) = self.picker.as_mut() {
+            picker.nav.entries = entries;
+            picker.nav.selected = 0;
+            picker.nav.offset = 0;
+            Self::clamp_nav_offset(&mut picker.nav);
+        }
+        self.ui.error = None;
+        Ok(())
+    }
+
     /// 在文件系统面板和包面板之间切换焦点 / switch focus between the local and pack panes.
     pub(crate) fn switch_focus(&mut self) {
-        if !self.is_manager() {
+        if !self.is_manager() || self.picker.is_some() || self.pending.is_some() {
             return;
         }
         self.focus = match self.focus {
@@ -535,6 +792,9 @@ impl App {
 
     /// 重新读取活动面板的当前目录并回到首行 / reload the active pane's current directory and reset to the first row.
     pub(crate) fn load_current_dir(&mut self) -> Result<(), String> {
+        if self.picker.is_some() {
+            return self.load_picker_dir();
+        }
         if self.is_manager() {
             return match self.focus {
                 Focus::Local => self.load_local_dir(),
@@ -588,6 +848,13 @@ impl App {
     }
 
     pub(crate) fn is_at_root(&self) -> bool {
+        if let Some(picker) = &self.picker {
+            return if picker.source_local {
+                picker.nav.cwd.parent().is_none()
+            } else {
+                picker.nav.cwd.as_os_str().is_empty()
+            };
+        }
         match self.ui.mode {
             Mode::Manager if self.focus == Focus::Local => self.local_nav.cwd.parent().is_none(),
             Mode::Pack => self
@@ -600,6 +867,23 @@ impl App {
     }
 
     fn parent_path(&self) -> PathBuf {
+        if let Some(picker) = &self.picker {
+            return if picker.source_local {
+                picker
+                    .nav
+                    .cwd
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| picker.nav.cwd.clone())
+            } else {
+                picker
+                    .nav
+                    .cwd
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf()
+            };
+        }
         match self.ui.mode {
             Mode::Manager if self.focus == Focus::Local => self
                 .local_nav
@@ -627,6 +911,13 @@ impl App {
 
     /// 当前目录的显示文本 / display text for the current directory.
     pub(crate) fn display_cwd(&self) -> String {
+        if let Some(picker) = &self.picker {
+            return if picker.source_local {
+                picker.nav.cwd.display().to_string()
+            } else {
+                Self::pack_display(&picker.nav.cwd)
+            };
+        }
         //AI=== Manager 左侧显示真实路径 / manager's left pane shows the real path
         if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
             return self.local_nav.cwd.display().to_string();
@@ -641,6 +932,10 @@ impl App {
         } else {
             &self.nav.cwd
         };
+        Self::pack_display(relative)
+    }
+
+    fn pack_display(relative: &Path) -> String {
         if relative.as_os_str().is_empty() {
             "/".to_string()
         } else {
@@ -657,7 +952,64 @@ impl App {
         }
     }
 
+    /// 顶部操作横幅：当前操作与源路径 / top banner: current action and source path.
+    pub(crate) fn operation_banner(&self) -> Option<String> {
+        if let Some(picker) = &self.picker {
+            return Some(format!(
+                "{}  源 / src: {} {}",
+                if picker.move_entry {
+                    "[移动 / MOVE]"
+                } else {
+                    "[复制 / COPY]"
+                },
+                if picker.source_local {
+                    "[文件系统 / FS]"
+                } else {
+                    "[包 / PACK]"
+                },
+                picker.source.path.display()
+            ));
+        }
+        if let Some(pending) = &self.pending {
+            return Some(format!(
+                "{}  源 / src: {} {}",
+                if pending.move_entry {
+                    "[移动 / MOVE]"
+                } else {
+                    "[复制 / COPY]"
+                },
+                if pending.source_local {
+                    "[文件系统 / FS]"
+                } else {
+                    "[包 / PACK]"
+                },
+                pending.source.path.display()
+            ));
+        }
+        if let Some(rename) = &self.rename {
+            return Some(format!("[重命名 / RENAME]  {}", rename.path.display()));
+        }
+        None
+    }
+
     pub(crate) fn enter(&mut self) {
+        if self.picker.is_some() {
+            self.enter_picker();
+            return;
+        }
+        // 待执行传输只允许在目标列表内导航，不打开文件 / a pending transfer only navigates the target list
+        if self.pending.is_some() {
+            let Some(entry) = self.selected_entry().cloned() else {
+                return;
+            };
+            if entry.synthetic {
+                self.back();
+            } else if entry.is_dir {
+                self.active_nav_mut().cwd = entry.path;
+                self.reload();
+            }
+            return;
+        }
         let Some(entry) = self
             .active_nav()
             .entries
@@ -791,21 +1143,32 @@ impl App {
         self.selected_entry().map(|e| e.size).unwrap_or(0)
     }
 
-    /// 把当前焦点条目复制到另一面板 / copy the focused entry to the other pane.
-    pub(crate) fn copy_to_other_pane(&mut self) {
-        self.transfer_to_other_pane(false);
+    /// 同系统复制：打开目标选择器 / same-namespace copy: open the destination picker.
+    pub(crate) fn copy_same_namespace(&mut self) {
+        self.start_picker(false);
     }
 
-    /// 把当前焦点条目移动到另一面板 / move the focused entry to the other pane.
-    pub(crate) fn move_to_other_pane(&mut self) {
-        self.transfer_to_other_pane(true);
+    /// 同系统移动：打开目标选择器 / same-namespace move: open the destination picker.
+    pub(crate) fn move_same_namespace(&mut self) {
+        self.start_picker(true);
     }
 
-    fn transfer_to_other_pane(&mut self, move_entry: bool) {
-        // shortcut: 单文件/目录同步执行；超大目录会阻塞 UI，后续改为后台 JobSpec::Transfer。
-        // shortcut: a single file/directory is transferred synchronously; very large directories
-        // block the UI. Move this to a background JobSpec::Transfer later.
-        if !self.is_manager() || self.jobs.running {
+    /// 跨系统复制 / cross-namespace copy.
+    pub(crate) fn copy_cross_namespace(&mut self) {
+        self.cross_transfer(false);
+    }
+
+    /// 跨系统移动 / cross-namespace move.
+    pub(crate) fn move_cross_namespace(&mut self) {
+        self.cross_transfer(true);
+    }
+
+    fn start_picker(&mut self, move_entry: bool) {
+        if !self.is_manager()
+            || self.jobs.running
+            || self.picker.is_some()
+            || self.pending.is_some()
+        {
             return;
         }
         let Some(entry) = self.selected_entry().cloned() else {
@@ -815,67 +1178,452 @@ impl App {
             return;
         }
         let source_local = self.focus == Focus::Local;
-        let Some(mut pack) = self.pack.clone() else {
-            self.ui.error = Some("没有打开包，无法跨面板复制/移动 / no pack is open".to_string());
+        if !source_local && self.pack.is_none() {
+            return;
+        }
+        let start = entry
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let mut nav = Nav::default();
+        nav.cwd = start;
+        nav.show_preview = self.nav.show_preview;
+        self.picker = Some(Picker {
+            move_entry,
+            source_local,
+            source: entry.clone(),
+            nav,
+        });
+        if let Err(err) = self.load_picker_dir() {
+            self.ui.error = Some(err);
+            self.picker = None;
+            return;
+        }
+        if let Some(picker) = self.picker.as_mut()
+            && let Some(index) = picker
+                .nav
+                .entries
+                .iter()
+                .position(|item| item.path == entry.path)
+        {
+            picker.nav.selected = index;
+            Self::reveal_nav_selected(&mut picker.nav);
+        }
+    }
+
+    fn enter_picker(&mut self) {
+        let Some(entry) = self.selected_entry().cloned() else {
             return;
         };
-        let dest_root = if source_local {
+        if entry.synthetic {
+            self.back();
+            return;
+        }
+        if !entry.is_dir {
+            return;
+        }
+        if self.picker_forbidden(&entry.path) {
+            self.ui.error = Some(
+                "不能进入源目录的子树 / cannot enter a directory inside the source".to_string(),
+            );
+            return;
+        }
+        self.active_nav_mut().cwd = entry.path;
+        self.reload();
+    }
+
+    /// 目标是源目录本身或其后代（仅目录源）/ target is the source directory or one of its descendants.
+    fn picker_forbidden(&self, candidate: &Path) -> bool {
+        let Some(picker) = &self.picker else {
+            return false;
+        };
+        if !picker.source.is_dir {
+            return false;
+        }
+        candidate == picker.source.path || candidate.starts_with(&picker.source.path)
+    }
+
+    pub(crate) fn confirm_picker(&mut self) {
+        if self.jobs.running {
+            return;
+        }
+        let Some((source_local, move_entry, source, dest_dir)) =
+            self.picker.as_ref().map(|picker| {
+                (
+                    picker.source_local,
+                    picker.move_entry,
+                    picker.source.clone(),
+                    picker.nav.cwd.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        if source.is_dir && (dest_dir == source.path || dest_dir.starts_with(&source.path)) {
+            self.ui.error =
+                Some("不能进入源目录的子树 / cannot use a directory inside the source".to_string());
+            return;
+        }
+        let dest = dest_dir.join(&source.name);
+        if !self.start_transfer_job(source_local, source_local, &source, dest, move_entry) {
+            return;
+        }
+        self.picker = None;
+        self.focus = if source_local {
+            Focus::Local
+        } else {
+            Focus::Pack
+        };
+    }
+
+    pub(crate) fn cancel_picker(&mut self) {
+        if let Some(picker) = self.picker.take() {
+            self.focus = if picker.source_local {
+                Focus::Local
+            } else {
+                Focus::Pack
+            };
+            self.ui.error = None;
+        }
+    }
+
+    fn cross_transfer(&mut self, move_entry: bool) {
+        if !self.is_manager()
+            || self.jobs.running
+            || self.picker.is_some()
+            || self.pending.is_some()
+        {
+            return;
+        }
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.synthetic {
+            return;
+        }
+        if self.pack.is_none() {
+            self.ui.error = Some("没有打开包，无法跨文件系统操作 / no pack is open".to_string());
+            return;
+        }
+        let source_local = self.focus == Focus::Local;
+        if self.both_panes_visible() {
+            let dest_dir = if source_local {
+                self.nav.cwd.clone()
+            } else {
+                self.local_nav.cwd.clone()
+            };
+            let dest = dest_dir.join(&entry.name);
+            self.start_transfer_job(source_local, !source_local, &entry, dest, move_entry);
+        } else {
+            self.pending = Some(PendingTransfer {
+                source_local,
+                source: entry,
+                move_entry,
+            });
+            self.focus = if source_local {
+                Focus::Pack
+            } else {
+                Focus::Local
+            };
+            self.reload();
+        }
+    }
+
+    pub(crate) fn confirm_pending(&mut self) {
+        if self.jobs.running {
+            return;
+        }
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        let dest_dir = if pending.source_local {
             self.nav.cwd.clone()
         } else {
             self.local_nav.cwd.clone()
         };
-        let dest = dest_root.join(&entry.name);
-        let dest_exists = if source_local {
-            pack.path_exists(&dest).unwrap_or(false)
-        } else {
-            fs::symlink_metadata(&dest).is_ok()
-        };
-        if dest_exists {
-            self.ui.error = Some(format!(
-                "目标已存在 / target already exists: {}",
-                dest.display()
-            ));
-            return;
+        let dest = dest_dir.join(&pending.source.name);
+        if !self.start_transfer_job(
+            pending.source_local,
+            !pending.source_local,
+            &pending.source,
+            dest,
+            pending.move_entry,
+        ) {
+            self.pending = Some(pending);
         }
+    }
 
-        let result = if source_local {
-            copy_local_to_pack(&mut pack, &entry.path, &dest)
-        } else {
-            copy_pack_to_local(&mut pack, &entry.path, &dest)
-        };
-        if let Err(err) = result {
-            self.ui.error = Some(err);
-            return;
-        }
-
-        if move_entry {
-            let delete_result = if source_local {
-                if entry.is_dir {
-                    fs::remove_dir_all(&entry.path).map_err(|e| e.to_string())
-                } else {
-                    fs::remove_file(&entry.path).map_err(|e| e.to_string())
-                }
-            } else if entry.is_dir {
-                pack.delete_dir_all(&entry.path).map_err(|e| e.to_string())
+    pub(crate) fn cancel_pending(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.focus = if pending.source_local {
+                Focus::Local
             } else {
-                pack.delete_file(&entry.path).map_err(|e| e.to_string())
+                Focus::Pack
             };
-            if let Err(err) = delete_result {
-                self.ui.error = Some(format!(
-                    "已复制但删除源失败 / copied but failed to delete source: {err}"
-                ));
+            self.ui.error = None;
+        }
+    }
+
+    /// 开始原地重命名 / start inline rename of the selected entry.
+    pub(crate) fn start_rename(&mut self) {
+        if !self.is_manager()
+            || self.jobs.running
+            || self.picker.is_some()
+            || self.pending.is_some()
+        {
+            return;
+        }
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.synthetic {
+            return;
+        }
+        let source_local = self.focus == Focus::Local;
+        self.rename = Some(RenameEdit {
+            source_local,
+            path: entry.path,
+            original: entry.name.clone(),
+            name: entry.name,
+            cursor: 0,
+            selected_all: true,
+        });
+        if let Some(edit) = self.rename.as_mut() {
+            edit.cursor = edit.name.chars().count();
+        }
+    }
+
+    /// 重命名输入框的按键处理；返回 `true` 表示已消费该按键。
+    /// Handle one key in the rename editor; returns `true` when the key was consumed.
+    pub(crate) fn rename_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if self.rename.is_none() {
+            return false;
+        }
+        match code {
+            KeyCode::Enter => self.commit_rename(),
+            KeyCode::Esc => self.cancel_rename(),
+            _ => {
+                let Some(edit) = self.rename.as_mut() else {
+                    return false;
+                };
+                match code {
+                    KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        edit.selected_all = true;
+                    }
+                    KeyCode::Char(c)
+                        if !modifiers.contains(KeyModifiers::CONTROL)
+                            && !modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        if edit.selected_all {
+                            edit.name.clear();
+                            edit.cursor = 0;
+                            edit.selected_all = false;
+                        }
+                        let index = char_to_byte(&edit.name, edit.cursor);
+                        edit.name.insert(index, c);
+                        edit.cursor = edit.cursor.saturating_add(1);
+                    }
+                    KeyCode::Backspace => {
+                        if edit.selected_all {
+                            edit.name.clear();
+                            edit.cursor = 0;
+                            edit.selected_all = false;
+                        } else if edit.cursor > 0 {
+                            edit.cursor = edit.cursor.saturating_sub(1);
+                            let index = char_to_byte(&edit.name, edit.cursor);
+                            edit.name.remove(index);
+                        }
+                    }
+                    KeyCode::Delete => {
+                        if edit.selected_all {
+                            edit.name.clear();
+                            edit.cursor = 0;
+                            edit.selected_all = false;
+                        } else {
+                            let index = char_to_byte(&edit.name, edit.cursor);
+                            if index < edit.name.len() {
+                                edit.name.remove(index);
+                            }
+                        }
+                    }
+                    KeyCode::Left => {
+                        edit.selected_all = false;
+                        edit.cursor = edit.cursor.saturating_sub(1);
+                    }
+                    KeyCode::Right => {
+                        edit.selected_all = false;
+                        let max = edit.name.chars().count();
+                        edit.cursor = edit.cursor.saturating_add(1).min(max);
+                    }
+                    KeyCode::Home => {
+                        edit.selected_all = false;
+                        edit.cursor = 0;
+                    }
+                    KeyCode::End => {
+                        edit.selected_all = false;
+                        edit.cursor = edit.name.chars().count();
+                    }
+                    _ => {}
+                }
             }
         }
+        true
+    }
 
-        // 两侧都刷新，避免旧列表继续显示已移动的条目 / reload both panes after a transfer
-        if let Err(err) = self.load_local_dir() {
-            self.ui.error = Some(err);
+    fn commit_rename(&mut self) {
+        let Some(edit) = self.rename.take() else {
+            return;
+        };
+        let name = edit.name.trim().to_string();
+        if name == edit.original {
+            return;
         }
-        if self.pack.is_some()
-            && let Err(err) = self.load_pack_dir()
+        if let Err(message) = validate_leaf_name(&name) {
+            self.ui.error = Some(message);
+            self.rename = Some(edit);
+            return;
+        }
+        let Some(parent) = edit.path.parent().map(Path::to_path_buf) else {
+            self.ui.error =
+                Some("无法获取父目录 / cannot resolve the parent directory".to_string());
+            self.rename = Some(edit);
+            return;
+        };
+        let dest = parent.join(&name);
+        if edit.source_local {
+            let dest_exists = fs::symlink_metadata(&dest).is_ok();
+            // 仅大小写变化时规范路径相同，允许重命名 / a case-only rename resolves to the same file
+            let same_file = dest_exists
+                && fs::canonicalize(&dest)
+                    .ok()
+                    .zip(fs::canonicalize(&edit.path).ok())
+                    .is_some_and(|(dest, source)| dest == source);
+            if dest_exists && !same_file {
+                self.ui.error = Some(format!(
+                    "目标已存在 / target already exists: {}",
+                    dest.display()
+                ));
+                self.rename = Some(edit);
+                return;
+            }
+            if let Err(err) = fs::rename(&edit.path, &dest) {
+                self.ui.error = Some(format!("重命名失败 / rename failed: {err}"));
+                self.rename = Some(edit);
+                return;
+            }
+        } else {
+            let Some(pack) = self.pack.as_mut() else {
+                self.ui.error = Some("包未打开 / pack is not open".to_string());
+                self.rename = Some(edit);
+                return;
+            };
+            if let Err(err) = pack.rename(&edit.path, &dest) {
+                self.ui.error = Some(format!("重命名失败 / rename failed: {err}"));
+                self.rename = Some(edit);
+                return;
+            }
+        }
+        self.rename = None;
+        self.focus = if edit.source_local {
+            Focus::Local
+        } else {
+            Focus::Pack
+        };
+        self.reload();
+        if let Some(index) = self
+            .active_nav()
+            .entries
+            .iter()
+            .position(|entry| entry.path == dest)
         {
-            self.ui.error = Some(err);
+            self.select_index(index);
         }
+    }
+
+    pub(crate) fn cancel_rename(&mut self) {
+        self.rename = None;
+        self.ui.error = None;
+    }
+
+    /// 请求删除当前条目（弹窗确认）/ request deletion of the selected entry (confirmation popup).
+    pub(crate) fn request_delete(&mut self) {
+        if !self.is_manager()
+            || self.jobs.running
+            || self.picker.is_some()
+            || self.pending.is_some()
+        {
+            return;
+        }
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
+        if entry.synthetic {
+            return;
+        }
+        let source_local = self.focus == Focus::Local;
+        self.delete = Some((source_local, entry));
+        self.ui.window = Window::Confirm;
+    }
+
+    pub(crate) fn confirm_delete(&mut self) {
+        self.ui.window = Window::None;
+        let Some((source_local, entry)) = self.delete.take() else {
+            return;
+        };
+        let result = if source_local {
+            if entry.is_dir {
+                fs::remove_dir_all(&entry.path)
+            } else {
+                fs::remove_file(&entry.path)
+            }
+            .map_err(|err| err.to_string())
+        } else if let Some(pack) = self.pack.as_mut() {
+            if entry.is_dir {
+                pack.delete_dir_all(&entry.path)
+            } else {
+                pack.delete_file(&entry.path)
+            }
+            .map_err(|err| err.to_string())
+        } else {
+            Err("包未打开 / pack is not open".to_string())
+        };
+        if let Err(err) = result {
+            self.ui.error = Some(format!("删除失败 / delete failed: {err}"));
+            return;
+        }
+        self.reload();
+    }
+
+    pub(crate) fn cancel_delete(&mut self) {
+        self.delete = None;
+        self.ui.window = Window::None;
+    }
+
+    /// `Esc` 优先级：弹窗 → 重命名 → 目标面板 → 待执行传输；未取消任何状态时返回 `false`。
+    /// Esc precedence: popup → rename → picker → pending; returns `false` when nothing was cancelled.
+    pub(crate) fn cancel_transient(&mut self) -> bool {
+        if self.ui.window != Window::None {
+            if self.ui.window == Window::Confirm {
+                self.cancel_delete();
+            } else {
+                self.ui.window = Window::None;
+            }
+            return true;
+        }
+        if self.rename.is_some() {
+            self.cancel_rename();
+            return true;
+        }
+        if self.picker.is_some() {
+            self.cancel_picker();
+            return true;
+        }
+        if self.pending.is_some() {
+            self.cancel_pending();
+            return true;
+        }
+        false
     }
 
     pub(crate) fn status_of(&self, entry: &Entry) -> Option<RowStatus> {
@@ -1152,6 +1900,18 @@ impl App {
                     self.finish_pending_dirs();
                 }
                 self.finish_tasks(success);
+                //AI=== 管理器任务结束后刷新两侧列表 / refresh both manager panes after a job
+                if self.is_manager() {
+                    if let Err(e) = self.load_local_dir() {
+                        self.ui.error = Some(e);
+                    }
+                    if self.pack.is_some()
+                        && let Err(e) = self.load_pack_dir()
+                    {
+                        self.ui.error = Some(e);
+                    }
+                }
+                //AI_END===
                 if self.ui.quit_after_job {
                     self.ui.should_quit = true;
                 }
@@ -1170,80 +1930,25 @@ impl App {
     }
 }
 
-//AI=== 本地文件系统与包之间的复制 / copy between the local filesystem and a pack
-fn copy_local_to_pack(pack: &mut ManagerSync, src: &Path, dst: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(src)
-        .map_err(|e| format!("读取源文件失败 / failed to stat source: {e}"))?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "跳过符号链接 / symlink is not supported: {}",
-            src.display()
-        ));
-    }
-    if metadata.is_dir() {
-        pack.create_dir_all(&dst)
-            .map_err(|e| format!("创建包内目录失败 / failed to create pack directory: {e}"))?;
-        for entry in fs::read_dir(src).map_err(|e| format!("读取源目录失败: {e}"))? {
-            let entry = entry.map_err(|e| format!("读取源目录项失败: {e}"))?;
-            let name = entry.file_name();
-            copy_local_to_pack(pack, &entry.path(), &dst.join(name))?;
-        }
-        Ok(())
-    } else if metadata.is_file() {
-        let mut input = fs::File::open(src)
-            .map_err(|e| format!("打开源文件失败 / failed to open source: {e}"))?;
-        let mut output = pack
-            .virtual_file_options()
-            .write(true)
-            .create_new(true)
-            .alloc_size(Some(metadata.len()))
-            .open(dst)
-            .map_err(|e| format!("创建包内文件失败 / failed to create pack file: {e}"))?;
-        output
-            .set_len(metadata.len())
-            .map_err(|e| format!("设置包内文件长度失败: {e}"))?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_millis());
-        output
-            .set_modified(modified)
-            .map_err(|e| format!("设置包内文件修改时间失败: {e}"))?;
-        std::io::copy(&mut input, &mut output)
-            .map_err(|e| format!("复制到包失败 / failed to copy into pack: {e}"))?;
-        Ok(())
-    } else {
-        Err(format!(
-            "不支持的源文件类型 / unsupported source type: {}",
-            src.display()
-        ))
-    }
+//AI=== 重命名辅助 / rename helpers
+fn char_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len())
 }
 
-fn copy_pack_to_local(pack: &mut ManagerSync, src: &Path, dst: &Path) -> Result<(), String> {
-    let item = pack
-        .get_pack_struct_item(&src)
-        .map_err(|e| format!("读取包内条目失败 / failed to read pack entry: {e}"))?;
-    match item.item_type() {
-        water_ball_tool_lib::wb_files_pack::PackStructItemType::Dir { .. } => {
-            fs::create_dir_all(dst)
-                .map_err(|e| format!("创建本地目录失败 / failed to create local directory: {e}"))?;
-            let names = pack
-                .get_struct_item_name_list(&src)
-                .map_err(|e| format!("读取包内目录失败 / failed to read pack directory: {e}"))?;
-            for name in names {
-                copy_pack_to_local(pack, &src.join(&name), &dst.join(&name))?;
-            }
-            Ok(())
-        }
-        water_ball_tool_lib::wb_files_pack::PackStructItemType::File { .. } => {
-            let mut buf = vec![0u8; 1024 * 1024];
-            common::extract_pack_file_to_disk(pack, src, dst, &mut buf, None)
-                .map_err(|e| format!("解包到本地失败 / failed to extract: {e}"))?;
-            Ok(())
-        }
+fn validate_leaf_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("名称不能为空 / name must not be empty".to_string());
     }
+    if name == "." || name == ".." {
+        return Err("名称不能是 . 或 .. / name must not be . or ..".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return Err("名称不能包含路径分隔符 / name must not contain a path separator".to_string());
+    }
+    Ok(())
 }
 //AI_END===
 

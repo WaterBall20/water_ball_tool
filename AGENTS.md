@@ -18,12 +18,12 @@ cargo test --workspace -- --include-ignored # include long-time tests (full CI s
 ./target/release/water_ball_tool -h
 ```
 
-- `wbfp` runs a TUI when stdout and stdin are terminals; `--no-tui` (or a non-TTY stdout/stdin) keeps the classic progress-bar output.
-  Without a subcommand it opens the file manager: local filesystem on the left, an optional pack in the middle and
-  preview on
-  the right. `wbfp <pack>` opens that pack immediately; bare `wbfp` starts with the middle pane hidden. This form is
-  TUI-only (`--no-tui` and non-TTY input are rejected). `wbfp browse <pack>` remains the read-only single-pane browser,
-  and the pack/unpack/verify subcommands keep their preview-only layout.
+- `wbfp` runs a TUI when stdout and stdin are terminals; `--no-tui` (or a non-TTY stdout/stdin) keeps the classic
+  progress-bar output. Without a subcommand it opens the file manager: local filesystem on the left, an optional pack in
+  the middle and preview on the right. `wbfp <pack>` opens that pack immediately; bare `wbfp` starts with the middle pane
+  hidden. This form is TUI-only (`--no-tui` and non-TTY input are rejected). `wbfp browse <pack>` remains the read-only
+  single-pane browser, and the pack/unpack/verify subcommands keep their preview-only layout. Copy/move actions in the
+  manager run as background jobs and show the same task card as the subcommands (details: ARCHITECTURE §8.16).
 
 ## Build options
 

@@ -1,10 +1,12 @@
 //AI=== wbfp TUI 渲染与按键测试 / wbfp TUI rendering and key tests
-use super::app::{App, TaskItem, Window};
+use super::app::{App, Focus, Nav, Picker, TaskItem, Window};
+use super::browse::Entry;
 use super::handle_key;
 use super::ui;
 use crate::command::wbfp::events::RowStatus;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
+use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     let width = usize::from(buffer.area.width);
@@ -94,5 +96,118 @@ fn window_keys_are_isolated_and_esc_closes() {
     handle_key(KeyCode::F(12), KeyModifiers::NONE, &mut app);
     handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
     assert_eq!(app.ui.window, Window::None);
+}
+
+#[test]
+fn esc_cancels_picker_without_navigating_parent() {
+    let mut app = App::manager_no_pack();
+    let source = app
+        .local_nav
+        .entries
+        .iter()
+        .find(|entry| !entry.is_dir && !entry.synthetic)
+        .cloned()
+        .expect("manager fixture needs a file");
+    let cwd = app.local_nav.cwd.clone();
+    app.focus = Focus::Local;
+    app.picker = Some(Picker {
+        move_entry: false,
+        source_local: true,
+        source,
+        nav: Nav::default(),
+    });
+
+    handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
+    assert!(app.picker.is_none());
+    assert_eq!(app.local_nav.cwd, cwd);
+}
+
+#[test]
+fn rename_editor_consumes_typing_and_quit() {
+    let mut app = App::manager_no_pack();
+    let index = app
+        .local_nav
+        .entries
+        .iter()
+        .position(|entry| !entry.is_dir && !entry.synthetic)
+        .expect("manager fixture needs a file");
+    app.local_nav.selected = index;
+    app.focus = Focus::Local;
+    app.start_rename();
+    assert!(app.rename.is_some());
+
+    handle_key(KeyCode::Char('q'), KeyModifiers::NONE, &mut app);
+    assert!(!app.ui.should_quit);
+    assert_eq!(
+        app.rename.as_ref().map(|rename| rename.name.as_str()),
+        Some("q")
+    );
+
+    handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
+    assert!(app.rename.is_none());
+}
+
+#[test]
+fn delete_key_opens_confirmation_and_can_cancel() {
+    let mut app = App::manager_no_pack();
+    let index = app
+        .local_nav
+        .entries
+        .iter()
+        .position(|entry| !entry.is_dir && !entry.synthetic)
+        .expect("manager fixture needs a file");
+    app.local_nav.selected = index;
+    app.focus = Focus::Local;
+
+    handle_key(KeyCode::Delete, KeyModifiers::NONE, &mut app);
+    assert_eq!(app.ui.window, Window::Confirm);
+    handle_key(KeyCode::Char('n'), KeyModifiers::NONE, &mut app);
+    assert_eq!(app.ui.window, Window::None);
+    assert!(app.delete.is_none());
+}
+#[test]
+fn narrow_cross_copy_switches_pane_and_esc_cancels() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = std::path::PathBuf::from(
+        "./temp/test/command/wbfp/tui/ok/narrow_cross_copy_switches_pane_and_esc_cancels",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("pack");
+    let pack = ManagerSync::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)?;
+    let file = dir.join("a.txt");
+    std::fs::write(&file, b"a")?;
+
+    let mut app = App::manager_no_pack();
+    app.pack = Some(pack);
+    app.focus = Focus::Local;
+    app.frame_width = 70;
+    app.local_nav.cwd = dir.clone();
+    app.local_nav.entries = vec![Entry {
+        name: "a.txt".to_string(),
+        path: file,
+        is_dir: false,
+        size: 1,
+        modified: 0,
+        hash: None,
+        pack_version: None,
+        synthetic: false,
+    }];
+    app.local_nav.selected = 0;
+
+    app.copy_cross_namespace();
+    assert!(app.pending.is_some());
+    assert_eq!(app.focus, Focus::Pack);
+
+    handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
+    assert!(app.pending.is_none());
+    assert_eq!(app.focus, Focus::Local);
+
+    drop(app);
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
 }
 //AI_END===
