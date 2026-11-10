@@ -3145,6 +3145,7 @@ dependencies = [
  "blake3",
  "cpal",
  "crossbeam-channel",
+ "crossbeam-utils",
  "lofty",
  "pretty_assertions",
  "rand 0.10.3",

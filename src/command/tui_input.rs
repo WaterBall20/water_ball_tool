@@ -178,7 +178,7 @@ fn enable_vt_input() -> io::Result<u32> {
     }
 
     let mut mode = 0u32;
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+    if unsafe { GetConsoleMode(handle, &raw mut mode) } == 0 {
         return Err(io::Error::last_os_error());
     }
     if unsafe { SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT) } == 0 {
@@ -450,7 +450,7 @@ pub(crate) fn spawn_stdin_reader() -> Result<Receiver<Vec<u8>>, Box<dyn Error>> 
     std::thread::Builder::new()
         .name("tui-stdin".to_string())
         .spawn(move || {
-            let mut stdin = std::io::stdin();
+            let mut stdin = io::stdin();
             let mut buf = [0u8; 1024];
             loop {
                 match stdin.read(&mut buf) {
@@ -460,7 +460,7 @@ pub(crate) fn spawn_stdin_reader() -> Result<Receiver<Vec<u8>>, Box<dyn Error>> 
                             break;
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => (),
                     Err(_) => break,
                 }
             }

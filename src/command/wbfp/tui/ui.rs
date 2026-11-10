@@ -935,18 +935,13 @@ fn push_metadata(lines: &mut Vec<Line<'static>>, app: &App, entry: &Entry) {
 }
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
-    let (ok, warn, fail) = app
-        .jobs
-        .state
-        .as_ref()
-        .map(|job| {
-            (
-                job.files_done.saturating_sub(job.failed),
-                job.warnings,
-                job.failed,
-            )
-        })
-        .unwrap_or((0, 0, 0));
+    let (ok, warn, fail) = app.jobs.state.as_ref().map_or((0, 0, 0), |job| {
+        (
+            job.files_done.saturating_sub(job.failed),
+            job.warnings,
+            job.failed,
+        )
+    });
     let nav = app.active_nav();
     let position = if nav.entries.is_empty() {
         0

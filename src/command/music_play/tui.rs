@@ -264,7 +264,7 @@ fn handle_main_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, ap
         KeyCode::F(12) => app.toggle_debug(),
         KeyCode::Char('e') => app.toggle_effects(),
         //AI_END===
-        KeyCode::Char('+') | KeyCode::Char('=') => runtime.add_volume(0.05),
+        KeyCode::Char('+' | '=') => runtime.add_volume(0.05),
         KeyCode::Char('-') => runtime.add_volume(-0.05),
         _ => {}
     }

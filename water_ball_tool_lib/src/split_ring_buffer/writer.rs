@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::split_ring_buffer::error::{Error, Kind, WriteAllError};
 use crate::split_ring_buffer::inner::{Inner, lock_ignore_poison, wait_ignore_poison};
+use crate::split_ring_buffer::wait_loop;
 
 fn kind_to_error<T>(k: Kind<T>) -> Error<T> {
     match k {
@@ -81,6 +82,7 @@ impl<T> LockedWriter<T> {
     pub fn push_wait(&self, value: T) -> Result<(), Error<T>> {
         let my_epoch = self.inner.current_rejection_epoch();
         let mut value = value;
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_epoch) {
                 return Err(Error::write_rejected_value(value));
@@ -99,6 +101,9 @@ impl<T> LockedWriter<T> {
             }
             if self.inner.read.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_epoch) {
@@ -346,6 +351,7 @@ impl<T: Copy> LockedWriter<T> {
             return Ok(0);
         }
         let my_epoch = self.inner.current_rejection_epoch();
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_epoch) {
                 return Err(Error::write_rejected());
@@ -359,6 +365,9 @@ impl<T: Copy> LockedWriter<T> {
             }
             if self.inner.read.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_epoch) {
@@ -411,6 +420,7 @@ impl<T: Copy> LockedWriter<T> {
         let my_wake = self.inner.current_wake_epoch();
         let _g = lock_ignore_poison(&self.inner.write.lock);
         let mut written = 0;
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_rejection) {
                 return Err(WriteAllError::rejected(written));
@@ -428,6 +438,9 @@ impl<T: Copy> LockedWriter<T> {
             }
             if self.inner.read.is_closed() {
                 return Err(WriteAllError::peer_closed(written));
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_rejection) {
@@ -451,6 +464,7 @@ impl<T: Copy> LockedWriter<T> {
             g = wait_ignore_poison(&self.inner.write.cvar, g);
             self.inner.write.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
     }
 
@@ -587,20 +601,23 @@ impl<T> UnlockedWriter<T> {
     pub fn push_wait(&mut self, value: T) -> Result<(), Error<T>> {
         let my_epoch = self.inner.current_rejection_epoch();
         let mut value = value;
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_epoch) {
                 return Err(Error::write_rejected_value(value));
             }
             match self.inner.push_one(value) {
                 Ok(()) => return Ok(()),
-                Err(Kind::Full(v))
-                | Err(Kind::Clearing(v))
-                | Err(Kind::Truncating(v))
-                | Err(Kind::Resizing(v)) => value = v,
+                Err(
+                    Kind::Full(v) | Kind::Clearing(v) | Kind::Truncating(v) | Kind::Resizing(v),
+                ) => value = v,
                 Err(_) => unreachable!(),
             }
             if self.inner.read.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_epoch) {
@@ -789,6 +806,7 @@ impl<T: Copy> UnlockedWriter<T> {
             return Ok(0);
         }
         let my_epoch = self.inner.current_rejection_epoch();
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_epoch) {
                 return Err(Error::write_rejected());
@@ -799,6 +817,9 @@ impl<T: Copy> UnlockedWriter<T> {
             }
             if self.inner.read.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_epoch) {
@@ -844,6 +865,7 @@ impl<T: Copy> UnlockedWriter<T> {
         let my_rejection = self.inner.current_rejection_epoch();
         let my_wake = self.inner.current_wake_epoch();
         let mut written = 0;
+        let mut is_wait_loop = false;
         loop {
             if self.inner.rejection_changed(my_rejection) {
                 return Err(WriteAllError::rejected(written));
@@ -861,6 +883,9 @@ impl<T: Copy> UnlockedWriter<T> {
             }
             if self.inner.read.is_closed() {
                 return Err(WriteAllError::peer_closed(written));
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             if self.inner.rejection_changed(my_rejection) {
@@ -884,6 +909,7 @@ impl<T: Copy> UnlockedWriter<T> {
             g = wait_ignore_poison(&self.inner.write.cvar, g);
             self.inner.write.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
     }
 

@@ -245,7 +245,7 @@ fn task_list_skips_directories_and_finishes_active_on_job_end() {
         total: 10,
     });
     app.apply_event(JobEvent::Finished {
-        result: Ok(Default::default()),
+        result: Ok(JobSummary::default()),
     });
     assert!(app.jobs.active.is_empty());
     assert_eq!(app.jobs.done.len(), 1);
@@ -337,7 +337,7 @@ fn background_copy_local_file_into_pack() -> Result<(), Box<dyn std::error::Erro
     assert!(pack.path_exists(&"source.txt")?);
     let mut file = pack.open_virtual_file(&"source.txt")?;
     let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut buf)?;
+    io::Read::read_to_end(&mut file, &mut buf)?;
     assert_eq!(buf, b"copy me");
 
     drop(app);
@@ -429,7 +429,7 @@ fn picker_copies_local_file_to_another_local_dir() -> Result<(), Box<dyn std::er
     if let Some(picker) = app.picker.as_mut() {
         picker.nav.cwd = dst_dir.clone();
     }
-    app.load_picker_dir().map_err(std::io::Error::other)?;
+    app.load_picker_dir().map_err(io::Error::other)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_job_sender(tx);
@@ -472,7 +472,7 @@ fn picker_blocks_directory_into_own_subtree() -> Result<(), Box<dyn std::error::
     if let Some(picker) = app.picker.as_mut() {
         picker.nav.cwd = sub_dir.clone();
     }
-    app.load_picker_dir().map_err(std::io::Error::other)?;
+    app.load_picker_dir().map_err(io::Error::other)?;
     app.confirm_picker();
 
     assert!(
@@ -542,7 +542,7 @@ fn background_copy_pack_directory_to_pack() -> Result<(), Box<dyn std::error::Er
     if let Some(picker) = app.picker.as_mut() {
         picker.nav.cwd = PathBuf::from("dst");
     }
-    app.load_picker_dir().map_err(std::io::Error::other)?;
+    app.load_picker_dir().map_err(io::Error::other)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_job_sender(tx);
@@ -556,7 +556,7 @@ fn background_copy_pack_directory_to_pack() -> Result<(), Box<dyn std::error::Er
     {
         let mut file = pack.open_virtual_file(&"dst/src/sub/b.txt")?;
         let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut buf)?;
+        io::Read::read_to_end(&mut file, &mut buf)?;
         assert_eq!(buf, b"b");
     }
 
@@ -596,7 +596,7 @@ fn background_move_local_file_to_local_dir() -> Result<(), Box<dyn std::error::E
     if let Some(picker) = app.picker.as_mut() {
         picker.nav.cwd = dst_dir.clone();
     }
-    app.load_picker_dir().map_err(std::io::Error::other)?;
+    app.load_picker_dir().map_err(io::Error::other)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_job_sender(tx);
@@ -657,7 +657,7 @@ fn background_move_pack_entry_into_directory() -> Result<(), Box<dyn std::error:
     if let Some(picker) = app.picker.as_mut() {
         picker.nav.cwd = PathBuf::from("dst");
     }
-    app.load_picker_dir().map_err(std::io::Error::other)?;
+    app.load_picker_dir().map_err(io::Error::other)?;
 
     let (tx, rx) = std::sync::mpsc::channel();
     app.set_job_sender(tx);

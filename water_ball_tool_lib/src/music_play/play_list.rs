@@ -200,7 +200,7 @@ impl PlayList {
                             let r = rand::random_range(0..temp_list.len());
                             //AI=== 移除 expect：取不到项时记录 error! 并结束洗牌，避免 panic / Remove expect: log error! and stop shuffling when the item is missing, avoiding a panic
                             if let Some(index) = temp_list.remove(r) {
-                                self.rand_list.push_back(index)
+                                self.rand_list.push_back(index);
                             } else {
                                 error!("shuffle temp list remove failed / 洗牌临时列表移除失败");
                                 break;
@@ -394,6 +394,7 @@ impl PlayList {
         self.history.clear();
         //AI_END===
     }
+    #[must_use]
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
@@ -730,7 +731,6 @@ mod test {
     fn insert_tracks_at_end_keeps_history() {
         let mut play_list = PlayList::from(creat_tack_list(5));
         play_list.set_loop_mod(LoopMode::SequentialLoop);
-        let mut id = 0;
         let mut id = 0;
         for _ in 0..5 {
             advance(&mut play_list, false, &mut id);

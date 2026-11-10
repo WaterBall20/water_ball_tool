@@ -348,10 +348,10 @@ impl App {
             app.ui.title = "manager".to_string();
             app.local_nav.cwd = std::env::current_dir()?;
             app.local_nav.show_preview = app.nav.show_preview;
-            app.load_local_dir().map_err(std::io::Error::other)?;
+            app.load_local_dir().map_err(io::Error::other)?;
             if let Some(pack_path) = args.pack_path {
                 app.open_pack(Path::new(&pack_path))
-                    .map_err(std::io::Error::other)?;
+                    .map_err(io::Error::other)?;
             } else {
                 app.focus = Focus::Local;
             }
@@ -361,12 +361,12 @@ impl App {
             WaterBallFilePackCommands::Browse(WaterBallFilePackCommandsBrowse { pack_path }) => {
                 let pack = ManagerSync::open(&pack_path)
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
-                let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
+                let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Browse);
                 app.ui.title = pack_path;
                 app.ui.pack_info = Some(info);
                 app.pack = Some(pack);
-                app.load_current_dir().map_err(std::io::Error::other)?;
+                app.load_current_dir().map_err(io::Error::other)?;
                 Ok(app)
             }
             WaterBallFilePackCommands::Pack(p) => {
@@ -382,7 +382,7 @@ impl App {
                 let mut app = Self::new(Mode::Pack);
                 app.ui.title = pack_path.display().to_string();
                 app.nav.local_root = Some(in_path.clone());
-                app.nav.cwd = in_path.clone();
+                app.nav.cwd.clone_from(&in_path);
                 app.jobs.state = Some(JobState::new(
                     Mode::Pack.label(),
                     pack_path.display().to_string(),
@@ -395,16 +395,16 @@ impl App {
                     write_optimization: !p.no_write_optimization,
                     thread_count: common::get_thread_count(p.thread_count),
                 });
-                app.load_current_dir().map_err(std::io::Error::other)?;
+                app.load_current_dir().map_err(io::Error::other)?;
                 Ok(app)
             }
             WaterBallFilePackCommands::Unpack(u) => {
                 let out_dir = common::unpack_out_dir(&u.pack_path, u.out_dir.as_deref())?;
                 let pack = ManagerSync::open(&u.pack_path)
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
-                let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
+                let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Unpack);
-                app.ui.title = u.pack_path.clone();
+                app.ui.title.clone_from(&u.pack_path);
                 app.ui.pack_info = Some(info);
                 app.pack = Some(pack.clone());
                 app.jobs.state = Some(JobState::new(
@@ -418,15 +418,15 @@ impl App {
                     hash_verify: u.hash_verify,
                     thread_count: common::get_thread_count(u.thread_count),
                 });
-                app.load_current_dir().map_err(std::io::Error::other)?;
+                app.load_current_dir().map_err(io::Error::other)?;
                 Ok(app)
             }
             WaterBallFilePackCommands::HashVerify(h) => {
                 let pack = ManagerSync::open(&h.pack_path)
                     .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
-                let info = browse::pack_info(&pack).map_err(std::io::Error::other)?;
+                let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Verify);
-                app.ui.title = h.pack_path.clone();
+                app.ui.title.clone_from(&h.pack_path);
                 app.ui.pack_info = Some(info);
                 app.pack = Some(pack.clone());
                 // 校验没有输出目录，任务卡片不显示输出字段 / verify writes nothing, so the task card has no output field
@@ -436,7 +436,7 @@ impl App {
                     pack,
                     thread_count: common::get_thread_count(h.thread_count),
                 });
-                app.load_current_dir().map_err(std::io::Error::other)?;
+                app.load_current_dir().map_err(io::Error::other)?;
                 Ok(app)
             }
         }
@@ -547,8 +547,7 @@ impl App {
         } else {
             self.pack
                 .as_mut()
-                .map(|pack| pack.path_exists(&dest).unwrap_or(false))
-                .unwrap_or(false)
+                .is_some_and(|pack| pack.path_exists(&dest).unwrap_or(false))
         };
         if exists {
             self.ui.error = Some(format!(
@@ -761,9 +760,7 @@ impl App {
         } else if source_local {
             browse::with_parent(
                 entries,
-                cwd.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| cwd.clone()),
+                cwd.parent().map_or_else(|| cwd.clone(), Path::to_path_buf),
             )
         } else {
             browse::with_parent(entries, cwd.parent().unwrap_or(Path::new("")).to_path_buf())
@@ -785,8 +782,7 @@ impl App {
         }
         self.focus = match self.focus {
             Focus::Local if self.pack.is_some() => Focus::Pack,
-            Focus::Pack => Focus::Local,
-            Focus::Local => Focus::Local,
+            Focus::Pack | Focus::Local => Focus::Local,
         };
     }
 
@@ -873,8 +869,7 @@ impl App {
                     .nav
                     .cwd
                     .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| picker.nav.cwd.clone())
+                    .map_or_else(|| picker.nav.cwd.clone(), Path::to_path_buf)
             } else {
                 picker
                     .nav
@@ -889,8 +884,7 @@ impl App {
                 .local_nav
                 .cwd
                 .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.local_nav.cwd.clone()),
+                .map_or_else(|| self.local_nav.cwd.clone(), Path::to_path_buf),
             Mode::Pack => {
                 let root = self.nav.local_root.as_deref().unwrap_or(Path::new(""));
                 let parent = self.nav.cwd.parent().unwrap_or(root);
@@ -1140,7 +1134,7 @@ impl App {
     }
 
     pub(crate) fn selected_size(&self) -> u64 {
-        self.selected_entry().map(|e| e.size).unwrap_or(0)
+        self.selected_entry().map_or(0, |e| e.size)
     }
 
     /// 同系统复制：打开目标选择器 / same-namespace copy: open the destination picker.
@@ -1723,10 +1717,10 @@ impl App {
 
     fn task_item(&self, path: &Path, total: u64) -> TaskItem {
         TaskItem {
-            name: path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string()),
+            name: path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             path: path.to_path_buf(),
             done: 0,
             total,
@@ -1934,8 +1928,7 @@ impl App {
 fn char_to_byte(text: &str, char_index: usize) -> usize {
     text.char_indices()
         .nth(char_index)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(index, _)| index)
 }
 
 fn validate_leaf_name(name: &str) -> Result<(), String> {

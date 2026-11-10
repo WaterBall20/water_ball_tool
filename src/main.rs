@@ -406,18 +406,20 @@ fn init_split(mp: &MultiProgress, file: File) {
 // ===========================================================================
 // 公开入口
 // ===========================================================================
+#[must_use]
 pub fn multi_progress_init(module: &str) -> MultiProgress {
     let mp = MultiProgress::new();
     let _ = init_global_logging(&mp, module);
     mp
 }
 
+#[must_use]
 pub fn init_global_logging(mp: &MultiProgress, module: &str) -> Option<PathBuf> {
     #[cfg(debug_assertions)]
     {
         let _ = module;
         init_terminal_only(mp, "debug");
-        return None;
+        None
     }
 
     #[cfg(not(debug_assertions))]

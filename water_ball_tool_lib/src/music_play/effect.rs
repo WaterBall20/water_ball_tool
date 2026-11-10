@@ -1020,3 +1020,9 @@ impl PreEffectChain {
     }
     //AI_END===
 }
+
+impl Default for PreEffectChain {
+    fn default() -> Self {
+        Self::new()
+    }
+}

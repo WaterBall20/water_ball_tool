@@ -1,3 +1,5 @@
+use crate::split_ring_buffer::error::Kind;
+use crossbeam_utils::CachePadded;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 //AI=== 唤醒握手需要 SeqCst 屏障（见 notify_*_after_*）。
@@ -5,18 +7,19 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 //AI_END===
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-use crate::split_ring_buffer::error::Kind;
-
 #[inline]
 pub(crate) fn lock_ignore_poison<U>(m: &Mutex<U>) -> MutexGuard<'_, U> {
     // 不使用 `unwrap()`：中毒时取回内部守卫继续使用。
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    m.lock().unwrap_or_else(|e| {
+        m.clear_poison();
+        e.into_inner()
+    })
 }
 
 #[inline]
 pub(crate) fn wait_ignore_poison<'a, U>(c: &Condvar, g: MutexGuard<'a, U>) -> MutexGuard<'a, U> {
     // 不使用 `unwrap()`：中毒时取回内部守卫继续使用。
-    c.wait(g).unwrap_or_else(|e| e.into_inner())
+    c.wait(g).unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(crate) struct Endpoint {
@@ -123,8 +126,8 @@ pub(crate) struct Inner<T> {
     ///
     /// Current logical capacity; shrink and grow-within-allocation only change this.
     cap: AtomicUsize,
-    pub(crate) read: Endpoint,
-    pub(crate) write: Endpoint,
+    pub(crate) read: CachePadded<Endpoint>,
+    pub(crate) write: CachePadded<Endpoint>,
     pub(crate) wait_mutex: Mutex<()>,
     clear_pending: AtomicBool,
     truncate_pending: AtomicBool,
@@ -188,8 +191,8 @@ impl<T> Inner<T> {
             b: UnsafeCell::new(make_cells(cap)),
             alloc_cap: AtomicUsize::new(cap),
             cap: AtomicUsize::new(cap),
-            read: Endpoint::new(),
-            write: Endpoint::new(),
+            read: CachePadded::new(Endpoint::new()),
+            write: CachePadded::new(Endpoint::new()),
             wait_mutex: Mutex::new(()),
             clear_pending: AtomicBool::new(false),
             truncate_pending: AtomicBool::new(false),
@@ -352,9 +355,7 @@ impl<T> Inner<T> {
 
     pub(crate) fn pop_one(&self) -> Option<T> {
         let _guard = self.enter_read()?;
-        let Some((a, alloc)) = self.read_buffer() else {
-            return None;
-        };
+        let (a, alloc) = self.read_buffer()?;
         let r = self.read.pos.load(Ordering::Acquire);
         let w = self.write.pos.load(Ordering::Acquire);
         if r == w {

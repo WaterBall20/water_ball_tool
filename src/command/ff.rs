@@ -590,11 +590,10 @@ fn hash_work(
     // 逻辑错误：工作线程数与其进度条数一一对应，`pop` 失败说明不变量被破坏。
     // Logic error: every hash worker is dispatched with its own pre-created progress bar; a failed
     // `pop` means the one-to-one invariant was broken.
-    let pb = match worker_pbs.pop() {
-        Some(pb) => pb,
-        None => unreachable!(
+    let Some(pb) = worker_pbs.pop() else {
+        unreachable!(
             "逻辑错误：哈希工作线程缺少进度条 / logic error: hash worker has no progress bar"
-        ),
+        )
     };
     //AI_END===
 

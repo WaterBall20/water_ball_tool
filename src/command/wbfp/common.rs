@@ -49,9 +49,7 @@ impl CopyOutcome {
 /// Resolve the thread count; use available parallelism when omitted, falling back to the constant.
 pub(crate) fn get_thread_count(thread_count: Option<usize>) -> usize {
     thread_count.unwrap_or_else(|| {
-        let r = thread::available_parallelism()
-            .map(|v| v.get())
-            .unwrap_or(DEFAULT_THREAD_COUNT);
+        let r = thread::available_parallelism().map_or(DEFAULT_THREAD_COUNT, NonZero::get);
         info!("未指定线程数量，将最多使用{r}个线程");
         r
     })

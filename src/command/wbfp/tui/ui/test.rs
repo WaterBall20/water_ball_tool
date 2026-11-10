@@ -31,7 +31,7 @@ fn job_card_bar_is_not_truncated_by_label() -> Result<(), Box<dyn std::error::Er
     let rows: Vec<String> = buffer
         .content
         .chunks(width)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .map(|row| row.iter().map(ratatui::buffer::Cell::symbol).collect())
         .collect();
     assert!(
         rows[0]
@@ -144,7 +144,11 @@ fn buffer_text(
     Ok(buffer
         .content
         .chunks(width)
-        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n"))
 }

@@ -156,8 +156,7 @@ pub(crate) fn local_dir(cwd: &Path) -> Result<Vec<Entry>, String> {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis());
         entries.push(Entry {
             name,
             path: path.clone(),
@@ -192,13 +191,12 @@ pub(crate) fn local_file(path: &Path) -> Result<Entry, String> {
         .modified()
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     Ok(Entry {
-        name: path
-            .file_name()
-            .map(|v| v.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        name: path.file_name().map_or_else(
+            || path.display().to_string(),
+            |v| v.to_string_lossy().into_owned(),
+        ),
         path: path.to_path_buf(),
         is_dir: false,
         size: metadata.len(),
@@ -237,13 +235,14 @@ pub(crate) fn format_modified(modified: u128) -> String {
     let Ok(ms) = i64::try_from(modified) else {
         return "—".to_string();
     };
-    chrono::DateTime::from_timestamp_millis(ms)
-        .map(|t| {
+    chrono::DateTime::from_timestamp_millis(ms).map_or_else(
+        || "—".to_string(),
+        |t| {
             t.with_timezone(&chrono::Local)
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
-        })
-        .unwrap_or_else(|| "—".to_string())
+        },
+    )
 }
 
 /// 哈希显示文本 / hash display text.

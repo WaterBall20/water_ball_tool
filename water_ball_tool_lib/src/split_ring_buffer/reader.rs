@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::split_ring_buffer::error::Error;
 use crate::split_ring_buffer::inner::{Inner, lock_ignore_poison, wait_ignore_poison};
+use crate::split_ring_buffer::wait_loop;
 
 /// 有锁读端。
 ///
@@ -66,6 +67,7 @@ impl<T> LockedReader<T> {
     /// }
     /// ```
     pub fn pop_wait(&self) -> Result<T, Error<T>> {
+        let mut is_wait_loop = false;
         loop {
             {
                 let _g = lock_ignore_poison(&self.inner.read.lock);
@@ -75,6 +77,9 @@ impl<T> LockedReader<T> {
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -90,6 +95,7 @@ impl<T> LockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = true;
         }
     }
 
@@ -268,6 +274,7 @@ impl<T: Copy> LockedReader<T> {
         if dst.is_empty() {
             return Ok(0);
         }
+        let mut is_wait_loop = false;
         loop {
             {
                 let _g = lock_ignore_poison(&self.inner.read.lock);
@@ -278,6 +285,9 @@ impl<T: Copy> LockedReader<T> {
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -293,6 +303,7 @@ impl<T: Copy> LockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
     }
 
@@ -315,6 +326,7 @@ impl<T: Copy> LockedReader<T> {
         }
         let _g = lock_ignore_poison(&self.inner.read.lock);
         let mut filled = 0;
+        let mut is_wait_loop = false;
         while filled < dst.len() {
             let n = self.inner.read_slice(&mut dst[filled..]);
             if n > 0 {
@@ -323,6 +335,9 @@ impl<T: Copy> LockedReader<T> {
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -338,6 +353,7 @@ impl<T: Copy> LockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
         Ok(())
     }
@@ -444,12 +460,16 @@ impl<T> UnlockedReader<T> {
     /// }
     /// ```
     pub fn pop_wait(&mut self) -> Result<T, Error<T>> {
+        let mut is_wait_loop = false;
         loop {
             if let Some(v) = self.inner.pop_one() {
                 return Ok(v);
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -465,6 +485,7 @@ impl<T> UnlockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
     }
 
@@ -602,6 +623,7 @@ impl<T: Copy> UnlockedReader<T> {
     /// }
     /// ```
     pub fn read_wait(&mut self, dst: &mut [T]) -> Result<usize, Error<T>> {
+        let mut is_wait_loop = false;
         if dst.is_empty() {
             return Ok(0);
         }
@@ -612,6 +634,9 @@ impl<T: Copy> UnlockedReader<T> {
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -627,6 +652,7 @@ impl<T: Copy> UnlockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
     }
 
@@ -648,6 +674,7 @@ impl<T: Copy> UnlockedReader<T> {
             return Ok(());
         }
         let mut filled = 0;
+        let mut is_wait_loop = false;
         while filled < dst.len() {
             let n = self.inner.read_slice(&mut dst[filled..]);
             if n > 0 {
@@ -656,6 +683,9 @@ impl<T: Copy> UnlockedReader<T> {
             }
             if self.inner.write.is_closed() {
                 return Err(Error::cannot_wait());
+            }
+            if wait_loop(&mut is_wait_loop) {
+                continue;
             }
             let mut g = lock_ignore_poison(&self.inner.wait_mutex);
             self.inner.read.enter_wait();
@@ -671,6 +701,7 @@ impl<T: Copy> UnlockedReader<T> {
             g = wait_ignore_poison(&self.inner.read.cvar, g);
             self.inner.read.leave_wait();
             drop(g);
+            is_wait_loop = false;
         }
         Ok(())
     }

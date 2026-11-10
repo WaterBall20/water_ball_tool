@@ -83,13 +83,10 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     let mut terminal = ratatui::try_init()?;
     //AI=== 启用鼠标捕获；失败时降级为无鼠标运行，而不是退出 TUI
     // Enable mouse capture; on failure keep running without the mouse instead of exiting the TUI.
-    let mouse = match MouseCapture::enable() {
-        Ok(mouse) => mouse,
-        Err(e) => {
-            warn!("启用鼠标捕获失败，继续无鼠标运行 / failed to enable mouse capture: {e}");
-            MouseCapture::disabled()
-        }
-    };
+    let mouse = MouseCapture::enable().unwrap_or_else(|e| {
+        warn!("启用鼠标捕获失败，继续无鼠标运行 / failed to enable mouse capture: {e}");
+        MouseCapture::disabled()
+    });
     let vt_input = mouse.vt_input();
     //AI_END===
     let mut app = App::new();

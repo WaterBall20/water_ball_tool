@@ -59,15 +59,12 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     }
     // 与 mp 共用鼠标捕获：Windows 走 VT 输入，避免 crossterm 把 SGR 报文拆成普通按键。
     // Shared with mp: Windows uses VT input so crossterm cannot split SGR reports into literal keys.
-    let mouse = match MouseCapture::enable() {
-        Ok(mouse) => mouse,
-        Err(e) => {
-            warn!(
+    let mouse = MouseCapture::enable().unwrap_or_else(|e| {
+        warn!(
                 "wbfp TUI: 鼠标初始化失败，继续无鼠标运行 / mouse setup failed, continuing without mouse: {e}"
             );
-            MouseCapture::disabled()
-        }
-    };
+        MouseCapture::disabled()
+    });
     let vt_input = mouse.vt_input();
     // VT 模式直接读原始 stdin 字节；crossterm 会丢弃 ESC/CR 等控制字符。
     // VT mode reads raw stdin bytes; crossterm drops control characters such as ESC/CR.
@@ -78,7 +75,7 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
     };
     info!(
         "wbfp TUI: ready, width={}, vt_input={vt_input}",
-        terminal.size().map(|s| s.width).unwrap_or(0)
+        terminal.size().map_or(0, |s| s.width)
     );
 
     // 任务事件队列不阻塞 IO：工作线程只做入队，进度事件按 4 MiB 限流；UI 侧对任务列表设上限。
@@ -94,7 +91,7 @@ pub(super) fn run(args: WaterBallFilePackCommand) -> Result<(), Box<dyn Error>> 
         return Err(e.into());
     }
 
-    let mut result = event_loop(&mut terminal, &mut app, &logs, &rx, &stdin_rx);
+    let mut result = event_loop(&mut terminal, &mut app, &logs, &rx, stdin_rx.as_ref());
     if let Err(e) = &result {
         error!("wbfp TUI: 主循环退出 / main loop failed: {e}");
     }
@@ -124,7 +121,7 @@ fn event_loop(
     app: &mut App,
     logs: &Receiver<channel_writer::LogLine>,
     events: &Receiver<super::events::JobEvent>,
-    stdin_rx: &Option<Receiver<Vec<u8>>>,
+    stdin_rx: Option<&Receiver<Vec<u8>>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut vt = VtInput::new();
     loop {
@@ -247,8 +244,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
             _ => {}
         },
         Window::None => match code {
-            KeyCode::Tab => app.switch_focus(),
-            KeyCode::BackTab => app.switch_focus(),
+            KeyCode::Tab | KeyCode::BackTab => app.switch_focus(),
             KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => app.close_pack(),
             KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => app.back(),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => app.enter(),

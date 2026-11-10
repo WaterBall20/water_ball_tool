@@ -24,7 +24,7 @@ fn unpack_job_shares_pack_handle() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(src.join("sub/b.txt"), b"world")?;
 
     let (pack_tx, _pack_rx) = std::sync::mpsc::channel();
-    crate::command::wbfp::ops::run_pack(&src, &pack, true, true, 2, &pack_tx)?;
+    ops::run_pack(&src, &pack, true, true, 2, &pack_tx)?;
 
     let args = WaterBallFilePackCommand::new(WaterBallFilePackCommands::Unpack(
         WaterBallFilePackCommandsUnpack::new(

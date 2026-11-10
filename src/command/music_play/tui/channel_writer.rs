@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use tracing_subscriber::{Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -144,7 +145,6 @@ pub fn init_logging(module: &str) -> Receiver<LogLine> {
             .with_filter(crate::log_filter(panel_level)),
     );
 
-    use std::fs::OpenOptions;
     match log_file_path(module)
         .and_then(|path| OpenOptions::new().create(true).append(true).open(path))
     {

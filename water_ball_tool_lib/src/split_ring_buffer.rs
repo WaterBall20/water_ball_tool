@@ -53,6 +53,22 @@ pub use writer::{LockedWriter, UnlockedWriter, Writer};
 use inner::Inner;
 use std::sync::Arc;
 
+const WAIT_LOOP_COUNT_DEFAULT: usize = 100;
+const WAIT_LOOP_COUNT_LOW_DEFAULT: usize = 10;
+#[inline]
+fn wait_loop(b: &mut bool) -> bool {
+    if *b {
+        return false;
+    }
+    let mut count = WAIT_LOOP_COUNT_DEFAULT;
+    while count > 0 {
+        std::hint::spin_loop();
+        count -= 1;
+    }
+    *b = true;
+    true
+}
+
 fn make_inner<T>(capacity: usize) -> Arc<Inner<T>> {
     Arc::new(Inner::with_capacity(capacity))
 }

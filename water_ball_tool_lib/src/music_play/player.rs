@@ -941,7 +941,6 @@ impl PlayerEvent {
         &self.result
     }
 
-    #[must_use]
     pub fn get_result(self) -> Result<PlayerEventType, PlayerEventError> {
         self.result
     }
@@ -967,9 +966,11 @@ impl PlayerEventError {
 }
 
 impl PlayerEventError {
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
+    #[must_use]
     pub fn kind(&self) -> &PlayerEventErrorKind {
         &self.kind
     }

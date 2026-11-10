@@ -151,6 +151,7 @@ impl PreEffect for CrossBridgeEffect {
 }
 
 impl CrossBridgeEffect {
+    #[must_use]
     pub fn new(output_format: AudioFormat) -> Self {
         Self {
             info: PreEffectInfo {

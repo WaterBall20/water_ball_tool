@@ -20,7 +20,7 @@ fn browse_loads_pack_and_navigates() -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(src.join("sub"))?;
     fs::write(src.join("sub/a.txt"), b"hello")?;
     let (tx, _rx) = std::sync::mpsc::channel();
-    crate::command::wbfp::ops::run_pack(&src, &pack_path, true, true, 2, &tx)?;
+    ops::run_pack(&src, &pack_path, true, true, 2, &tx)?;
 
     let args = WaterBallFilePackCommand::new(WaterBallFilePackCommands::Browse(
         WaterBallFilePackCommandsBrowse {

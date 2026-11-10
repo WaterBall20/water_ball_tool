@@ -22,6 +22,7 @@ directories = "6.0"
 thread-priority = "3.1.1"
 
 rand = "0.10.3"
+crossbeam-utils = "0.8.23"
 crossbeam-channel = "0.5.17"
 #AI=== binrw 二进制序列化依赖（Attribute 等 on-disk 结构）/ binrw binary serialization dependency (on-disk structs like Attribute)
 binrw = "0.15.2"
