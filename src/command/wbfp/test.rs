@@ -1,6 +1,7 @@
 //AI=== wbfp 入口解析测试 / wbfp argument-routing tests
 use super::{WaterBallFilePackCommand, run};
 use clap::Parser;
+use pretty_assertions::assert_eq;
 
 fn parse(args: &[&str]) -> Result<crate::command::Cli, clap::Error> {
     let mut argv = vec!["water_ball_tool"];

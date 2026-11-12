@@ -71,7 +71,7 @@ impl WBFPManager {
             .as_ref()
             .to_str()
             .ok_or(PackFileError::Format("无法将路径转换成文本".into()))?;
-        let mut write_lock_path = String::from(pack_path_str);
+        let mut write_lock_path = pack_path_str.to_string();
         write_lock_path.push_str(".lock");
         let write_lock_path = Path::new(&write_lock_path).to_path_buf();
         Ok(Self {

@@ -5,6 +5,7 @@ use crate::wb_files_pack::{
 };
 //AI_END===
 use crate::{tools::TestTool, wb_files_pack::manager_sync::ManagerSync};
+use pretty_assertions::assert_eq;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -2107,5 +2108,41 @@ fn probe_pack_reads_header_without_lock() -> Result<(), Box<dyn std::error::Erro
     assert!(crate::wb_files_pack::probe_pack(&invalid)?.is_none());
     TestTool::cleanup_test_dir(&dir);
     Ok(())
+}
+//AI_END===
+
+//AI=== 打开错误区分包文件与清单文件 / open errors name the pack file vs its manifest
+#[test]
+fn open_error_names_the_pack_file() {
+    let (dir, pack) = setup_err_test("open_error_names_the_pack_file");
+    let error = ManagerSync::open(&pack)
+        .err()
+        .expect("opening a missing pack must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("包文件") && message.contains("pack file"),
+        "unexpected error: {message}"
+    );
+    TestTool::cleanup_test_dir(&dir);
+}
+
+#[test]
+fn open_error_names_the_manifest_file() {
+    let (dir, pack) = setup_err_test("open_error_names_the_manifest_file");
+    {
+        let mut alloc = create_new_rw(&pack);
+        write_then_read_back(&mut alloc, "a.txt", &[1]);
+    }
+    let manifest = PathBuf::from(format!("{}.wbm", pack.display()));
+    fs::remove_file(&manifest).expect("删除清单文件失败");
+    let error = ManagerSync::open(&pack)
+        .err()
+        .expect("opening a pack without its manifest must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("包清单文件") && message.contains("pack manifest"),
+        "unexpected error: {message}"
+    );
+    TestTool::cleanup_test_dir(&dir);
 }
 //AI_END===

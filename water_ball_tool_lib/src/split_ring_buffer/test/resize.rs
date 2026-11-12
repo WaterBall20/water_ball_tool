@@ -1,6 +1,7 @@
 //! 缓冲区调整：扩容复制、缩小只改容量、并发读端继续运行。
 
 use crate::split_ring_buffer::*;
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;

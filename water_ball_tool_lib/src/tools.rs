@@ -3,6 +3,7 @@ use std::fs;
 #[cfg(test)]
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 //内部路径工具
 pub struct PathTool;
@@ -131,8 +132,43 @@ pub fn bytes_len_to_string(len: u64) -> String {
     }
 }
 
+static PAGE_SIZE: OnceLock<Option<usize>> = OnceLock::new();
+
+pub struct MemTool;
+impl MemTool {
+    pub fn page_size() -> Option<usize> {
+        *PAGE_SIZE.get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            {
+                let r = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                if r < 0 {
+                    return None;
+                } else {
+                    Some(r as usize)
+                }
+            }
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+
+                // # SAFETY:
+                // 初始化变量
+                let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+                // # SAFETY:
+                // 调用WindowsAPI
+                unsafe { GetSystemInfo(&raw mut info) };
+                Some(info.dwPageSize as usize)
+            }
+            #[cfg(not(any(target_os = "linux", windows)))]
+            {
+                None
+            }
+        })
+    }
+}
+
 /// 预留的水球包文件工具结构体（未实现）/ Reserved WBFP tool struct (not yet implemented)
-struct _WBFPTool {}
+struct _WBFPTool;
 
 #[cfg(test)]
 pub struct TestTool;

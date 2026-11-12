@@ -10,6 +10,7 @@ documentation.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sysinfo = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_System_SystemInformation"] }
 #AI=== 引擎移入库包后需要的音频依赖 / audio dependencies for the engine now living in the library
 tracing = { workspace = true }
 rand = { workspace = true }
@@ -23,6 +24,7 @@ rubato = { workspace = true }
 #AI_END===
 #AI=== binrw 二进制序列化依赖（Attribute 等 on-disk 结构）/ binrw binary serialization dependency (on-disk structs like Attribute)
 binrw = { workspace = true }
+libc = { workspace = true }
 #AI_END===
 
 [dev-dependencies]

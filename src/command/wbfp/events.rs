@@ -50,6 +50,8 @@ pub(crate) enum JobEvent {
     },
     /// 文件处理结束；`bytes` 用于总进度聚合 / file finished; `bytes` feeds total progress
     Done { path: PathBuf, status: RowStatus },
+    /// 文件内容已变更（新建或覆盖；包内相对路径）/ file content changed (created or overwritten; pack-relative path)
+    Changed { path: PathBuf },
     /// 全局进度 / overall progress
     Total {
         done: u64,

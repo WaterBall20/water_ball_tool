@@ -732,13 +732,11 @@ impl PreEffectChain {
         //效果器不存在就复制数据
         if self.effects.is_empty() {
             output.clear();
-            output.reserve_exact(input.len());
             output.extend_from_slice(input);
             return input.len();
         }
         let input_temp_buf = &mut self.input_buffer;
         input_temp_buf.clear();
-        input_temp_buf.reserve_exact(input.len());
         input_temp_buf.extend_from_slice(input);
         let output_temp_buf = &mut self.output_buffer;
         let mut this_len = input.len();
@@ -817,7 +815,6 @@ impl PreEffectChain {
             }
         }
         output.clear();
-        output.reserve_exact(this_len);
         output.extend_from_slice(&input_buf[..this_len]);
         this_len
     }

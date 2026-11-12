@@ -4,6 +4,7 @@
 //! clear / len / is_empty / is_full；借用切片方法（read / write 系列）仅
 //! Copy 类型可用，不在本文件测试。
 
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;

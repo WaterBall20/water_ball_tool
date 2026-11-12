@@ -4,6 +4,7 @@ use super::browse::Entry;
 use super::handle_key;
 use super::ui;
 use crate::command::wbfp::events::RowStatus;
+use pretty_assertions::assert_eq;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
@@ -24,7 +25,7 @@ fn renders_yazi_layout() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
     terminal.draw(|frame| ui::render(&mut app, frame))?;
     let text = buffer_text(terminal.backend().buffer()).replace(' ', "");
-    assert!(text.contains("预览"));
+    assert!(text.contains("属性"));
     assert!(text.contains("hero_idle.png"));
     assert!(text.contains("READONLY"));
     assert!(text.contains("q退出"));
@@ -204,6 +205,32 @@ fn narrow_cross_copy_switches_pane_and_esc_cancels() -> Result<(), Box<dyn std::
 
     handle_key(KeyCode::Esc, KeyModifiers::NONE, &mut app);
     assert!(app.pending.is_none());
+    assert_eq!(app.focus, Focus::Local);
+
+    drop(app);
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+#[test]
+fn ctrl_w_closes_the_open_pack() -> Result<(), Box<dyn std::error::Error>> {
+    let dir =
+        std::path::PathBuf::from("./temp/test/command/wbfp/tui/ok/ctrl_w_closes_the_open_pack");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("game.wbfp");
+    let pack = ManagerSync::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)?;
+
+    let mut app = App::manager_no_pack();
+    app.pack = Some(pack);
+    app.pack_path = Some(std::fs::canonicalize(&pack_path)?);
+    app.focus = Focus::Pack;
+
+    handle_key(KeyCode::Char('w'), KeyModifiers::CONTROL, &mut app);
+    assert!(app.pack.is_none());
     assert_eq!(app.focus, Focus::Local);
 
     drop(app);

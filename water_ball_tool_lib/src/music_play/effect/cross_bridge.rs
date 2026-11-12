@@ -65,7 +65,6 @@ impl PreEffect for CrossBridgeEffect {
         //AI=== 禁用本级：只排空延迟线，保留增益表与容量 / disable self: drain the delay line, keep gain tables and capacity
         if kind == PreEffectDiscontinuity::DisableSelf {
             output.clear();
-            output.reserve_exact(self.buf.len());
             output.extend(self.buf.drain(..));
             self.b_buf.clear();
             self.is_effect = false;
@@ -92,7 +91,6 @@ impl PreEffect for CrossBridgeEffect {
             0
         } else if PreEffectDiscontinuity::NoNext == kind {
             let out_len = self.buf.len() + input.len();
-            output.reserve_exact(out_len);
             for v in self.buf.drain(..) {
                 output.push(v);
             }
@@ -201,15 +199,11 @@ impl CrossBridgeEffect {
         let frames = (samples / channels).max(1);
         self.buf_max_len = frames * channels;
 
-        self.buf.reserve_exact(self.buf_max_len);
         self.b_buf.clear();
-        self.b_buf.reserve_exact(self.buf_max_len);
 
         // 预计算等功率增益表，按 sample 展开 / precompute the equal-power gain table, one entry per sample
         self.gain_out.clear();
         self.gain_in.clear();
-        self.gain_out.reserve_exact(self.buf_max_len);
-        self.gain_in.reserve_exact(self.buf_max_len);
 
         let denom = (frames - 1).max(1) as f32;
         for i in 0..frames {

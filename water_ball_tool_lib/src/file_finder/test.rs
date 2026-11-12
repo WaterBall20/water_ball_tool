@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use std::fs;
 use std::io::Write;
 use std::sync::mpsc;

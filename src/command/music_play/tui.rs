@@ -260,6 +260,9 @@ fn handle_main_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, ap
         }
         KeyCode::Char('p') => report(runtime.pause()),
         KeyCode::Char('P') => report(runtime.play()),
+        //AI=== `m` 循环切换播放模式 / `m` cycles the playback mode
+        KeyCode::Char('m') => runtime.set_loop_mode(next_loop_mode(runtime.loop_mode())),
+        //AI_END===
         //AI=== Debug/效果器改用功能键与 e / debug uses an F-key, effects uses e
         KeyCode::F(12) => app.toggle_debug(),
         KeyCode::Char('e') => app.toggle_effects(),
@@ -267,6 +270,17 @@ fn handle_main_key(code: KeyCode, modifiers: KeyModifiers, runtime: &Runtime, ap
         KeyCode::Char('+' | '=') => runtime.add_volume(0.05),
         KeyCode::Char('-') => runtime.add_volume(-0.05),
         _ => {}
+    }
+}
+
+/// 下一个播放模式 / next playback mode
+pub(super) fn next_loop_mode(mode: LoopMode) -> LoopMode {
+    match mode {
+        LoopMode::SequentialLoop => LoopMode::Sequential,
+        LoopMode::Sequential => LoopMode::RepeatOne,
+        LoopMode::RepeatOne => LoopMode::Shuffle,
+        LoopMode::Shuffle => LoopMode::PeriodicShuffle,
+        LoopMode::PeriodicShuffle => LoopMode::SequentialLoop,
     }
 }
 //AI_END===

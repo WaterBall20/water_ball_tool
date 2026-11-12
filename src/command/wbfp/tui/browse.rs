@@ -182,36 +182,6 @@ pub(crate) fn local_dir(cwd: &Path) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
-/// 单个本地文件作为一个条目 / expose one local file as an entry.
-pub(crate) fn local_file(path: &Path) -> Result<Entry, String> {
-    let metadata = path
-        .metadata()
-        .map_err(|e| format!("读取文件信息失败 / failed to stat {}: {e}", path.display()))?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_millis());
-    Ok(Entry {
-        name: path.file_name().map_or_else(
-            || path.display().to_string(),
-            |v| v.to_string_lossy().into_owned(),
-        ),
-        path: path.to_path_buf(),
-        is_dir: false,
-        size: metadata.len(),
-        modified,
-        hash: None,
-        //AI=== 单个本地文件也做包探测 / probe a single local file too
-        pack_version: water_ball_tool_lib::wb_files_pack::probe_pack(path)
-            .ok()
-            .flatten()
-            .map(|probe| probe.format_version),
-        //AI_END===
-        synthetic: false,
-    })
-}
-
 /// 插入 `..` 行 / prepend the `..` row.
 pub(crate) fn with_parent(mut entries: Vec<Entry>, parent: PathBuf) -> Vec<Entry> {
     entries.insert(0, Entry::parent(parent));

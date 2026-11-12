@@ -1010,7 +1010,7 @@ pub enum PackStructItemType {
 impl PartialEq for PackStructItemType {
     fn eq(&self, other: &Self) -> bool {
         match self {
-            Self::File { .. } => matches!(other, Self::File { .. }),
+            Self::File { handle: _ } => matches!(other, Self::File { .. }),
             Self::Dir {
                 struct_file_pos,
                 pack_struct,
@@ -1053,6 +1053,33 @@ impl PartialEq for PackStruct {
     }
 }
 
+impl PackStruct {
+    fn iter(&self) -> std::collections::hash_map::Values<'_, String, PackStructItem> {
+        <&Self as IntoIterator>::into_iter(self)
+    }
+}
+impl<'a> IntoIterator for &'a PackStruct {
+    type Item = &'a PackStructItem;
+    type IntoIter = std::collections::hash_map::Values<'a, String, PackStructItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.values()
+    }
+}
+
+impl PackStruct {
+    fn iter_mut(&mut self) -> std::collections::hash_map::ValuesMut<'_, String, PackStructItem> {
+        <&mut Self as IntoIterator>::into_iter(self)
+    }
+}
+impl<'a> IntoIterator for &'a mut PackStruct {
+    type Item = &'a mut PackStructItem;
+    type IntoIter = std::collections::hash_map::ValuesMut<'a, String, PackStructItem>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.values_mut()
+    }
+}
 impl PackStruct {
     /// 返回目录中的子项映射表 / Returns the items in this pack struct
     ///

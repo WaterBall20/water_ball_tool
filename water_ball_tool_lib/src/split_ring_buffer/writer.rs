@@ -1,10 +1,22 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::Arc;
+//AI=== 写端兜底超时需要 Duration / Duration for the writer-side fallback timeout
+use std::time::Duration;
+//AI_END===
 
 use crate::split_ring_buffer::error::{Error, Kind, WriteAllError};
-use crate::split_ring_buffer::inner::{Inner, lock_ignore_poison, wait_ignore_poison};
+//AI=== 写端等待改为带超时版本 / writer waits use the timed variant
+use crate::split_ring_buffer::inner::{Inner, lock_ignore_poison, wait_timeout_ignore_poison};
+//AI_END===
 use crate::split_ring_buffer::wait_loop;
+
+//AI=== 写端等待空位的兜底超时：读端通知不再持 `wait_mutex`，极端竞态下可能丢一次唤醒；
+// 超时保证阻塞写端最多多等这么久而不是永久挂起。
+// Fallback timeout for a blocked writer: the reader notifies without `wait_mutex`, so a rare
+// race can lose one wakeup; the timeout bounds the wait instead of hanging.
+const WRITE_WAIT_TIMEOUT: Duration = Duration::from_millis(10);
+//AI_END===
 
 fn kind_to_error<T>(k: Kind<T>) -> Error<T> {
     match k {
@@ -120,7 +132,9 @@ impl<T> LockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
         }
@@ -384,7 +398,9 @@ impl<T: Copy> LockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
         }
@@ -461,7 +477,9 @@ impl<T: Copy> LockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
             is_wait_loop = false;
@@ -634,7 +652,9 @@ impl<T> UnlockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
         }
@@ -836,7 +856,9 @@ impl<T: Copy> UnlockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
         }
@@ -906,7 +928,9 @@ impl<T: Copy> UnlockedWriter<T> {
                 drop(g);
                 continue;
             }
-            g = wait_ignore_poison(&self.inner.write.cvar, g);
+            //AI=== 带超时等待兜底丢唤醒 / timed wait bounds a lost wakeup
+            g = wait_timeout_ignore_poison(&self.inner.write.cvar, g, WRITE_WAIT_TIMEOUT);
+            //AI_END===
             self.inner.write.leave_wait();
             drop(g);
             is_wait_loop = false;

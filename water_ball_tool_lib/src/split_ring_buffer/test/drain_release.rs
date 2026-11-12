@@ -1,5 +1,6 @@
 //! drain / release / truncate_back 测试。
 
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 

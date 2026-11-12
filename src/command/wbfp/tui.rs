@@ -17,7 +17,7 @@ use crate::command::tui_input::{
     ESC_PENDING_TIMEOUT, MouseCapture, VtEvent, VtInput, WHEEL_STEP, spawn_stdin_reader,
 };
 use crate::command::wbfp::WaterBallFilePackCommand;
-use app::{App, Focus, Window};
+use app::{App, Focus, Mode, Window};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -278,10 +278,21 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
 }
 
 fn focus_pane_at(app: &mut App, column: u16, row: u16) -> bool {
+    let position = ratatui::layout::Position::new(column, row);
+    if matches!(app.ui.mode, Mode::Pack | Mode::Unpack) {
+        if app.local_nav.list_area.contains(position) {
+            app.focus = Focus::Local;
+            return true;
+        }
+        if app.nav.list_area.contains(position) {
+            app.focus = Focus::Pack;
+            return true;
+        }
+        return false;
+    }
     if !app.is_manager() {
         return true;
     }
-    let position = ratatui::layout::Position::new(column, row);
     // 目标选择器/待执行传输激活时只允许操作目标列表 / only the target pane is interactive during a picker or pending transfer
     if app.picker.is_some() || app.pending.is_some() {
         return app.active_nav().list_area.contains(position);

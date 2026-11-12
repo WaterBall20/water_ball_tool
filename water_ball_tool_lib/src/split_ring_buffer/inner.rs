@@ -6,6 +6,9 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering, fence};
 //AI_END===
 use std::sync::{Condvar, Mutex, MutexGuard};
+//AI=== 写端兜底超时需要 Duration / Duration for the writer-side fallback timeout
+use std::time::Duration;
+//AI_END===
 
 #[inline]
 pub(crate) fn lock_ignore_poison<U>(m: &Mutex<U>) -> MutexGuard<'_, U> {
@@ -21,6 +24,23 @@ pub(crate) fn wait_ignore_poison<'a, U>(c: &Condvar, g: MutexGuard<'a, U>) -> Mu
     // 不使用 `unwrap()`：中毒时取回内部守卫继续使用。
     c.wait(g).unwrap_or_else(std::sync::PoisonError::into_inner)
 }
+
+//AI=== 写端带超时等待：读端通知不再持 `wait_mutex`，极端竞态下会丢一次唤醒，超时兜底。
+// Writer-side timed wait: the reader notifies without `wait_mutex`, so a rare race can lose one
+// wakeup; the timeout bounds the wait instead of hanging.
+#[inline]
+pub(crate) fn wait_timeout_ignore_poison<'a, U>(
+    c: &Condvar,
+    g: MutexGuard<'a, U>,
+    timeout: Duration,
+) -> MutexGuard<'a, U> {
+    // 不使用 `unwrap()`：中毒时取回内部守卫继续使用；超时结果由调用方的等待循环重新检查谓词。
+    // No `unwrap()`: recover the guard on poison; the caller's wait loop re-checks the predicate.
+    c.wait_timeout(g, timeout)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .0
+}
+//AI_END===
 
 pub(crate) struct Endpoint {
     pub(crate) pos: AtomicUsize,
@@ -151,6 +171,10 @@ pub(crate) struct Inner<T> {
     /// In-flight writers; a grow only waits for these, readers may continue.
     writers_in_flight: AtomicUsize,
     clear_cvar: Condvar,
+    //AI=== clear_cvar 等待者计数：读端 drop 只在确实有人等待时才加锁。
+    // clear_cvar waiter count: the reader's drop only locks when someone actually waits.
+    clear_waiting: AtomicUsize,
+    //AI_END===
     mutation_mutex: Mutex<()>,
     /// `reject_pending_writers` 代际计数。阻塞写端入口记录当前值，若后续
     /// 发现值变化则返回拒绝错误。
@@ -204,6 +228,9 @@ impl<T> Inner<T> {
             in_flight: AtomicUsize::new(0),
             writers_in_flight: AtomicUsize::new(0),
             clear_cvar: Condvar::new(),
+            //AI=== 初始没有 clear_cvar 等待者 / no clear_cvar waiter initially
+            clear_waiting: AtomicUsize::new(0),
+            //AI_END===
             mutation_mutex: Mutex::new(()),
             rejection_epoch: AtomicUsize::new(0),
             //AI=== 初始没有待处理的非破坏性写唤醒 / no pending non-destructive writer wake initially
@@ -348,10 +375,42 @@ impl<T> Inner<T> {
         Some((cells, alloc))
     }
 
+    /// 唤醒等待 `clear_cvar` 的线程；没有等待者时不加锁。
+    ///
+    /// Wake the `clear_cvar` waiters; no lock is taken when nobody waits.
     fn wake_clear_waiter(&self) {
+        //AI=== 等待者计数预检查：稳态下读端（实时回调）的 drop 不取锁。
+        // 发布方屏障：先让 in_flight / writers_in_flight / b_dropping 的变化可见，再读计数；
+        // 等待方先登记计数并加屏障，再复查谓词。两侧同时漏看不可能发生（与 notify_*_after_*
+        // 相同的 SB + 双侧 SeqCst fence 协议）。
+        // Waiter-count pre-check so the reader (realtime callback) stays lock-free in the steady
+        // state. The publisher-side fence pairs with the waiter's registration fence, the same
+        // SB + two-SeqCst-fence protocol as notify_*_after_*.
+        fence(Ordering::SeqCst);
+        if self.clear_waiting.load(Ordering::Acquire) == 0 {
+            return;
+        }
         let _g = lock_ignore_poison(&self.wait_mutex);
         self.clear_cvar.notify_all();
+        //AI_END===
     }
+
+    //AI=== clear_cvar 等待的统一步骤：先登记计数与屏障，再复查谓词，必要时等待。
+    // Shared clear_cvar wait: register the waiter and fence first, then re-check the predicate
+    // and wait when needed.
+    fn wait_clear_cvar(&self, need_wait: impl Fn() -> bool) {
+        let g = lock_ignore_poison(&self.wait_mutex);
+        self.clear_waiting.fetch_add(1, Ordering::AcqRel);
+        fence(Ordering::SeqCst);
+        let g = if need_wait() {
+            wait_ignore_poison(&self.clear_cvar, g)
+        } else {
+            g
+        };
+        self.clear_waiting.fetch_sub(1, Ordering::AcqRel);
+        drop(g);
+    }
+    //AI_END===
 
     pub(crate) fn pop_one(&self) -> Option<T> {
         let _guard = self.enter_read()?;
@@ -527,11 +586,9 @@ impl<T> Inner<T> {
             {
                 break;
             }
-            let mut g = lock_ignore_poison(&self.wait_mutex);
-            if self.b_dropping.load(Ordering::Acquire) {
-                g = wait_ignore_poison(&self.clear_cvar, g);
-            }
-            drop(g);
+            //AI=== 统一走带计数登记的等待 / shared waiter-counted wait
+            self.wait_clear_cvar(|| self.b_dropping.load(Ordering::Acquire));
+            //AI_END===
         }
         cp_guard.b_acquired = true;
     }
@@ -541,11 +598,9 @@ impl<T> Inner<T> {
             if self.in_flight.load(Ordering::Acquire) == 0 {
                 break;
             }
-            let mut g = lock_ignore_poison(&self.wait_mutex);
-            if self.in_flight.load(Ordering::Acquire) > 0 {
-                g = wait_ignore_poison(&self.clear_cvar, g);
-            }
-            drop(g);
+            //AI=== 统一走带计数登记的等待 / shared waiter-counted wait
+            self.wait_clear_cvar(|| self.in_flight.load(Ordering::Acquire) > 0);
+            //AI_END===
         }
     }
 
@@ -557,11 +612,9 @@ impl<T> Inner<T> {
             if self.writers_in_flight.load(Ordering::Acquire) == 0 {
                 break;
             }
-            let mut g = lock_ignore_poison(&self.wait_mutex);
-            if self.writers_in_flight.load(Ordering::Acquire) > 0 {
-                g = wait_ignore_poison(&self.clear_cvar, g);
-            }
-            drop(g);
+            //AI=== 统一走带计数登记的等待 / shared waiter-counted wait
+            self.wait_clear_cvar(|| self.writers_in_flight.load(Ordering::Acquire) > 0);
+            //AI_END===
         }
     }
 
@@ -681,11 +734,9 @@ impl<T> Inner<T> {
             if self.in_flight.load(Ordering::Acquire) == 0 {
                 break;
             }
-            let mut g = lock_ignore_poison(&self.wait_mutex);
-            if self.in_flight.load(Ordering::Acquire) > 0 {
-                g = wait_ignore_poison(&self.clear_cvar, g);
-            }
-            drop(g);
+            //AI=== 统一走带计数登记的等待 / shared waiter-counted wait
+            self.wait_clear_cvar(|| self.in_flight.load(Ordering::Acquire) > 0);
+            //AI_END===
         }
 
         let r = self.read.pos.load(Ordering::Acquire);
@@ -822,8 +873,12 @@ impl<T> Inner<T> {
         fence(Ordering::SeqCst);
         //AI_END===
         if self.write.has_waiters() {
-            let _g = lock_ignore_poison(&self.wait_mutex);
+            //AI=== 不再持 wait_mutex：写端已改为带超时等待，丢一次唤醒只多等一个超时周期，
+            // 读端（实时回调）因此完全不取锁。
+            // No wait_mutex here: writer waits are timed, so a lost wakeup costs only one timeout
+            // period, and the reader (realtime callback) takes no lock at all.
             self.write.notify_one_locked();
+            //AI_END===
         }
     }
 

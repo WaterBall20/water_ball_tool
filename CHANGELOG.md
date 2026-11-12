@@ -53,6 +53,16 @@
   copied/moved into their own subtree (blocked while navigating and rendered red).
 - Local files are probed by the WBFilesPack header (not extension); valid packs show a magenta `◆`. The new
   `probe_pack` reads only the header and does not acquire `.lock`.
+- The manager refuses to delete the open pack file, its `.lock`/`.wbm` sidecars, or a directory containing them, and
+  refuses to copy/move those paths into the pack itself, so it cannot destroy or recursively copy its own backing
+  files.
+- Fixed Ctrl+letter keys under the Windows VT input path: control bytes 0x01–0x1a now map to Ctrl+A–Ctrl+Z, so
+  `Ctrl+W` closes the open pack (and `Ctrl+A` works in the rename editor).
+- Pack/unpack TUI modes now use a three-pane layout: filesystem left, properties/job card in the middle, pack right;
+  both
+  lists are read-only. The filesystem folds first, then the pack list; the properties/task pane stays and `Tab` switches
+  the visible list. Changed files are marked `Δ` in both lists: pack marks written files, unpack compares size+mtime
+  before extraction. Verify/browse replace the content-preview placeholder with a properties pane.
 
 ### WBFP Library
 
@@ -65,6 +75,10 @@
   destination parent must already exist, same-directory calls are rejected (use `rename`), and missing/existing
   targets, moves into a directory's own subtree, open handles and read-only managers are rejected. It updates the
   cumulative counts on both ancestor chains and writes the destination `PackStruct` before the source one.
+- Pack open errors now name the concrete file: failing to open the pack file and failing to open its separate `.wbm`
+  manifest produce distinct messages containing the corresponding path.
+- `extract_pack_file_to_disk` now applies the pack metadata mtime to the extracted file, so a second unpack can detect
+  unchanged files.
 
 ### Music Player TUI
 
@@ -184,6 +198,14 @@
   removes the requested track from the periodic-shuffle cycle even when it is already the current track; a track that
   is not queued leaves the cycle untouched.
 
+- `Player` is now the lifetime owner and `PlayerHandle` the cloneable shared handle handed to event sinks: dropping the
+  owner always runs `try_stop`, so shutdown no longer depends on a refcount reaching zero. `PlayerHandle::clone` only
+  bumps the refcount and never stops playback.
+- Fixed the last `DecoderSession` never being dropped on exit: decode event sinks captured a `PlayerHandle`, which
+  formed
+  an `Arc` cycle with the decoder event list. `DecoderRuntime::try_stop` (renamed from `stop`) now joins the decode
+  thread and then clears the event sinks, so the session and its file/format resources are released.
+
 ### Ring Buffers
 
 - `split_ring_buffer` gained `resize` for `T: Copy` writers (`LockedWriter` / `UnlockedWriter`). Growing past the
@@ -191,6 +213,11 @@
   delivering data during the copy and only see "no data" in the tiny swap window), swaps the buffers and retires the old
   one until no operation is in flight; shrink or grow within the allocation only updates the logical capacity.
   `capacity()` exposes the current size, and `Kind::Resizing` reports a write rejected during a grow.
+- `split_ring_buffer`'s realtime read path no longer takes `wait_mutex`: the reader notifies blocked writers with a
+  bare `Condvar::notify_one`, writer waits became timed (`WRITE_WAIT_TIMEOUT`, 10 ms) so a lost wakeup costs one timeout
+  period instead of hanging, and `wake_clear_waiter` returns early unless a `clear_waiting` waiter exists. This removes
+  the two mutex acquisitions the audio callback made per block (the source of >10 ms priority-inversion spikes under
+  load); blocked writers and `clear` / `truncate` waiters are still woken.
 
 ### File Finder Queue
 
@@ -254,6 +281,9 @@
   helper). A single-track list cannot avoid the repeat and is left as-is.
 - `Shuffle` picked `random_range(0..len)`, but track indices are 1-based (`get_current_track` uses `current_index - 1`):
   index 0 underflowed and the last track could never play. The range is now `1..=len`, so a single-track list plays.
+- `PeriodicShuffle` refills appended newly inserted tracks in index order at the tail of the current cycle queue, so
+  they
+  always played last and in sequence. Each new track is now inserted at a random position in the queue.
 
 ### Playlist Editing & Previous Track
 

@@ -1,5 +1,6 @@
 //! `reject_pending_writers` 测试：拒绝 pending 写端、不影响之后的写入阻塞。
 
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;

@@ -9,10 +9,19 @@ use crate::wb_files_pack::{
 };
 use std::collections::HashMap;
 use std::fs::File;
+use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 mod test;
+
+/// 为文件打开错误补充具体文件路径 / attach the concrete file path to an open error.
+fn open_context_error(context: &str, path: &Path, error: io::Error) -> PackFileError {
+    PackFileError::Io(io::Error::new(
+        error.kind(),
+        format!("{context} {}: {error}", path.display()),
+    ))
+}
 
 /// 包文件访问模式 / Pack file access mode
 ///
@@ -188,7 +197,10 @@ impl PackOpenOptions {
                 .create(true)
                 .truncate(true)
                 .create_new(true)
-                .open(path)?;
+                .open(&path_buf)
+                .map_err(|e| {
+                    open_context_error("无法创建包文件 / failed to create pack file", &path_buf, e)
+                })?;
             let pack_io = PackIO::new(Box::new(pack_file));
             let pack_io = Arc::new(Mutex::new(pack_io));
             let mut manager = WBFPManager::create_pack_file(
@@ -211,7 +223,15 @@ impl PackOpenOptions {
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(path)?;
+                .truncate(false)
+                .open(&path_buf)
+                .map_err(|e| {
+                    open_context_error(
+                        "无法创建或打开包文件 / failed to create or open pack file",
+                        &path_buf,
+                        e,
+                    )
+                })?;
             let metadata = pack_file.metadata()?;
             let is_new = metadata.len() == 0;
             let pack_io = PackIO::new(Box::new(pack_file));
@@ -243,7 +263,13 @@ impl PackOpenOptions {
             }
         } else {
             // 打开已存在的文件 / Open existing file
-            let pack_file = File::options().read(true).write(true).open(path)?;
+            let pack_file = File::options()
+                .read(true)
+                .write(true)
+                .open(&path_buf)
+                .map_err(|e| {
+                    open_context_error("无法打开包文件 / failed to open pack file", &path_buf, e)
+                })?;
             let pack_io = PackIO::new(Box::new(pack_file));
             let pack_io = Arc::new(Mutex::new(pack_io));
             let manager = WBFPManager::open_pack_file(&path_buf, pack_io.clone())?;

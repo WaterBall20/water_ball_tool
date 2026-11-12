@@ -1,8 +1,8 @@
 //! wbfp TUI 渲染 / wbfp TUI rendering
 //!
-//! yazi 风格：路径栏、文件列表、预留预览窗、状态行和按键栏。
+//! yazi 风格：路径栏、文件列表、属性面板、状态行和按键栏。
 //!
-//! Yazi-inspired layout: path line, file list, reserved preview pane, status line
+//! Yazi-inspired layout: path line, file list, properties pane, status line
 //! and key hints.
 
 //AI=== yazi 风格渲染 / yazi-inspired rendering
@@ -61,18 +61,22 @@ pub(super) fn render(app: &mut App, frame: &mut Frame) {
     }
 }
 
-/// 子命令模式的原有单栏布局 / the existing single-pane layout for subcommands.
+/// 子命令模式：打包/解包三栏，其余保持列表 + 属性 / subcommands: three panes for pack/unpack, list + properties otherwise.
 fn render_single(app: &mut App, frame: &mut Frame, body: Rect) {
+    if matches!(app.ui.mode, Mode::Pack | Mode::Unpack) {
+        render_pack_unpack(app, frame, body);
+        return;
+    }
     if app.nav.show_preview {
         if frame.area().width >= 80 {
-            let [list, preview] =
+            let [list, properties] =
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(body);
             prepare_nav(&mut app.nav, list);
             render_list(app, &app.nav, false, frame, list, " 文件 / Files ", true);
-            render_preview(app, frame, preview);
+            render_properties(app, frame, properties);
         } else {
-            render_preview(app, frame, body);
+            render_properties(app, frame, body);
         }
     } else {
         prepare_nav(&mut app.nav, body);
@@ -80,13 +84,153 @@ fn render_single(app: &mut App, frame: &mut Frame, body: Rect) {
     }
 }
 
-fn prepare_nav(nav: &mut Nav, area: Rect) {
-    nav.list_area = area;
-    nav.height = usize::from(area.height.saturating_sub(2)).max(1);
+/// 打包/解包：详情/任务优先，空间不足时先折叠文件系统、再折叠包列表；Tab 切换显示的列表。
+/// Pack/unpack: properties/job first; fold the filesystem, then the pack list; Tab switches the visible list.
+fn render_pack_unpack(app: &mut App, frame: &mut Frame, body: Rect) {
+    app.local_nav.list_area = Rect::ZERO;
+    app.nav.list_area = Rect::ZERO;
+
+    let width = body.width;
+    let show_pane = app.nav.show_preview || app.jobs.running;
+
+    if width >= MANAGER_THREE_PANE_MIN_WIDTH {
+        if show_pane {
+            let [fs, properties, pack] = Layout::horizontal([
+                Constraint::Percentage(30),
+                Constraint::Percentage(40),
+                Constraint::Percentage(30),
+            ])
+            .areas(body);
+            prepare_nav(&mut app.local_nav, fs);
+            prepare_nav(&mut app.nav, pack);
+            render_list(
+                app,
+                &app.local_nav,
+                true,
+                frame,
+                fs,
+                " 文件系统 / Filesystem ",
+                app.focus == Focus::Local,
+            );
+            render_properties(app, frame, properties);
+            render_list(
+                app,
+                &app.nav,
+                false,
+                frame,
+                pack,
+                " 包 / Pack ",
+                app.focus == Focus::Pack,
+            );
+        } else {
+            let [fs, pack] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(body);
+            prepare_nav(&mut app.local_nav, fs);
+            prepare_nav(&mut app.nav, pack);
+            render_list(
+                app,
+                &app.local_nav,
+                true,
+                frame,
+                fs,
+                " 文件系统 / Filesystem ",
+                app.focus == Focus::Local,
+            );
+            render_list(
+                app,
+                &app.nav,
+                false,
+                frame,
+                pack,
+                " 包 / Pack ",
+                app.focus == Focus::Pack,
+            );
+        }
+    } else if width >= MANAGER_TWO_PANE_MIN_WIDTH {
+        if show_pane {
+            // 文件系统先折叠，只显示当前列表 + 详情/任务 / fold the filesystem; show the focused list + properties or job.
+            let [list, properties] =
+                Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                    .areas(body);
+            match app.focus {
+                Focus::Local => {
+                    prepare_nav(&mut app.local_nav, list);
+                    render_list(
+                        app,
+                        &app.local_nav,
+                        true,
+                        frame,
+                        list,
+                        " 文件系统 / Filesystem ",
+                        true,
+                    );
+                }
+                Focus::Pack => {
+                    prepare_nav(&mut app.nav, list);
+                    render_list(app, &app.nav, false, frame, list, " 包 / Pack ", true);
+                }
+            }
+            render_properties(app, frame, properties);
+        } else {
+            let [fs, pack] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(body);
+            prepare_nav(&mut app.local_nav, fs);
+            prepare_nav(&mut app.nav, pack);
+            render_list(
+                app,
+                &app.local_nav,
+                true,
+                frame,
+                fs,
+                " 文件系统 / Filesystem ",
+                app.focus == Focus::Local,
+            );
+            render_list(
+                app,
+                &app.nav,
+                false,
+                frame,
+                pack,
+                " 包 / Pack ",
+                app.focus == Focus::Pack,
+            );
+        }
+    } else if show_pane {
+        render_properties(app, frame, body);
+    } else {
+        match app.focus {
+            Focus::Local => {
+                prepare_nav(&mut app.local_nav, body);
+                render_list(
+                    app,
+                    &app.local_nav,
+                    true,
+                    frame,
+                    body,
+                    " 文件系统 / Filesystem ",
+                    true,
+                );
+            }
+            Focus::Pack => {
+                prepare_nav(&mut app.nav, body);
+                render_list(app, &app.nav, false, frame, body, " 包 / Pack ", true);
+            }
+        }
+    }
 }
 
-/// Manager 模式：左文件系统、中包、右预览；先折叠预览，再折叠文件系统。
-/// Manager: filesystem left, pack middle, preview right; preview folds first, then filesystem.
+fn prepare_nav(nav: &mut Nav, area: Rect) {
+    nav.list_area = area;
+    //AI=== 表头占用一行 / the header occupies one row
+    // 上下边框加一行表头 / two border rows plus the header row
+    nav.height = usize::from(area.height.saturating_sub(3)).max(1);
+    //AI_END===
+}
+
+/// Manager 模式：左文件系统、中包、右属性；先折叠属性，再折叠文件系统。
+/// Manager: filesystem left, pack middle, properties right; properties fold first, then filesystem.
 fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
     // 隐藏面板不接收鼠标 / hidden panes must not receive mouse hits
     app.local_nav.list_area = Rect::ZERO;
@@ -195,7 +339,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
             );
         }
         if let Some(preview) = preview_area {
-            render_preview(app, frame, preview);
+            render_properties(app, frame, preview);
         }
         return;
     }
@@ -229,7 +373,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
                 " 包 / Pack ",
                 app.focus == Focus::Pack,
             );
-            render_preview(app, frame, job);
+            render_properties(app, frame, job);
         } else if width >= MANAGER_TWO_PANE_MIN_WIDTH {
             let [list, job] =
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
@@ -264,9 +408,9 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
                     );
                 }
             }
-            render_preview(app, frame, job);
+            render_properties(app, frame, job);
         } else {
-            render_preview(app, frame, body);
+            render_properties(app, frame, body);
         }
         return;
     }
@@ -298,7 +442,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
             " 包 / Pack ",
             app.focus == Focus::Pack,
         );
-        render_preview(app, frame, preview);
+        render_properties(app, frame, preview);
     } else if has_pack && width >= MANAGER_TWO_PANE_MIN_WIDTH {
         let [local, pack] =
             Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
@@ -360,7 +504,7 @@ fn render_manager(app: &mut App, frame: &mut Frame, body: Rect) {
             " 文件系统 / Filesystem ",
             true,
         );
-        render_preview(app, frame, preview);
+        render_properties(app, frame, preview);
     } else {
         prepare_nav(&mut app.local_nav, body);
         render_list(
@@ -399,9 +543,9 @@ fn render_header(app: &App, frame: &mut Frame, area: Rect) {
         ),
         Span::styled(app.ui.title.clone(), Style::new().fg(Color::White)),
     ];
-    if app.ui.mode == Mode::Pack {
+    if matches!(app.ui.mode, Mode::Pack | Mode::Unpack) {
         left.push(Span::styled(
-            "  ·  只读源目录 / source",
+            "  ·  只读 / read-only",
             Style::new().fg(Color::DarkGray),
         ));
     }
@@ -435,7 +579,7 @@ fn render_path(app: &App, frame: &mut Frame, area: Rect) {
         Layout::horizontal([Constraint::Fill(1), Constraint::Length(22)]).areas(area);
     let (tag, tag_color) = if app.picker.is_some() || app.pending.is_some() {
         ("[目标 / TARGET] ", Color::Yellow)
-    } else if app.ui.mode == Mode::Manager {
+    } else if matches!(app.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack) {
         match app.focus {
             Focus::Local => ("[文件系统 / FS] ", Color::Cyan),
             Focus::Pack => ("[包 / PACK] ", Color::Magenta),
@@ -483,6 +627,13 @@ fn render_list(
     title: &str,
     focused: bool,
 ) {
+    //AI=== 标题右侧显示当前项/总数 / show current item / total on the title's right
+    let title_style = Style::new().fg(if focused { Color::Cyan } else { Color::Gray });
+    let count = if nav.entries.is_empty() {
+        String::new()
+    } else {
+        format!(" {}/{} ", nav.selected.saturating_add(1), nav.entries.len())
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(if focused {
@@ -490,35 +641,53 @@ fn render_list(
         } else {
             Color::DarkGray
         }))
-        .title(Line::from(title).style(Style::new().fg(if focused {
-            Color::Cyan
-        } else {
-            Color::Gray
-        })));
+        .title(Line::from(title).style(title_style))
+        .title(
+            Line::from(count)
+                .alignment(Alignment::Right)
+                .style(title_style),
+        );
+    //AI_END===
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let show_size = inner.width >= 56;
+    // 预留：标记 3 列 + 状态 2 列 / reserve 3 columns for the marker and 2 for the status
+    let mut name_max = usize::from(inner.width).saturating_sub(5);
+    if show_size {
+        name_max = name_max.saturating_sub(1 + SIZE_WIDTH);
+    }
+    let name_max = name_max.max(8);
+
+    //AI=== 列表表头行 / list header row
+    // 表头与列表行共用固定列 / the header shares the list rows' fixed columns
+    let [header_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(list_header(inner.width, show_size)).style(Style::new().fg(Color::DarkGray)),
+        header_area,
+    );
+    //AI_END===
+
     if nav.entries.is_empty() {
-        let message = app
-            .ui
-            .error
-            .clone()
-            .unwrap_or_else(|| "空目录 / empty directory".to_string());
+        let message = app.ui.error.clone().unwrap_or_else(|| {
+            if !nav_is_local && app.ui.mode == Mode::Pack && app.pack.is_none() {
+                "打包完成后显示包内容 / pack contents appear when packing finishes".to_string()
+            } else {
+                "空目录 / empty directory".to_string()
+            }
+        });
         frame.render_widget(
             Paragraph::new(message)
                 .style(Style::new().fg(Color::DarkGray))
                 .wrap(Wrap { trim: true }),
-            inner,
+            //AI=== 表头下方的列表区域 / list area below the header
+            list_area,
+            //AI_END===
         );
         return;
     }
 
-    let show_size = inner.width >= 56;
-    let mut name_max = usize::from(inner.width).saturating_sub(2 + 2);
-    if show_size {
-        name_max = name_max.saturating_sub(1 + SIZE_WIDTH + 1);
-    }
-    let name_max = name_max.max(8);
     let items: Vec<ListItem> = nav
         .entries
         .iter()
@@ -536,7 +705,27 @@ fn render_list(
             )
         })
         .collect();
-    frame.render_widget(List::new(items), inner);
+    //AI=== 表头下方的列表区域 / list area below the header
+    frame.render_widget(List::new(items), list_area);
+    //AI_END===
+}
+
+/// 列表表头：名称与大小列标题，与列表行的固定列对齐。
+///
+/// The list header: name and size labels aligned with the list rows' fixed columns.
+fn list_header(width: u16, show_size: bool) -> Line<'static> {
+    //AI=== 列表表头 / list header
+    let width = usize::from(width);
+    let mut text = if show_size {
+        fit_width("   名称 / Name", width.saturating_sub(2 + 1 + SIZE_WIDTH))
+    } else {
+        fit_width("   名称 / Name", width)
+    };
+    if show_size {
+        text.push_str(&pad_left_width("大小 / Size", SIZE_WIDTH + 1));
+    }
+    Line::from(fit_width(&text, width))
+    //AI_END===
 }
 
 fn list_item(
@@ -620,14 +809,28 @@ fn list_item(
             },
         ));
     }
+    let changed = app.is_changed(nav_is_local, entry);
     if let Some(status) = app.status_of(entry) {
-        let (glyph, color) = status_glyph(status);
+        let (glyph, color) = if changed && status != RowStatus::Failed {
+            ("Δ", Color::Yellow)
+        } else {
+            status_glyph(status)
+        };
         spans.push(Span::styled(
             format!(" {glyph}"),
-            if selected {
+            if selected && glyph != "Δ" {
                 Style::new().fg(Color::Black)
             } else {
                 Style::new().fg(color)
+            },
+        ));
+    } else if changed {
+        spans.push(Span::styled(
+            " Δ",
+            if selected {
+                Style::new().fg(Color::Yellow)
+            } else {
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             },
         ));
     } else {
@@ -667,11 +870,11 @@ fn status_glyph(status: RowStatus) -> (&'static str, Color) {
     }
 }
 
-fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
+fn render_properties(app: &App, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::Blue))
-        .title(Line::from(" 预览（预留）/ Preview ").style(Style::new().fg(Color::Blue)));
+        .title(Line::from(" 属性 / Properties ").style(Style::new().fg(Color::Blue)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -680,13 +883,7 @@ fn render_preview(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "预览窗口已预留，后续接入文件内容 / content preview is reserved",
-            Style::new().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-    ];
+    let mut lines = Vec::new();
     if let Some(entry) = app.selected_entry() {
         push_metadata(&mut lines, app, entry);
     } else {
@@ -1024,14 +1221,20 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
             )
         } else {
             (
-                " ⏎ 打开包/进入目录 · c 复制 · m 移动 · r 改名 · Del 删除 · p 预览 · ? 帮助 · q 退出 "
+                " ⏎ 打开包/进入目录 · c 复制 · m 移动 · r 改名 · Del 删除 · p 属性 · ? 帮助 · q 退出 "
                     .to_string(),
                 Color::DarkGray,
             )
         }
+    } else if matches!(app.ui.mode, Mode::Pack | Mode::Unpack) {
+        (
+            " q 退出 · Tab 切换 · ↑↓ 移动 · ⏎ 进入 · ← 上级 · p 属性 · F12 调试 · ? 帮助 "
+                .to_string(),
+            Color::DarkGray,
+        )
     } else {
         (
-            " q 退出 · ↑↓ 移动 · ⏎ 进入 · ← 上级 · p 预览 · F12 调试 · ? 帮助 ".to_string(),
+            " q 退出 · ↑↓ 移动 · ⏎ 进入 · ← 上级 · p 属性 · F12 调试 · ? 帮助 ".to_string(),
             Color::DarkGray,
         )
     };
@@ -1087,7 +1290,7 @@ fn render_help(frame: &mut Frame) {
         Line::from("Ctrl+W       关闭当前包 / close the open pack"),
         Line::from("左键 / 双击  选择 / 进入 / select / open"),
         Line::from("← / h        上级 / parent"),
-        Line::from("p            切换预览 / toggle preview"),
+        Line::from("p            切换属性面板 / toggle properties"),
         Line::from("F12          调试 / debug"),
         Line::from("?            帮助 / help"),
         Line::from(""),

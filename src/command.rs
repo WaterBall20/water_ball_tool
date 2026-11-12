@@ -8,6 +8,8 @@
 //! updating progress bars with consistent styling.
 
 use crate::command::ff::FileFinderArgs;
+use crate::command::music_play::MusicPlayArgs;
+use crate::command::ram_probe::RamProbeArgs;
 use crate::command::wbfp::WaterBallFilePackCommand;
 use clap::error::Result;
 use clap::{Parser, Subcommand};
@@ -25,6 +27,7 @@ use unicode_width::UnicodeWidthStr;
 
 mod ff;
 pub mod music_play;
+pub mod ram_probe;
 #[cfg(test)]
 mod test;
 mod tui_input;
@@ -42,7 +45,8 @@ pub(crate) struct Cli {
 enum Commands {
     Ff(FileFinderArgs),
     Wbfp(WaterBallFilePackCommand),
-    MP(music_play::MusicPlayArgs),
+    MP(MusicPlayArgs),
+    RP(RamProbeArgs),
 }
 
 static BUF_LEN: usize = 10 * 1024 * 1024;
@@ -174,5 +178,6 @@ pub(crate) fn cli(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Wbfp(commands) => wbfp::run(commands),
         //AI_END===
         Commands::MP(args) => music_play::args(args),
+        Commands::RP(args) => ram_probe::args(args),
     }
 }

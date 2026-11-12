@@ -377,7 +377,13 @@ impl PlayList {
         if let LoopMode::PeriodicShuffle = self.loop_mode
             && !self.rand_list.is_empty()
         {
-            self.rand_list.extend(pos..pos + count);
+            //AI=== 补进位置随机：顺序追加会让新曲永远排在队尾且按顺序播放 / random positions: appending in order would
+            // always play the new tracks last and in sequence
+            for index in pos..pos + count {
+                let at = rand::random_range(0..=self.rand_list.len());
+                self.rand_list.insert(at, index);
+            }
+            //AI_END===
         }
     }
     //AI_END===
@@ -760,6 +766,50 @@ mod test {
             assert!(seen.insert(index));
         }
         assert!(!seen.contains(&play_list.current_index));
+    }
+    //AI_END===
+
+    //AI=== 周期洗牌补进必须随机：顺序追加会让新曲永远排在队尾且按下标顺序播放
+    // Periodic-shuffle refills must be random: sequential appending would always put new tracks at the tail in index order
+    #[test]
+    fn periodic_refill_is_random_not_sequential() {
+        let mut position_varied = false;
+        let mut order_varied = false;
+        for _ in 0..200 {
+            let mut play_list = PlayList::from(creat_tack_list(10));
+            play_list.set_loop_mod(LoopMode::PeriodicShuffle);
+            play_list.rand_list = VecDeque::from([1, 2, 3, 4, 5]);
+            play_list.add_tracks(vec![track("a"), track("b"), track("c")]);
+
+            // 结构：既有 5 项保持原顺序，新 3 项一个不少 / structure: the 5 existing entries keep their order, all 3 new ones are queued
+            assert_eq!(8, play_list.rand_list.len());
+            let kept: Vec<usize> = play_list
+                .rand_list
+                .iter()
+                .copied()
+                .filter(|&i| i <= 5)
+                .collect();
+            assert_eq!(vec![1, 2, 3, 4, 5], kept);
+            let new_tracks: Vec<usize> = play_list
+                .rand_list
+                .iter()
+                .copied()
+                .filter(|&i| i > 5)
+                .collect();
+            assert_eq!(3, new_tracks.len());
+
+            // 200 次全落队尾且按下标顺序的概率几乎为零 / 200 runs all-at-tail in index order is practically impossible
+            if new_tracks != vec![11, 12, 13] {
+                order_varied = true;
+            }
+            let last_three: Vec<usize> =
+                play_list.rand_list.iter().rev().take(3).copied().collect();
+            if last_three != vec![13, 12, 11] {
+                position_varied = true;
+            }
+        }
+        assert!(position_varied);
+        assert!(order_varied);
     }
     //AI_END===
 

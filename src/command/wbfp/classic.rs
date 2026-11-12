@@ -667,7 +667,7 @@ impl WaterBallFilePackArgsRuning {
         //AI=== 打开包文件/创建输出目录失败向上传播错误，不再 panic
         // Propagate open / create-dir errors instead of panicking.
         let mut pack = ManagerSync::open(pack_path)
-            .map_err(|e| Error::other(format!("打开包文件错误 / failed to open pack file: {e}")))?;
+            .map_err(|e| Error::other(format!("打开包失败 / failed to open pack: {e}")))?;
         info!("开始复制数据");
         fs::create_dir_all(&out_dir_path)?;
         //AI_END===
@@ -1003,7 +1003,7 @@ impl WaterBallFilePackArgsRuning {
         info!("开始准备哈希校验");
         info!("打开包文件");
         let mut pack = ManagerSync::open(pack_path)
-            .map_err(|e| PackFileError::Other(format!("打开包文件错误: {e}")))?;
+            .map_err(|e| PackFileError::Other(format!("打开包失败 / failed to open pack: {e}")))?;
         info!("开始哈希校验");
         Self::verify_hash(&mut pack, &mp, thread_count)?;
         info!("操作已完成，没有警告（WARN）或错误（ERROR）说明全部通过。");

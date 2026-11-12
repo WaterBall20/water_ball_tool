@@ -392,6 +392,14 @@ pub(crate) fn extract_pack_file_to_disk(
         }
     }
 
+    let modified = in_file.get_modified();
+    if modified > 0
+        && let Ok(ms) = u64::try_from(modified)
+        && let Some(time) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(ms))
+    {
+        let _ = out_file.set_modified(time);
+    }
+
     Ok(write_len)
 }
 

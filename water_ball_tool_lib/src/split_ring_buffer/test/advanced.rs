@@ -1,5 +1,10 @@
 //! try_* 方法、clear、并发综合。
 
+use pretty_assertions::assert_eq;
+//AI=== clear 并发测试用到的原子量与 Arc / atomics and Arc for the clear concurrency test
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+//AI_END===
 use std::thread;
 use std::time::Duration;
 
@@ -315,3 +320,27 @@ fn blocking_roundtrip_large() {
     let received = rh.join().expect("reader thread should not panic");
     assert_eq!(received, data);
 }
+
+//AI=== clear 与在途读并发：等待者计数的唤醒不能丢（丢了 clear 会永久等 in_flight 归零）
+// clear racing an active reader: the waiter-counted wakeup must not be lost, or clear would
+// wait for `in_flight == 0` forever.
+#[test]
+fn clear_completes_while_reader_is_reading() {
+    let (reader, writer) = locked_ring_buffer::<u8>(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_reader = Arc::clone(&stop);
+    let h = thread::spawn(move || {
+        let mut buf = [0u8; 8];
+        while !stop_reader.load(Ordering::Acquire) {
+            reader.read(&mut buf);
+        }
+    });
+    for _ in 0..500 {
+        writer.write(&[1, 2, 3, 4]);
+        writer.clear();
+    }
+    stop.store(true, Ordering::Release);
+    h.join().expect("reader thread should not panic");
+    assert_eq!(0, writer.len());
+}
+//AI_END===

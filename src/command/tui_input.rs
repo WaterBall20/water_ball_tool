@@ -14,7 +14,6 @@ use std::error::Error;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
-use tracing::warn;
 use vtparse::{CsiParam, VTActor, VTParser};
 
 /// 滚轮一次滚动的行数 / rows per wheel notch.
@@ -335,6 +334,11 @@ impl VTActor for VtActor<'_> {
             0x08 | 0x7f => Some((KeyCode::Backspace, KeyModifiers::empty())),
             0x0a | 0x0d => Some((KeyCode::Enter, KeyModifiers::empty())),
             0x09 => Some((KeyCode::Tab, KeyModifiers::empty())),
+            // 0x01..=0x1a 对应 Ctrl+A..Ctrl+Z；特殊键（Ctrl+C/H/I/J/M）已在上方处理。
+            // 0x01..=0x1a map to Ctrl+A..Ctrl+Z; special keys (Ctrl+C/H/I/J/M) are handled above.
+            0x01..=0x1a => u8::try_from(u32::from(control) + u32::from(b'a') - 1)
+                .ok()
+                .map(|letter| (KeyCode::Char(char::from(letter)), KeyModifiers::CONTROL)),
             _ => None,
         };
         if let Some((code, modifiers)) = event {

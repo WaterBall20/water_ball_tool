@@ -4,12 +4,13 @@ use super::app::{App, FooterAction, SeekGesture, Window};
 use super::channel_writer::{LogLevel, LogLine};
 use super::ui;
 use super::{
-    SHUFFLE_INIT_TRACKS, parse_time, parse_volume, resolve_command, seek_by, seek_target,
-    should_start,
+    SHUFFLE_INIT_TRACKS, next_loop_mode, parse_time, parse_volume, resolve_command, seek_by,
+    seek_target, should_start,
 };
 use crate::command::music_play::runtime::{DebugInfo, Snapshot};
 use crate::command::tui_input::{VtEvent, VtInput};
 use lofty::file::FileType;
+use pretty_assertions::assert_eq;
 //AI=== 鼠标报文重组与视口测试所需导入 / imports for mouse reassembly and viewport tests
 use ratatui::crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
@@ -394,6 +395,23 @@ fn shuffle_startup_waits_for_five_tracks_with_done_fallback() {
     assert!(!should_start(false, false, 0, true));
 }
 
+//AI=== `m` 循环切换播放模式 / `m` cycles playback modes
+#[test]
+fn loop_mode_cycles_through_all_modes() {
+    let mut mode = LoopMode::SequentialLoop;
+    for expected in [
+        LoopMode::Sequential,
+        LoopMode::RepeatOne,
+        LoopMode::Shuffle,
+        LoopMode::PeriodicShuffle,
+        LoopMode::SequentialLoop,
+    ] {
+        mode = next_loop_mode(mode);
+        assert_eq!(expected, mode);
+    }
+}
+//AI_END===
+
 #[test]
 fn debug_popup_renders_buffers_and_timings() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(TestBackend::new(100, 30))?;
@@ -684,6 +702,23 @@ fn vt_ctrl_c_is_preserved() {
     assert!(matches!(
         events[0],
         VtEvent::Key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    ));
+}
+
+#[test]
+fn vt_ctrl_letters_are_preserved() {
+    let mut vt = VtInput::new();
+    vt.feed(&[0x17, 0x01]);
+
+    let events = vt.drain();
+    assert_eq!(2, events.len());
+    assert!(matches!(
+        events[0],
+        VtEvent::Key(KeyCode::Char('w'), KeyModifiers::CONTROL)
+    ));
+    assert!(matches!(
+        events[1],
+        VtEvent::Key(KeyCode::Char('a'), KeyModifiers::CONTROL)
     ));
 }
 //AI_END===

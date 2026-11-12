@@ -1,5 +1,6 @@
 //AI=== wbfp TUI 渲染测试 / wbfp TUI rendering tests
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn size_column_keeps_number_and_unit_aligned() {
@@ -42,21 +43,21 @@ fn job_card_bar_is_not_truncated_by_label() -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 #[test]
-fn manager_layout_folds_preview_before_local() -> Result<(), Box<dyn std::error::Error>> {
+fn manager_layout_folds_properties_before_local() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::manager_no_pack();
 
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20))?;
     wide.draw(|frame| render(&mut app, frame))?;
     let text = buffer_text(&wide)?;
     assert!(text.contains("Filesystem"), "buffer:\n{text}");
-    assert!(text.contains("Preview"));
+    assert!(text.contains("Properties"));
     assert!(!text.contains("Pack"));
 
     let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 20))?;
     narrow.draw(|frame| render(&mut app, frame))?;
     let text = buffer_text(&narrow)?;
     assert!(text.contains("Filesystem"));
-    assert!(!text.contains("Preview"));
+    assert!(!text.contains("Properties"));
     Ok(())
 }
 
@@ -133,6 +134,126 @@ fn picker_shows_target_pane_and_source_banner() -> Result<(), Box<dyn std::error
     assert!(text.contains("src:"), "buffer:\n{text}");
 
     std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+//AI=== 列表标题计数与表头 / list title count and header
+#[test]
+fn list_title_shows_selection_position_and_total() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+    app.local_nav.selected = 1;
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("2/3"), "buffer:\n{text}");
+    Ok(())
+}
+
+#[test]
+fn list_shows_column_header() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Name"), "buffer:\n{text}");
+    assert!(text.contains("Size"), "buffer:\n{text}");
+    Ok(())
+}
+//AI_END===
+
+#[test]
+fn pack_layout_shows_both_lists_and_changed_marker() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+    app.ui.mode = Mode::Pack;
+    app.focus = Focus::Local;
+    app.local_nav.local_root = Some(std::path::PathBuf::from("/root"));
+    app.local_nav.entries = vec![Entry {
+        name: "a.txt".to_string(),
+        path: std::path::PathBuf::from("/root/a.txt"),
+        is_dir: false,
+        size: 1,
+        modified: 0,
+        hash: None,
+        pack_version: None,
+        synthetic: false,
+    }];
+    app.nav.entries = vec![Entry {
+        name: "a.txt".to_string(),
+        path: std::path::PathBuf::from("a.txt"),
+        is_dir: false,
+        size: 1,
+        modified: 0,
+        hash: None,
+        pack_version: None,
+        synthetic: false,
+    }];
+    app.jobs.changed = [std::path::PathBuf::from("a.txt")].into_iter().collect();
+    app.local_nav.selected = 0;
+    app.nav.selected = 0;
+    assert!(
+        app.is_changed(true, &app.local_nav.entries[0]),
+        "local entry must be changed"
+    );
+    assert!(
+        app.is_changed(false, &app.nav.entries[0]),
+        "pack entry must be changed"
+    );
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 25))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Filesystem"), "buffer:\n{text}");
+    assert!(text.contains("Properties"), "buffer:\n{text}");
+    assert!(text.contains("Pack"), "buffer:\n{text}");
+    assert!(text.contains("Δ"), "buffer:\n{text}");
+    Ok(())
+}
+
+#[test]
+fn pack_layout_folds_filesystem_first_and_tab_switches() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+    app.ui.mode = Mode::Pack;
+    app.focus = Focus::Pack;
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Pack"), "buffer:\n{text}");
+    assert!(text.contains("Properties"), "buffer:\n{text}");
+    assert!(!text.contains("Filesystem"), "buffer:\n{text}");
+
+    app.switch_focus();
+    assert_eq!(app.focus, Focus::Local);
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Filesystem"), "buffer:\n{text}");
+    assert!(text.contains("Properties"), "buffer:\n{text}");
+    assert!(!text.contains("Pack"), "buffer:\n{text}");
+    Ok(())
+}
+
+#[test]
+fn pack_layout_tab_switches_between_the_two_lists() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = App::manager_no_pack();
+    app.ui.mode = Mode::Pack;
+    app.focus = Focus::Pack;
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 20))?;
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Filesystem"), "buffer:\n{text}");
+    assert!(text.contains("Pack"), "buffer:\n{text}");
+    assert!(text.contains("Properties"), "buffer:\n{text}");
+
+    app.switch_focus();
+    assert_eq!(app.focus, Focus::Local);
+    terminal.draw(|frame| render(&mut app, frame))?;
+    let text = buffer_text(&terminal)?;
+    assert!(text.contains("Filesystem"), "buffer:\n{text}");
+    assert!(text.contains("Pack"), "buffer:\n{text}");
+    assert!(text.contains("Properties"), "buffer:\n{text}");
     Ok(())
 }
 

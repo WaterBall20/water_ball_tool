@@ -395,11 +395,11 @@ the clap handler and `tui/` stay in the binary.
 | Module (crate)                 | Responsibility                                                                                                                                                                                                                    |
 |--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `music_play.rs` (lib)          | Engine module root; owns `LoopMode` (with `FromStr`) and declares the submodules                                                                                                                                                  |
-| `player.rs` (lib)              | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`                                                                                                                                 |
+| `player.rs` (lib)              | cpal output stream, `PlayCmd` transport, volume/position atomics, event sinks, `Player::try_stop`. `Player` is the lifetime owner (its `Drop` always stops); `PlayerHandle` is the cloneable shared handle handed to event sinks  |
 | `decoder_runtime.rs` (lib)     | symphonia decode thread: probes/seeks the file, decodes audio into the pre-effect ring buffer; owns the paired `DecoderSession`                                                                                                   |
 | `effect.rs` (lib)              | `PostEffect`/`PreEffect` traits, `AudioFormat`, `PlayCmd`, effect chain                                                                                                                                                           |
 | `effect/runtime.rs` (lib)      | Locked pre-effect runtime thread (event sinks, stop/reject handling)                                                                                                                                                              |
-| `watchdog.rs` (lib)            | Crash watchdog: `ThreadExitGuard` (Drop → notify on a `Condvar`) + single watchdog thread owned by `Player`                                                                                                                       |
+| `watchdog.rs` (lib)            | Crash watchdog: `ThreadExitGuard` (Drop → notify on a `Condvar`) + single watchdog thread owned by `PlayerHandle`                                                                                                                 |
 | `effect/resampler.rs` (lib)    | rubato FFT resampler to the output device sample rate                                                                                                                                                                             |
 | `effect/cross_bridge.rs` (lib) | Crossfade bridging between tracks: asymmetric delay-line fill (low startup latency) and full-curve gain scaling for short tails                                                                                                   |
 | `effect/fade.rs` (lib)         | Fade in/out and pause/resume transport handling                                                                                                                                                                                   |
@@ -423,8 +423,12 @@ The cpal callback runs in a realtime context and therefore:
 
 The split ring buffer's lock-free read path publishes `read.pos` and then checks for waiting writers. That check is
 bracketed by a `SeqCst` fence on both sides (publisher in `notify_*_after_*`, waiter in `enter_wait`), so "publisher
-skipped the wakeup" and "waiter read a stale position" cannot happen together — a missed wakeup would park the peer
-forever. Only a fence is used, never a lock, so the callback path stays realtime-safe.
+skipped the wakeup" and "waiter read a stale position" cannot happen together. The wake itself (`Condvar::notify_one`)
+is issued without `wait_mutex`, so the callback never acquires a user-space lock: a notify that lands between the
+writer's predicate re-check and its park is lost, and every blocked writer waits with `WRITE_WAIT_TIMEOUT` (10 ms), so
+a lost wakeup costs one timeout period instead of hanging. The `clear` / `truncate` / `reject` waiters are gated by the
+`clear_waiting` counter, so the in-flight guard drop only locks while such a waiter actually exists (control paths only,
+never during steady-state playback).
 
 Instead it posts events (`TrackEnded`) and log records with non-blocking `try_send` into the `EventDispatcher`'s
 bounded channel (`DISPATCH_CHANNEL_CAPACITY = 1024`). A full channel drops the message and increments the dropped
@@ -465,8 +469,11 @@ drives `stream.play()` / `stream.pause()`.
 - The binary front-end consumes decoder error events through a `DecoderEventChannelSink` (channel thread, never inline
   on the decode thread) and pauses playback. The next `play` sees `is_poisoned()` and changes track first, then starts
   playback; the TUI shows the `异常暂停中` state and a red `Error` line in the now-playing block.
-- `DecoderRuntime::stop()` records a `send_skip` failure, always joins the decode thread, then returns the first error;
-  `Player::try_stop` logs stop failures and continues the remaining shutdown steps.
+- `DecoderRuntime::try_stop()` records a `send_skip` failure, always joins the decode thread, then clears the decoder
+  event list and returns the first error; `Player::try_stop` logs stop failures and continues the remaining shutdown
+  steps. Clearing the sinks is what releases the handles they captured: a sink registered by the front-end owns a
+  `PlayerHandle`, which shares the same `event_list` `Arc`, so keeping it alive would form an `Arc` cycle and the last
+  `DecoderSession` would never drop (leaking its file and format resources).
 - The pre-effect runtime thread never exits on a runtime error: a ring error resets the effect chain with the `Skip`
   discontinuity, emits `PreEffectRuntimeEventErrorKind::Runtime`, backs off 10 ms and keeps consuming (a closed write
   side therefore parks instead of spinning); a hard output-write error is reported the same way and the block is
@@ -485,12 +492,15 @@ drives `stream.play()` / `stream.pause()`.
 2. Pause the audio stream and clear `is_playing`, so no new events are produced.
 3. Stop the pre-effect runtime — its `reject_waiting_writers` wakes producers blocked in `push_wait`, preventing a join
    deadlock.
-4. Stop the decoder thread.
+4. Stop the decoder thread (`DecoderRuntime::try_stop`: join, then clear the decoder event sinks).
 5. Stop the event dispatch thread (`Stop` message + join).
 6. Join the `rx_cmd` thread via the handle stored in the player.
 7. Join the watchdog thread.
 
 Failures at any step are logged, not propagated; `Runtime::run_stop` additionally joins the UI thread.
+
+Dropping the `Player` owner also calls `try_stop`, so shutdown cannot be skipped by forgetting the explicit call.
+Cloned `PlayerHandle`s never trigger it: they only share the state, and the owner decides the lifetime.
 
 ### 7.6 Crash watchdog (`watchdog.rs`)
 
@@ -534,7 +544,8 @@ Failures at any step are logged, not propagated; `Runtime::run_stop` additionall
 - Startup: sequential modes initialize (load the first track) on the first track; shuffle modes wait for 5 tracks, with
   a `ScanMessage::Done` fallback that initializes with fewer tracks when the scan ends
 - Key map: `n` next, `←`/`→` seek (5 s per tap; repeats during a hold only move the preview and the target is
-  committed on release), space play/pause, `p` pause, `P` play, `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the
+  committed on release), space play/pause, `p` pause, `P` play, `m` cycles the playback mode (sequential-loop →
+  sequential → repeat-one → shuffle → periodic-shuffle), `↑`/`↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the
   playlist, `+`/`-` volume, `F12` toggles the debug popup, `e` toggles the effects window, `:` command mode,
   `q`/`Esc`/`Ctrl+C` quit. Debug/effects/help windows are mutually exclusive: opening one closes the others, and `Esc`
   closes the active window before quitting. The Debug window is two-column: buffers, decoder state, latency pipeline and
@@ -1096,39 +1107,49 @@ flowchart TD
   classic `indicatif` path. `wbfp::commands` always takes the classic path (tests use it). `browse` has no classic
   equivalent and requires an interactive terminal. Without a subcommand the file manager is TUI-only: the pack path is
   optional (`wbfp <pack>` opens it immediately, bare `wbfp` starts with the middle pane hidden), and `--no-tui`/non-TTY
-  input are rejected. `wbfp browse <pack>` remains the read-only single-pane browser; pack/unpack/verify keep their
-  existing single-pane layout.
-- **Layout**: Manager mode has three panes — local filesystem, pack, preview. At width >= 110 three panes are shown
-  (30/40/30); at >= 80 the preview folds and local/pack remain (35/65); below 80 the focused pane stays alone. With no
-  pack, the middle pane is omitted: local/preview at >= 80, local only below that. Preview folds before the local pane;
-  the pack pane is never folded while a pack is open. A copy/move picker places a same-kind target pane next to the
-  source (right of a local source, left of a pack source) and folds to the target pane below 80. While a transfer job
-  runs, the job card is pinned to the right: three panes at >= 110, active list + job card at >= 80, job card alone
-  below that. Subcommand modes keep the old single list + preview layout.
+  input are rejected. `wbfp browse <pack>` remains the read-only pack browser; pack/unpack use a read-only
+  filesystem + pack layout, and verify uses the pack list + properties.
+- **Layout**: Manager mode has three panes — local filesystem, pack, properties. At width >= 110 three panes are shown
+  (30/40/30); at >= 80 the properties fold and local/pack remain (35/65); below 80 the focused pane stays alone. With
+  no pack, the middle pane is omitted: local/properties at >= 80, local only below that. Properties fold before the
+  local pane; the pack pane is never folded while a pack is open. A copy/move picker places a same-kind target pane next
+  to the source (right of a local source, left of a pack source) and folds to the target pane below 80; the target pane
+  starts on the source list's viewport (selection and scroll offset). While a transfer
+  job runs, the job card is pinned to the right: three panes at >= 110, active list + job card at >= 80, job card alone
+  below that. Pack/unpack have a three-pane layout: filesystem left, properties/job card in the middle, pack right; both
+  lists are read-only. When width shrinks, the filesystem folds first, then the pack list; the properties/job card stays
+  and `Tab` switches the visible list. Verify and browse use the pack list + properties layout. The properties pane
+  shows metadata only; there is no content preview.
 - **State**: `App` groups `ui` (mode, title, pack info, logs, quit flags, error), `nav` (primary pane; pack in manager
-  mode and the only pane in subcommands), `local_nav` (manager's filesystem pane), `focus` (`Local`/`Pack`), `pending`
-  (narrow cross-namespace transfer awaiting `v`), `picker` (same-namespace destination pane), `rename` (inline editor),
-  `delete` (confirmation target), the job sender/handles, and `jobs`. Popups remain a `Window` enum with a `Confirm`
-  variant for deletion. Pack files on disk are probed by header, never by extension; a probe result is stored in
-  `Entry.pack_version` and rendered as a magenta `◆`.
+  mode, pack in pack/unpack, and the only pane in verify/browse), `local_nav` (manager's filesystem pane; also the
+  filesystem pane in pack/unpack), `focus` (`Local`/`Pack`), `pending` (narrow cross-namespace transfer awaiting `v`),
+  `picker` (same-namespace destination pane), `rename` (inline editor), `delete` (confirmation target), the job
+  sender/handles, and `jobs` (including `jobs.changed` for the `Δ` markers). Popups remain a `Window` enum with a
+  `Confirm` variant for deletion. Pack files on disk are probed by header, never by extension; a probe result is stored
+  in `Entry.pack_version` and rendered as a magenta `◆`.
 - **Navigation**: `ManagerSync` lazily loads one pack directory at a time; the local pane uses `std::fs`. `Tab` switches
-  focus, `Enter` enters a directory or opens a probed local pack, `Ctrl+W` closes the pack. Mouse hit-testing selects
-  the pane under the cursor; during a picker or pending transfer only the target pane is hit-testable. Select/
-  double-click/wheel is shared with `mp` through `command/tui_input.rs`. On Windows the TUI uses the same VT input path
-  as `mp`; if mouse capture cannot start it continues keyboard-only.
+  focus in the manager and in pack/unpack, `Enter` enters a directory or opens a probed local pack, `Ctrl+W` closes the
+  pack. Mouse hit-testing selects the pane under the cursor; during a picker or pending transfer only the target pane
+  is hit-testable. Select/double-click/wheel is shared with `mp` through `command/tui_input.rs`. On Windows the TUI uses
+  the same VT input path as `mp`; if mouse capture cannot start it continues keyboard-only.
 - **Copy/move**: `y`/`x` copy/move the focused entry to the other namespace. When both lists are visible they start the
   transfer immediately; otherwise the app switches focus to the other list, shows the operation and source path in the
   header, and waits for `v` (`Esc` cancels). `c`/`m` copy/move inside the same namespace: the source list becomes
   read-only, focus moves to a same-kind target pane, and `v` confirms. A directory cannot enter its own subtree; such
   rows are rejected while navigating and rendered red. The destination name must not exist; directory copies preserve
   empty directories; a move copies first and deletes the source only when every file succeeded. Same-volume local moves
-  and in-pack moves use `fs::rename`/`move_entry` (metadata only).
+  and in-pack moves use `fs::rename`/`move_entry` (metadata only). The open pack file, its `.lock`/`.wbm` sidecars, and
+  directories containing them cannot be copied or moved into the pack itself.
 - **Rename/delete**: `r` opens an inline editor prefilled with the current leaf name and fully selected; `Enter`
   commits, `Esc` cancels. Local renames use `fs::rename`, pack renames use `ManagerSync::rename` (same directory only).
-  `Del` requests a `y/n` confirmation before removing the entry.
+  `Del` requests a `y/n` confirmation before removing the entry. Deleting the open pack file, its `.lock`/`.wbm`
+  sidecars, or a directory containing them is rejected so the manager cannot delete its own backing files.
 - **Jobs**: `ops::spawn` runs pack/unpack/verify and copy/move transfers on background threads and sends
-  `JobEvent::{Dir, File, Start, Progress, Done, Total, Finished}` over a bounded mpsc channel.
-  `app::App::apply_event` updates row statuses and the task card. `JobSpec::Transfer` uses the recommended worker count
+  `JobEvent::{Dir, File, Start, Progress, Done, Changed, Total, Finished}` over a bounded mpsc channel.
+  `app::App::apply_event` updates row statuses and the task card. `Changed` carries a pack-relative path and drives the
+  `Δ` markers in both lists: pack mode marks written files (skipped/unchanged files stay unmarked), unpack mode compares
+  size+mtime before extraction and extracted files inherit the pack mtime. After a pack job the UI opens the result
+  read-only; after an unpack job it reloads the output directory. `JobSpec::Transfer` uses the recommended worker count
   (`common::get_thread_count(None)`), discovers the tree, copies files in parallel, and deletes the source after a
   successful move. Unpack/verify open one read-only `ManagerSync` and share a clone with the job: the pack's `.lock`
   rejects a second open in the same process, so the UI cannot keep a separate handle. Reads serialize on the manager
@@ -1138,13 +1159,14 @@ flowchart TD
   receive an explicit `Done` event; pack does not emit directory events because it never copies directories, so an empty
   source directory stays neutral instead of spinning. Hash verify writes nothing, so its task card has no output field.
 - **Task list**: `JobEvent::{Start, Progress, Done}` carries per-file `done/total`. `App` keeps two bounded queues:
-  `active_tasks` (current files, newest first) and `done_tasks` (finished, below active). The preview pane renders active
-  rows first. Workers only enqueue events on an unbounded channel (progress is rate-limited to 4–10 MiB); the UI never
-  stats or reads files for the task list, so it cannot slow the job.
+  `active_tasks` (current files, newest first) and `done_tasks` (finished, below active). The properties/task pane
+  renders active rows first. Workers only enqueue events on an unbounded channel (progress is rate-limited to 4–10 MiB);
+  the UI never stats or reads files for the task list, so it cannot slow the job.
 - **Column alignment**: file-list and task rows use fixed display-width columns (`unicode-width`), fixed progress-bar
   and percent widths, and a fixed-height job summary. Sizes split into a right-aligned numeric column and a fixed-width
-  unit column (`B`/`KiB`/...), so the one-cell `B` cannot shift the number. Small files completing quickly cannot make
-  columns or the task area jump.
+  unit column (`B`/`KiB`/...), so the one-cell `B` cannot shift the number. Every list has a fixed header row
+  (`名称 / Name`, `大小 / Size`) and its title shows the selected row and total (`1/10`) at the right. Small files
+  completing quickly cannot make columns or the task area jump.
 - **Progress**: the TUI never writes `indicatif` output while in the alternate screen. `common::copy_file_into_pack` and
   `common::extract_pack_file_to_disk` are shared with the classic path; TUI workers report per-file progress and a
   rate-limited global `Total` instead. The job card and task rows use the same `command::eighth_block_bar` as
@@ -1285,6 +1307,12 @@ retires the old A until no operation is in flight. Shrink or grow-within-allocat
 atomically; data already written past the new capacity is kept, so `len()` may temporarily exceed `capacity()` and
 writers stall until the reader drains.
 
+Wakeups never require the reader to take a lock: `notify_writer_after_read` issues a bare `Condvar::notify_one`
+(blocked writers wait with `WRITE_WAIT_TIMEOUT`, 10 ms, so a lost wakeup is bounded), and `wake_clear_waiter` returns
+immediately unless the `clear_waiting` counter is non-zero. The realtime read path therefore acquires no mutex in the
+steady state; readers waiting for data (`pop_wait` / `read_wait` / `read_exact`) keep the locked notify, which runs on
+the writer side.
+
 ---
 
 ## 13. Work-in-Progress Modules
@@ -1369,17 +1397,19 @@ writers stall until the reader drains.
 
 ### Music Player
 
-| Decision                                 | Rationale                                                                                            |
-|------------------------------------------|------------------------------------------------------------------------------------------------------|
-| Realtime callback posts, never emits     | No locking / sink calls / logging on the audio thread — avoids jitter, priority inversion, underruns |
-| Bounded dispatch channel (1024)          | `try_send` never blocks the realtime thread; overflow is counted and reported instead of stalling    |
-| Dedicated `player-event-dispatch` thread | All sink locking/emission and tracing output happen outside the audio callback                       |
-| Split ring buffer for audio data         | Lock-free read side for the callback; writer side stays locked for the producer                      |
-| Fixed stop order in `try_stop`           | Pausing the stream first, then pre-effect → decoder → dispatcher → `rx_cmd`, prevents join deadlocks |
-| Single `DecoderSession` lock             | Engine + metadata are swapped/taken as a pair; an unpaired state cannot occur                        |
-| `run()` returns spawn errors             | Player initialization aborts on thread-spawn failure instead of running without that thread          |
-| Logic errors use `unreachable!`          | Runtime failures are returned/reported; only broken invariants abort                                 |
-| `debug-no-audio` feature                 | Lets playback-control logic be debugged without audio hardware or real sample flow                   |
+| Decision                                 | Rationale                                                                                                                   |
+|------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Realtime callback posts, never emits     | No locking / sink calls / logging on the audio thread — avoids jitter, priority inversion, underruns                        |
+| Bounded dispatch channel (1024)          | `try_send` never blocks the realtime thread; overflow is counted and reported instead of stalling                           |
+| Dedicated `player-event-dispatch` thread | All sink locking/emission and tracing output happen outside the audio callback                                              |
+| Split ring buffer for audio data         | Lock-free read side for the callback; writer side stays locked for the producer                                             |
+| Fixed stop order in `try_stop`           | Pausing the stream first, then pre-effect → decoder → dispatcher → `rx_cmd`, prevents join deadlocks                        |
+| Single `DecoderSession` lock             | Engine + metadata are swapped/taken as a pair; an unpaired state cannot occur                                               |
+| `Player` owner vs `PlayerHandle`         | The owner's `Drop` always stops; handles are cloneable, can be held by event sinks, and never own shutdown                  |
+| Clear decoder sinks on stop              | A sink holding a `PlayerHandle` shares the `event_list` `Arc`; clearing breaks the cycle so the last `DecoderSession` drops |
+| `run()` returns spawn errors             | Player initialization aborts on thread-spawn failure instead of running without that thread                                 |
+| Logic errors use `unreachable!`          | Runtime failures are returned/reported; only broken invariants abort                                                        |
+| `debug-no-audio` feature                 | Lets playback-control logic be debugged without audio hardware or real sample flow                                          |
 
 ### Overall
 

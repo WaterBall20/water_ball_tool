@@ -184,7 +184,6 @@ impl PreEffect for ResamplerEffect {
 
         if self.info.output_format == self.info.input_format || self.resampler.is_none() {
             output.clear();
-            output.reserve_exact(input.len());
             output.extend_from_slice(input);
             return output.len();
         }
@@ -207,12 +206,10 @@ impl PreEffect for ResamplerEffect {
 
         let drain_len = (self.in_buf.len() / channels_chunk_len) * channels_chunk_len;
         output.clear();
-        output.reserve_exact((drain_len / channels_chunk_len) * max_out_frames * channels);
 
         let Some(resampler) = self.resampler.as_mut() else {
             // 防御：resampler 不可用时兜底透传，不 panic
             output.clear();
-            output.reserve_exact(input.len());
             output.extend_from_slice(input);
             return output.len();
         };
@@ -274,7 +271,6 @@ impl PreEffect for ResamplerEffect {
         }
         if self.is_passthrough() {
             output.clear();
-            output.reserve_exact(self.in_buf.len() + input.len());
             output.extend(self.in_buf.drain(..));
             output.extend_from_slice(input);
             return output.len();
@@ -296,12 +292,10 @@ impl PreEffect for ResamplerEffect {
         self.in_buf.resize(this_input_len, 0.0);
 
         output.clear();
-        output.reserve_exact((this_input_len / channels_chunk_len) * max_out_frames * channels);
 
         let Some(resampler) = self.resampler.as_mut() else {
             // 防御：不可达，但用透传兜底，绝不 panic、绝不吞数据
             output.clear();
-            output.reserve_exact(self.in_buf.len() + input.len());
             output.extend(self.in_buf.drain(..));
             output.extend_from_slice(input);
             return output.len();

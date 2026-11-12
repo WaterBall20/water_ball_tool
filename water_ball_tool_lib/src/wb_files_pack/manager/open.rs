@@ -154,7 +154,18 @@ impl WBFPManager {
     ) -> Result<WBFPManager> {
         let mut manifest_path = pack_path.clone();
         manifest_path.push_str(".wbm");
-        let manifest_file = File::options().read(true).write(true).open(manifest_path)?;
+        let manifest_file = File::options()
+            .read(true)
+            .write(true)
+            .open(&manifest_path)
+            .map_err(|e| {
+                PackFileError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "无法打开包清单文件 / failed to open pack manifest file {manifest_path}: {e}"
+                    ),
+                ))
+            })?;
         let mut manifest_file =
             PackIO::new2(Box::new(manifest_file), attribute.manifest_file_len());
         let empty_pos_data_block =
@@ -214,7 +225,15 @@ impl WBFPManager {
                 .create(true)
                 .truncate(true)
                 .create_new(create_new)
-                .open(manifest_path)?;
+                .open(&manifest_path)
+                .map_err(|e| {
+                    PackFileError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "无法创建包清单文件 / failed to create pack manifest file {manifest_path}: {e}"
+                        ),
+                    ))
+                })?;
             Some(PackIO::new(Box::new(manifest_pack_file)))
         } else {
             None

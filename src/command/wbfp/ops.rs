@@ -190,7 +190,7 @@ pub(super) fn run_pack(
             .read(true)
             .write(true)
             .open(&pack_path)
-            .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?
+            .map_err(|e| format!("打开包失败 / failed to open pack: {e}"))?
     } else {
         info!("创建新包文件并初始化 / creating a new pack");
         ManagerSync::options()
@@ -260,6 +260,17 @@ pub(super) fn run_pack(
             CopyOutcome::Unchanged => RowStatus::Done,
             CopyOutcome::Failed => RowStatus::Failed,
         };
+        if outcome == CopyOutcome::Written {
+            // 右侧包内路径与左侧源文件各记一个键 / one key for the pack pane and one for the source pane
+            let _ = tx.send(JobEvent::Changed {
+                path: PathBuf::from(&file_name),
+            });
+            if let Some(name) = in_path.file_name() {
+                let _ = tx.send(JobEvent::Changed {
+                    path: PathBuf::from(name),
+                });
+            }
+        }
         let _ = tx.send(JobEvent::Done {
             path: in_path.to_path_buf(),
             status,
@@ -597,6 +608,11 @@ fn run_copy_worker(
             CopyOutcome::Unchanged => RowStatus::Done,
             CopyOutcome::Failed => RowStatus::Failed,
         };
+        if outcome == CopyOutcome::Written {
+            let _ = tx.send(JobEvent::Changed {
+                path: pack_path.clone(),
+            });
+        }
         let bytes = if outcome.is_success() {
             file_info.length()
         } else {
@@ -889,6 +905,7 @@ fn run_unpack_worker(
                         total,
                     });
                 };
+                let changed = !destination_matches(&out_path, &item);
                 let result = common::extract_pack_file_to_disk(
                     &mut pack,
                     &path,
@@ -898,6 +915,9 @@ fn run_unpack_worker(
                 );
                 match result {
                     Ok(bytes) => {
+                        if changed {
+                            let _ = tx.send(JobEvent::Changed { path: path.clone() });
+                        }
                         let _ = tx.send(JobEvent::Done {
                             path,
                             status: RowStatus::Done,
@@ -1854,6 +1874,25 @@ fn delete_source(endpoint: &TransferEndpoint) -> Result<(), String> {
     }
 }
 //AI_END===
+
+fn destination_matches(out_path: &Path, item: &PackStructItem) -> bool {
+    let PackFileMetadataRun::Loaded(metadata) = item.metadata() else {
+        return false;
+    };
+    let Ok(existing) = fs::metadata(out_path) else {
+        return false;
+    };
+    if existing.len() != metadata.len() {
+        return false;
+    }
+    let modified = existing
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    modified == metadata.modified()
+}
 
 fn metadata_len(item: &PackStructItem) -> u64 {
     match item.metadata() {

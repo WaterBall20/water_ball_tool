@@ -1,5 +1,6 @@
 use super::*;
 use crate::concurrent_ring::ConcurrentRing;
+use pretty_assertions::assert_eq;
 use std::hint::spin_loop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -14,7 +14,7 @@ use water_ball_tool_lib::music_play::effect::EffectSummary;
 use water_ball_tool_lib::music_play::effect::fade::FadeEffect;
 use water_ball_tool_lib::music_play::effect::runtime::PreEffectRuntimeEventChannelSink;
 use water_ball_tool_lib::music_play::play_list::{PlayList, Track};
-use water_ball_tool_lib::music_play::player::Player;
+use water_ball_tool_lib::music_play::player::{Player, PlayerHandle};
 use water_ball_tool_lib::music_play::tools::DurationStatsWindow;
 
 // 打开曲目失败的重试退避与连续失败上限 / retry backoff and consecutive failure limit for opening a track
@@ -480,7 +480,7 @@ impl Drop for Runtime {
 /// Change track: pick → open the decoder → update the id. Shared by manual next and auto Eof.
 //AI=== target 为点击跳转的 0-based 索引，只在本轮第一次选曲时使用 / target is the clicked 0-based index, used only for the first pick
 fn advance_inner(
-    player: &Player,
+    player: &PlayerHandle,
     shared: &Shared,
     auto: bool,
     select: Advance,

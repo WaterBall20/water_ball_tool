@@ -1,5 +1,10 @@
 //AI=== wbfp TUI 状态与事件测试 / wbfp TUI state and event tests
 use super::*;
+use crate::command::wbfp::{
+    WaterBallFilePackCommand, WaterBallFilePackCommands, WaterBallFilePackCommandsPack,
+    WaterBallFilePackCommandsUnpack,
+};
+use pretty_assertions::assert_eq;
 use std::fs;
 use water_ball_tool_lib::wb_files_pack::manager_sync::ManagerSync;
 
@@ -253,14 +258,20 @@ fn task_list_skips_directories_and_finishes_active_on_job_end() {
 }
 
 #[test]
-fn display_cwd_is_relative_to_local_root() {
+fn display_cwd_follows_the_active_pane() {
     let mut app = App::new(Mode::Pack);
-    app.nav.local_root = Some(PathBuf::from("src"));
-    app.nav.cwd = PathBuf::from("src/sub");
-    assert_eq!(app.display_cwd(), "/sub");
+    app.local_nav.local_root = Some(PathBuf::from("src"));
+    app.local_nav.cwd = PathBuf::from("src/sub");
+    app.focus = Focus::Local;
+    assert_eq!(app.display_cwd(), "src/sub");
     assert!(!app.is_at_root());
-    app.nav.cwd = PathBuf::from("src");
+    app.local_nav.cwd = PathBuf::from("src");
     assert!(app.is_at_root());
+
+    app.focus = Focus::Pack;
+    app.nav.cwd = PathBuf::from("assets/sub");
+    assert_eq!(app.display_cwd(), "/assets/sub");
+    assert!(!app.is_at_root());
 }
 //AI_END===
 
@@ -443,6 +454,36 @@ fn picker_copies_local_file_to_another_local_dir() -> Result<(), Box<dyn std::er
     fs::remove_dir_all(&dir)?;
     Ok(())
 }
+
+//AI=== 目标面板沿用源列表视口 / target pane keeps the source viewport
+#[test]
+fn picker_keeps_source_list_viewport() -> Result<(), Box<dyn std::error::Error>> {
+    let dir =
+        PathBuf::from("./temp/test/command/wbfp/tui/app/ok/picker_keeps_source_list_viewport");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    for index in 0..20 {
+        fs::write(dir.join(format!("f{index:02}.txt")), b"x")?;
+    }
+
+    let mut app = App::manager_no_pack();
+    app.local_nav.cwd = dir.clone();
+    app.load_local_dir().map_err(io::Error::other)?;
+    app.local_nav.height = 8;
+    app.local_nav.selected = 15;
+    app.local_nav.offset = 10;
+    app.focus = Focus::Local;
+    app.start_picker(false);
+
+    let picker = app.picker.as_ref().ok_or("picker should open")?;
+    assert_eq!(picker.nav.selected, 15);
+    assert_eq!(picker.nav.offset, 10);
+    assert_eq!(picker.nav.height, 8);
+
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+//AI_END===
 
 #[test]
 fn picker_blocks_directory_into_own_subtree() -> Result<(), Box<dyn std::error::Error>> {
@@ -667,6 +708,255 @@ fn background_move_pack_entry_into_directory() -> Result<(), Box<dyn std::error:
     let pack = app.pack.as_mut().ok_or("pack should stay open")?;
     assert!(!pack.path_exists(&"move.bin")?);
     assert!(pack.path_exists(&"dst/move.bin")?);
+
+    drop(app);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
+fn delete_blocks_the_open_pack_file() -> Result<(), Box<dyn std::error::Error>> {
+    let dir =
+        PathBuf::from("./temp/test/command/wbfp/tui/app/err/delete_blocks_the_open_pack_file");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("game.wbfp");
+    let pack = ManagerSync::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)?;
+    let canonical = fs::canonicalize(&pack_path)?;
+
+    let mut app = App::manager_no_pack();
+    app.pack = Some(pack);
+    app.pack_path = Some(canonical.clone());
+    app.focus = Focus::Local;
+    app.local_nav.cwd = dir.clone();
+    app.local_nav.entries = vec![Entry {
+        name: "game.wbfp".to_string(),
+        path: canonical.clone(),
+        is_dir: false,
+        size: 0,
+        modified: 0,
+        hash: None,
+        pack_version: Some(2),
+        synthetic: false,
+    }];
+    app.local_nav.selected = 0;
+
+    app.request_delete();
+    assert_eq!(app.ui.window, Window::None);
+    assert!(app.delete.is_none());
+    assert!(app.ui.error.is_some());
+    assert!(canonical.exists());
+
+    drop(app);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
+fn open_pack_path_blocks_sidecars_and_ancestor_dirs() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = PathBuf::from(
+        "./temp/test/command/wbfp/tui/app/ok/open_pack_path_blocks_sidecars_and_ancestor_dirs",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("game.wbfp");
+    let pack = ManagerSync::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)?;
+    let canonical = fs::canonicalize(&pack_path)?;
+    let canonical_dir = fs::canonicalize(&dir)?;
+
+    let mut app = App::manager_no_pack();
+    app.pack = Some(pack);
+    app.pack_path = Some(canonical.clone());
+    assert!(app.is_open_pack_path(&canonical));
+    assert!(app.is_open_pack_path(&canonical_dir));
+
+    let mut lock_name = canonical.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    assert!(app.is_open_pack_path(&PathBuf::from(lock_name)));
+
+    let other = dir.join("other.txt");
+    fs::write(&other, b"x")?;
+    assert!(!app.is_open_pack_path(&fs::canonicalize(&other)?));
+
+    drop(app);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
+fn cross_transfer_blocks_open_pack_into_itself() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = PathBuf::from(
+        "./temp/test/command/wbfp/tui/app/err/cross_transfer_blocks_open_pack_into_itself",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("game.wbfp");
+    let pack = ManagerSync::options()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&pack_path)?;
+    let canonical = fs::canonicalize(&pack_path)?;
+
+    let mut app = App::manager_no_pack();
+    app.pack = Some(pack);
+    app.pack_path = Some(canonical.clone());
+    app.ui.title = pack_path.display().to_string();
+    app.focus = Focus::Local;
+    app.frame_width = 120;
+    app.local_nav.cwd = dir.clone();
+    app.local_nav.entries = vec![Entry {
+        name: "game.wbfp".to_string(),
+        path: canonical.clone(),
+        is_dir: false,
+        size: 0,
+        modified: 0,
+        hash: None,
+        pack_version: Some(2),
+        synthetic: false,
+    }];
+    app.local_nav.selected = 0;
+
+    app.move_cross_namespace();
+    assert!(!app.jobs.running);
+    assert!(app.pending.is_none());
+    assert!(app.ui.error.is_some());
+
+    let pack = app.pack.as_mut().ok_or("pack should stay open")?;
+    assert!(!pack.path_exists(&"game.wbfp")?);
+
+    drop(app);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
+fn pack_mode_opens_result_and_marks_changed_files() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = PathBuf::from(
+        "./temp/test/command/wbfp/tui/app/ok/pack_mode_opens_result_and_marks_changed_files",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    fs::create_dir_all(src.join("sub"))?;
+    fs::write(src.join("a.txt"), b"a")?;
+    fs::write(src.join("sub/b.txt"), b"b")?;
+    let pack_path = dir.join("out.wbfp");
+
+    let args = WaterBallFilePackCommand {
+        commands: Some(WaterBallFilePackCommands::Pack(
+            WaterBallFilePackCommandsPack::new(
+                src.display().to_string(),
+                Some(pack_path.display().to_string()),
+                false,
+                Some(1),
+                false,
+            ),
+        )),
+        pack_path: None,
+        no_tui: false,
+    };
+    let mut app = App::from_args(args)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_job_sender(tx);
+    app.start_pending_job()?;
+    drain_job(&mut app, &rx)?;
+
+    let pack = app.pack.as_mut().ok_or("packed result should be open")?;
+    assert!(pack.path_exists(&"a.txt")?);
+    assert!(pack.path_exists(&"sub/b.txt")?);
+    assert!(app.jobs.changed.contains(std::path::Path::new("a.txt")));
+    assert!(app.jobs.changed.contains(std::path::Path::new("sub/b.txt")));
+
+    let local = app
+        .local_nav
+        .entries
+        .iter()
+        .find(|entry| entry.name == "a.txt")
+        .cloned()
+        .ok_or("local pane should list a.txt")?;
+    assert!(app.is_changed(true, &local));
+    let pack_entry = app
+        .nav
+        .entries
+        .iter()
+        .find(|entry| entry.name == "a.txt")
+        .cloned()
+        .ok_or("pack pane should list a.txt")?;
+    assert!(app.is_changed(false, &pack_entry));
+
+    drop(app);
+    fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
+fn unpack_mode_shows_output_and_marks_changed_files() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = PathBuf::from(
+        "./temp/test/command/wbfp/tui/app/ok/unpack_mode_shows_output_and_marks_changed_files",
+    );
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir)?;
+    let pack_path = dir.join("src.wbfp");
+    {
+        use std::io::Write as _;
+        let mut pack = ManagerSync::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .cow(false)
+            .separate_manifest(false)
+            .open(&pack_path)?;
+        pack.create_dir_all(&"sub")?;
+        let mut file = pack
+            .virtual_file_options()
+            .write(true)
+            .create_new(true)
+            .alloc_size(Some(1))
+            .open(&"sub/a.txt")?;
+        file.set_len(1)?;
+        file.write_all(b"a")?;
+    }
+    let out_dir = dir.join("out");
+
+    let args = WaterBallFilePackCommand {
+        commands: Some(WaterBallFilePackCommands::Unpack(
+            WaterBallFilePackCommandsUnpack::new(
+                pack_path.display().to_string(),
+                Some(out_dir.display().to_string()),
+                false,
+                Some(1),
+            ),
+        )),
+        pack_path: None,
+        no_tui: false,
+    };
+    let mut app = App::from_args(args)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.set_job_sender(tx);
+    app.start_pending_job()?;
+    drain_job(&mut app, &rx)?;
+
+    assert_eq!(fs::read(out_dir.join("sub").join("a.txt"))?, b"a");
+    assert!(app.jobs.changed.contains(std::path::Path::new("sub/a.txt")));
+
+    app.local_nav.cwd = out_dir.join("sub");
+    app.load_local_dir().map_err(std::io::Error::other)?;
+    let local = app
+        .local_nav
+        .entries
+        .iter()
+        .find(|entry| entry.name == "a.txt")
+        .cloned()
+        .ok_or("unpacked pane should list a.txt")?;
+    assert!(app.is_changed(true, &local));
 
     drop(app);
     fs::remove_dir_all(&dir)?;

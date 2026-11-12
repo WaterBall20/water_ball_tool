@@ -121,23 +121,26 @@ WBFilesPack header (not by extension) and valid packs are marked with `◆`; pre
 directly; on a narrow terminal the app switches to the other list, shows the operation and source path in the header,
 and waits for `v`. `c`/`m` copy/move inside the same namespace and open a same-kind destination pane (the source list
 becomes read-only); `v` confirms and `Esc` cancels. `r` renames in place with a prefilled, fully selected input; `Del`
-deletes after a `y/n` confirmation. Every copy/move runs as a background job with the recommended worker count, and the
-right pane shows the same task card and per-file progress as the subcommand modes. `--no-tui` and non-TTY stdout/stdin
-are rejected for this form.
+deletes after a `y/n` confirmation (the open pack, its `.lock`/`.wbm` sidecars and their parent directories cannot be
+deleted or transferred into the pack). Every copy/move runs as a background job with the recommended worker count, and
+the right pane shows the same task card and per-file progress as the subcommand modes. `--no-tui` and non-TTY
+stdout/stdin are rejected for this form.
 
-`p`, `u` and `h` keep their existing single-pane layout: the file list is read-only, per-file status is shown beside
-each
-row, and the right pane is reserved for a future content preview. While a job runs, the same pane shows a task list —
-active files first with their own progress, completed files below. Worker threads enqueue progress events (rate-limited)
-so the task list never blocks file I/O. `--no-tui` keeps the classic progress-bar output; a non-TTY stdout/stdin falls
-back
-to it automatically.
+`p` and `u` use a three-pane layout: filesystem on the left, properties (or the job card while running) in the middle,
+and the pack on the right; both lists are read-only. The filesystem folds first when space is tight, then the pack list;
+the properties/task pane stays and `Tab` switches the visible list. `h` and `browse` use the pack list + properties
+layout. Files whose content changed are marked `Δ`: pack mode marks files actually written (skipped/unchanged files stay
+unmarked), and unpack mode marks files created or overwritten (size+mtime comparison). While a job runs, the middle pane
+shows a task list — active files first with their own progress, completed files below. Worker threads enqueue progress
+events (rate-limited) so the task list never blocks file I/O. `--no-tui` keeps the classic progress-bar output; a
+non-TTY stdout/stdin falls back to it automatically.
 
 TUI keys: `q`/`Ctrl+C` quit, `↑`/`↓` move, `⏎` enter a directory or open a probed pack, `←` go to the parent,
-`PageUp`/`PageDown` page, `Home`/`End` jump, `Tab` switch panes in the manager, `y`/`x` cross-namespace copy/move,
-`v` paste or confirm, `c`/`m` same-namespace copy/move, `r` rename, `Del` delete, `Ctrl+W` close the pack, `p` toggle
-the preview, `F12` opens the debug popup, `?` help. `Esc` cancels the current operation (picker, pending transfer,
-rename, or delete confirmation) before going to the parent. While a job runs, `q` quits after it finishes.
+`PageUp`/`PageDown` page, `Home`/`End` jump, `Tab` switch panes in the manager and in pack/unpack, `y`/`x`
+cross-namespace copy/move, `v` paste or confirm, `c`/`m` same-namespace copy/move, `r` rename, `Del` delete, `Ctrl+W`
+close the pack, `p` toggle the properties pane, `F12` opens the debug popup, `?` help. `Esc` cancels the current
+operation (picker, pending transfer, rename, or delete confirmation) before going to the parent. While a job runs, `q`
+quits after it finishes.
 Windows uses the same VT mouse input as `mp`; all platforms support left-click select, double-click open and wheel
 scroll. If mouse capture cannot start, the TUI stays keyboard-only.
 
@@ -235,7 +238,7 @@ water_ball_tool_lib/src/          # library crate
 ├── split_ring_buffer.rs          # Split lock/lock-free read-write ring buffer (+ reader/writer/error/mode submodules)
 ├── music_play.rs                 # Music player engine root (LoopMode + module tree)
 ├── music_play/
-    ├── player.rs                 # cpal stream + PlayCmd transport + Player::try_stop
+    ├── player.rs                 # cpal stream + PlayCmd transport + Player (owner) / PlayerHandle (shared, cloneable)
     ├── decoder_runtime.rs        # symphonia decoder thread
     ├── effect.rs                 # Effect traits / audio format types
     ├── effect/                   # resampler.rs, cross_bridge.rs, fade.rs, runtime.rs (pre-effect thread)

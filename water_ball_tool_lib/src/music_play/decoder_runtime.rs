@@ -105,6 +105,15 @@ struct DecoderSession {
     engine: DecoderEngine,
     data: DecoderData,
 }
+impl Drop for DecoderSession {
+    fn drop(&mut self) {
+        //断点用
+        #[cfg(debug_assertions)]
+        for _ in 0..10 {
+            std::hint::spin_loop();
+        }
+    }
+}
 //AI_END===
 
 //AI=== 环形缓冲区写入结果：主动拒绝（停止/切曲/寻道）属于正常控制流，必须与真实错误区分 / ring-write outcome: an intentional rejection (stop/track change/seek) is normal control flow and must be distinguished from a real error
@@ -294,9 +303,10 @@ impl DecoderRuntime {
                     .decoder_buffered_samples
                     .store(out_buf.len() as u64, Ordering::Relaxed);
                 //AI_END===
-                if out_buf.len() < session_ref.data.ring_buf_write_len {
+                /*let ring_buf_write_len = session_ref.data.ring_buf_write_len;
+                if out_buf.len() < ring_buf_write_len {
                     return false;
-                }
+                }*/
                 // 阻塞写入前释放会话锁（保持原先写入前释放 engine/data 锁的行为）/ release the session lock before the blocking write (same as releasing the engine/data locks before)
                 drop(session_lock);
                 //AI=== 写入结果需区分成功/主动拒绝/停止/真实错误；失败时清空 out_buf，不带着旧数据继续 / distinguish written/rejected/stopped/failed; clear out_buf on failure so stale data is not reused
@@ -563,11 +573,6 @@ impl DecoderRuntime {
                                 continue;
                             };
                             //AI_END===
-                            //提前重分配 / pre-reserve
-                            if buf.capacity() < session_ref.data.ring_buf_write_len {
-                                buf.reserve_exact(session_ref.data.ring_buf_write_len);
-                                out_buf.reserve_exact(session_ref.data.ring_buf_write_len);
-                            }
                             //解码 / decode one packet
                             let t0 = Instant::now();
                             let packet = match session_ref.engine.format.next_packet() {
@@ -817,12 +822,32 @@ impl DecoderRuntime {
             .insert(index, event);
     }
 
-    pub fn stop(&mut self) -> DecoderResult<()> {
+    /// 停止解码线程并清空解码事件表；`send_skip` 失败也会 join，最后返回第一个错误。
+    ///
+    /// 清空事件表是关停的一部分：事件 sink 由前端注册，可能持有 `PlayerHandle`，而该句柄共享
+    /// 同一个 `event_list` `Arc`。不清空就会形成 `Arc` 环，最后一个 `DecoderSession`
+    /// 永远不会析构，其文件与格式资源也不会释放。
+    ///
+    /// Stop the decode thread and clear the decoder event list; a failed `send_skip` still joins,
+    /// and the first error is returned.
+    ///
+    /// Clearing the sinks is part of shutdown: they are registered by the front-end and may own a
+    /// `PlayerHandle`, which shares this very `event_list` `Arc`. Leaving them in place forms an
+    /// `Arc` cycle, so the last `DecoderSession` never drops and keeps its file and format
+    /// resources alive.
+    pub fn try_stop(&mut self) -> DecoderResult<()> {
         self.stop.store(true, Ordering::Release);
         self.condvar.notify_one();
         //AI=== send_skip 失败也必须返回错误：先尝试发送 skip，始终执行 join，最后返回第一个错误 / a send_skip failure must be returned too: try skipping first, always join, then return the first error
         let skip_result = self.effect_runtime.send_skip().map_err(DecoderError::from);
         let join_result = self.join();
+        // 必须在 join 之后清空：drop sink 可能 join 其转发线程，解码线程此时不得再 emit。
+        // Must run after the join: dropping a sink may join its forwarding thread, so the decode
+        // thread must no longer emit.
+        self.event_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         skip_result?;
         join_result
         //AI_END===

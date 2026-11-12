@@ -24,6 +24,7 @@ use cpal::{Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +33,57 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error};
 
+/// 播放器生命周期所有者：`Drop` 必定执行完整关停（解码线程、前效果器、事件线程、看门狗），
+/// 因此关停不依赖引用计数归零，也不会因为前端忘记调用 `try_stop` 而泄漏。
+///
+/// Owner of the player lifetime: dropping it always performs the full shutdown (decode thread,
+/// pre-effect runtime, event threads, watchdog). Shutdown therefore does not depend on a refcount
+/// reaching zero, and forgetting an explicit `try_stop` cannot leak it.
+///
+/// 通过 `Deref` 可以使用 `PlayerHandle` 的全部方法；`clone` 解析到 `PlayerHandle`，得到的是
+/// 共享句柄而不是第二个 owner。
+///
+/// All `PlayerHandle` methods are reachable through `Deref`; `clone` resolves to
+/// `PlayerHandle::clone` and yields a shared handle, never a second owner.
 pub struct Player {
+    player: PlayerHandle,
+}
+impl Deref for Player {
+    type Target = PlayerHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.player
+    }
+}
+impl DerefMut for Player {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.player
+    }
+}
+impl Drop for Player {
+    fn drop(&mut self) {
+        _ = self.player.try_stop();
+    }
+}
+impl Player {
+    /// 创建播放器并返回生命周期所有者；音频设备或内部线程创建失败时返回错误。
+    ///
+    /// Create the player and return its lifetime owner; audio-device or thread-spawn failures are
+    /// returned as errors.
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(Self {
+            player: PlayerHandle::new()?,
+        })
+    }
+}
+
+/// 可克隆的共享操作句柄：克隆只递增引用计数并共享线程、流与缓冲区，不负责关停，
+/// 析构也不会停止播放。生命周期由持有它的 [`Player`] 决定。
+///
+/// Cloneable shared operation handle: cloning only bumps the reference count and shares the
+/// threads, stream and buffers. A handle neither owns nor triggers shutdown, so dropping one does
+/// not stop playback; the [`Player`] owner decides the lifetime.
+pub struct PlayerHandle {
     pos: Arc<AtomicU64>,
     sound_engine: SoundEngine,
     control: Control,
@@ -58,7 +109,18 @@ pub struct Player {
     //AI_END===
     strong: Arc<AtomicUsize>,
 }
-impl Clone for Player {
+impl Clone for PlayerHandle {
+    /// 复制共享句柄：引用计数 +1，不复制线程/流，也不触发关停。
+    ///
+    /// 该实现是强共享而非弱引用：句柄像 `Arc` 一样共享底层状态，最后一个句柄析构时才会
+    /// 尝试关停；但正常退出由 `Player` owner 的 `Drop` 保证，不依赖这次尝试。
+    ///
+    /// Copy the shared handle: the refcount is bumped; threads and the stream are shared and no
+    /// shutdown is triggered.
+    ///
+    /// This is strong sharing, not a weak reference: the handle shares the underlying state like
+    /// an `Arc`, and only the last handle attempts a shutdown when it is dropped. Normal exit is
+    /// guaranteed by the `Player` owner's `Drop` and does not rely on that attempt.
     fn clone(&self) -> Self {
         self.strong.fetch_add(1, Ordering::Release);
         Self {
@@ -76,7 +138,7 @@ impl Clone for Player {
         }
     }
 }
-impl Drop for Player {
+impl Drop for PlayerHandle {
     fn drop(&mut self) {
         if self.strong.fetch_sub(1, Ordering::Release) == 1 {
             _ = self.try_stop();
@@ -116,7 +178,7 @@ struct EventContent {
     //AI_END===
 }
 
-impl Player {
+impl PlayerHandle {
     fn create_stream(
         device: &Device,
         config: StreamConfig,
@@ -346,8 +408,8 @@ impl Player {
         ))
     }
 }
-impl Player {
-    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+impl PlayerHandle {
+    fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let (device, audio_format, stream_config) = Self::get_audio_config()?;
         // 在你的播放器初始化阶段
         //创建缓冲区
@@ -647,7 +709,7 @@ impl Player {
         }
         // 3. 停解码线程 / stop the decoder thread
         let decoder_runtime = &mut self.sound_engine.decoder_runtime;
-        if let Err(e) = decoder_runtime.stop() {
+        if let Err(e) = decoder_runtime.try_stop() {
             error!("停止解码器运行时失败 / failed to stop the decoder runtime: {e:?}");
         }
         // 4. 停事件分发线程（回调已暂停，不会再有新事件）/ stop the dispatch thread

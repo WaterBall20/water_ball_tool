@@ -3128,6 +3128,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.11.1",
+ "sysinfo",
  "thread-priority",
  "tracing",
  "tracing-subscriber",
@@ -3146,6 +3147,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "crossbeam-utils",
+ "libc",
  "lofty",
  "pretty_assertions",
  "rand 0.10.3",
@@ -3155,6 +3157,7 @@ dependencies = [
  "symphonia",
  "sysinfo",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]

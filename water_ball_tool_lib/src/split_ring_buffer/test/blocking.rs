@@ -1,5 +1,6 @@
 //! 阻塞等待、对端关闭、CannotWait、read_exact / write_all。
 
+use pretty_assertions::assert_eq;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};

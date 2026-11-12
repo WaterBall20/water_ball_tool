@@ -1,6 +1,7 @@
 //! 基础功能、模式组合、len/empty/full、回绕、零长度。
 
 use crate::split_ring_buffer::*;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn basic_pop_push() {

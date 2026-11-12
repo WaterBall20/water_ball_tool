@@ -242,6 +242,8 @@ pub(crate) struct Jobs {
     pub running: bool,
     pub spec: Option<JobSpec>,
     pub statuses: HashMap<PathBuf, RowStatus>,
+    /// 内容已变更的文件（包内相对路径）/ files whose content changed (pack-relative paths)
+    pub changed: HashSet<PathBuf>,
     /// 目录祖先的状态计数；只在事件到达时增量更新 / incremental descendant counts for ancestor directories
     dir_agg: HashMap<PathBuf, DirAgg>,
     /// 已发现的目录路径 / discovered directory paths
@@ -257,6 +259,7 @@ impl Jobs {
         self.running = false;
         self.spec = None;
         self.statuses.clear();
+        self.changed.clear();
         self.dir_agg.clear();
         self.dir_paths.clear();
     }
@@ -360,7 +363,7 @@ impl App {
         match commands {
             WaterBallFilePackCommands::Browse(WaterBallFilePackCommandsBrowse { pack_path }) => {
                 let pack = ManagerSync::open(&pack_path)
-                    .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
+                    .map_err(|e| format!("打开包失败 / failed to open pack: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Browse);
                 app.ui.title = pack_path;
@@ -379,10 +382,19 @@ impl App {
                     .into());
                 }
                 let pack_path = common::pack_output_path(&in_path, p.out_pack_path.as_deref())?;
+                let input_root = if in_path.is_dir() {
+                    in_path.clone()
+                } else {
+                    in_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| in_path.clone())
+                };
                 let mut app = Self::new(Mode::Pack);
                 app.ui.title = pack_path.display().to_string();
-                app.nav.local_root = Some(in_path.clone());
-                app.nav.cwd.clone_from(&in_path);
+                app.focus = Focus::Pack;
+                app.local_nav.local_root = Some(input_root.clone());
+                app.local_nav.cwd = input_root;
                 app.jobs.state = Some(JobState::new(
                     Mode::Pack.label(),
                     pack_path.display().to_string(),
@@ -395,35 +407,51 @@ impl App {
                     write_optimization: !p.no_write_optimization,
                     thread_count: common::get_thread_count(p.thread_count),
                 });
-                app.load_current_dir().map_err(io::Error::other)?;
+                app.load_local_dir().map_err(io::Error::other)?;
+                if in_path.is_file()
+                    && let Some(index) = app
+                        .local_nav
+                        .entries
+                        .iter()
+                        .position(|entry| entry.path == in_path)
+                {
+                    app.local_nav.selected = index;
+                    Self::reveal_nav_selected(&mut app.local_nav);
+                }
                 Ok(app)
             }
             WaterBallFilePackCommands::Unpack(u) => {
                 let out_dir = common::unpack_out_dir(&u.pack_path, u.out_dir.as_deref())?;
+                fs::create_dir_all(&out_dir)
+                    .map_err(|e| format!("创建输出目录失败 / failed to create output dir: {e}"))?;
                 let pack = ManagerSync::open(&u.pack_path)
-                    .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
+                    .map_err(|e| format!("打开包失败 / failed to open pack: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Unpack);
                 app.ui.title.clone_from(&u.pack_path);
                 app.ui.pack_info = Some(info);
                 app.pack = Some(pack.clone());
+                app.focus = Focus::Pack;
+                app.local_nav.local_root = Some(out_dir.clone());
+                app.local_nav.cwd = out_dir;
                 app.jobs.state = Some(JobState::new(
                     Mode::Unpack.label(),
-                    out_dir.display().to_string(),
+                    app.local_nav.cwd.display().to_string(),
                 ));
                 app.jobs.running = true;
                 app.jobs.spec = Some(JobSpec::Unpack {
                     pack,
-                    out_dir,
+                    out_dir: app.local_nav.cwd.clone(),
                     hash_verify: u.hash_verify,
                     thread_count: common::get_thread_count(u.thread_count),
                 });
-                app.load_current_dir().map_err(io::Error::other)?;
+                app.load_local_dir().map_err(io::Error::other)?;
+                app.load_pack_dir().map_err(io::Error::other)?;
                 Ok(app)
             }
             WaterBallFilePackCommands::HashVerify(h) => {
                 let pack = ManagerSync::open(&h.pack_path)
-                    .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
+                    .map_err(|e| format!("打开包失败 / failed to open pack: {e}"))?;
                 let info = browse::pack_info(&pack).map_err(io::Error::other)?;
                 let mut app = Self::new(Mode::Verify);
                 app.ui.title.clone_from(&h.pack_path);
@@ -542,6 +570,15 @@ impl App {
             self.ui.error = Some("目标与源相同 / target is the same as the source".to_string());
             return false;
         }
+        // 本地面板里的当前包（或其附属文件）不能被复制/移动到包自身内。
+        // The open pack (or its sidecars) on the local pane must not be copied/moved into the pack itself.
+        if source_local && !dest_local && self.is_open_pack_path(&source.path) {
+            self.ui.error = Some(format!(
+                "不能把当前打开的包或其附属文件复制/移动到包内 / cannot copy/move the open pack or its sidecars into the pack: {}",
+                source.path.display()
+            ));
+            return false;
+        }
         let exists = if dest_local {
             fs::symlink_metadata(&dest).is_ok()
         } else {
@@ -577,12 +614,17 @@ impl App {
         true
     }
 
+    fn local_pane_active(&self) -> bool {
+        matches!(self.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack)
+            && self.focus == Focus::Local
+    }
+
     /// Manager 模式下的活动面板 / active pane in manager mode.
     pub(crate) fn active_nav(&self) -> &Nav {
         if let Some(picker) = &self.picker {
             return &picker.nav;
         }
-        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+        if self.local_pane_active() {
             &self.local_nav
         } else {
             &self.nav
@@ -593,7 +635,9 @@ impl App {
         if let Some(picker) = self.picker.as_mut() {
             return &mut picker.nav;
         }
-        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+        if matches!(self.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack)
+            && self.focus == Focus::Local
+        {
             &mut self.local_nav
         } else {
             &mut self.nav
@@ -611,8 +655,12 @@ impl App {
                 "任务运行中，不能切换包 / a job is running; cannot switch packs".to_string(),
             );
         }
-        let probe = water_ball_tool_lib::wb_files_pack::probe_pack(path)
-            .map_err(|e| format!("探测包失败 / failed to probe pack: {e}"))?;
+        let probe = water_ball_tool_lib::wb_files_pack::probe_pack(path).map_err(|e| {
+            format!(
+                "无法读取包文件 / failed to read pack file {}: {e}",
+                path.display()
+            )
+        })?;
         let Some(probe) = probe else {
             return Err(format!(
                 "不是有效的 WBFilesPack 文件 / not a WBFilesPack file: {}",
@@ -625,7 +673,7 @@ impl App {
             .read(true)
             .write(true)
             .open(&path)
-            .map_err(|e| format!("打开包文件错误 / failed to open pack file: {e}"))?;
+            .map_err(|e| format!("打开包失败 / failed to open pack: {e}"))?;
         let info = browse::pack_info(&pack)?;
         self.pack = Some(pack);
         self.ui.pack_info = Some(info);
@@ -649,6 +697,28 @@ impl App {
             warn!("reload local pane after opening pack failed: {err}");
             self.ui.error = Some(err);
         }
+        Ok(())
+    }
+
+    /// 打包任务完成后以只读方式打开结果包 / open the packed result read-only after the pack job.
+    fn open_packed_result(&mut self) -> Result<(), String> {
+        if self.pack.is_some() {
+            return Ok(());
+        }
+        let path = PathBuf::from(&self.ui.title);
+        if !path.is_file() {
+            return Err(format!(
+                "包文件未生成 / pack file was not created: {}",
+                path.display()
+            ));
+        }
+        let pack = ManagerSync::open(&path)
+            .map_err(|e| format!("打开打包结果失败 / failed to open packed result: {e}"))?;
+        self.pack = Some(pack);
+        self.nav.cwd = PathBuf::new();
+        self.nav.entries.clear();
+        self.nav.selected = 0;
+        self.nav.offset = 0;
         Ok(())
     }
 
@@ -777,11 +847,14 @@ impl App {
 
     /// 在文件系统面板和包面板之间切换焦点 / switch focus between the local and pack panes.
     pub(crate) fn switch_focus(&mut self) {
-        if !self.is_manager() || self.picker.is_some() || self.pending.is_some() {
+        if !matches!(self.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack)
+            || self.picker.is_some()
+            || self.pending.is_some()
+        {
             return;
         }
         self.focus = match self.focus {
-            Focus::Local if self.pack.is_some() => Focus::Pack,
+            Focus::Local if self.ui.mode != Mode::Manager || self.pack.is_some() => Focus::Pack,
             Focus::Pack | Focus::Local => Focus::Local,
         };
     }
@@ -791,48 +864,13 @@ impl App {
         if self.picker.is_some() {
             return self.load_picker_dir();
         }
-        if self.is_manager() {
+        if matches!(self.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack) {
             return match self.focus {
                 Focus::Local => self.load_local_dir(),
                 Focus::Pack => self.load_pack_dir(),
             };
         }
-
-        debug!(
-            "load_current_dir: mode={:?}, cwd={:?}, pack_open={}",
-            self.ui.mode,
-            self.nav.cwd,
-            self.pack.is_some()
-        );
-        let entries = if self.ui.mode == Mode::Pack {
-            if self.nav.cwd.is_file() {
-                browse::local_file(&self.nav.cwd).map(|entry| vec![entry])
-            } else {
-                browse::local_dir(&self.nav.cwd)
-            }
-        } else if let Some(pack) = self.pack.as_mut() {
-            browse::pack_dir(pack, &self.nav.cwd)
-        } else {
-            Err("包未打开 / pack is not open".to_string())
-        };
-
-        let entries = entries?;
-        debug!(
-            "load_current_dir: {:?} -> {} entries",
-            self.nav.cwd,
-            entries.len()
-        );
-        let at_root = self.is_at_root();
-        self.nav.entries = if at_root {
-            entries
-        } else {
-            browse::with_parent(entries, self.parent_path())
-        };
-        self.nav.selected = 0;
-        self.nav.offset = 0;
-        self.clamp_offset();
-        self.ui.error = None;
-        Ok(())
+        self.load_pack_dir()
     }
 
     fn reload(&mut self) {
@@ -853,11 +891,11 @@ impl App {
         }
         match self.ui.mode {
             Mode::Manager if self.focus == Focus::Local => self.local_nav.cwd.parent().is_none(),
-            Mode::Pack => self
-                .nav
+            Mode::Pack | Mode::Unpack if self.focus == Focus::Local => self
+                .local_nav
                 .local_root
                 .as_ref()
-                .is_none_or(|root| self.nav.cwd == *root),
+                .is_none_or(|root| self.local_nav.cwd == *root),
             _ => self.nav.cwd.as_os_str().is_empty(),
         }
     }
@@ -885,9 +923,13 @@ impl App {
                 .cwd
                 .parent()
                 .map_or_else(|| self.local_nav.cwd.clone(), Path::to_path_buf),
-            Mode::Pack => {
-                let root = self.nav.local_root.as_deref().unwrap_or(Path::new(""));
-                let parent = self.nav.cwd.parent().unwrap_or(root);
+            Mode::Pack | Mode::Unpack if self.focus == Focus::Local => {
+                let root = self
+                    .local_nav
+                    .local_root
+                    .as_deref()
+                    .unwrap_or(Path::new(""));
+                let parent = self.local_nav.cwd.parent().unwrap_or(root);
                 if parent.starts_with(root) {
                     parent.to_path_buf()
                 } else {
@@ -912,21 +954,12 @@ impl App {
                 Self::pack_display(&picker.nav.cwd)
             };
         }
-        //AI=== Manager 左侧显示真实路径 / manager's left pane shows the real path
-        if self.ui.mode == Mode::Manager && self.focus == Focus::Local {
+        if matches!(self.ui.mode, Mode::Manager | Mode::Pack | Mode::Unpack)
+            && self.focus == Focus::Local
+        {
             return self.local_nav.cwd.display().to_string();
         }
-        //AI_END===
-        let relative = if self.ui.mode == Mode::Pack {
-            self.nav
-                .local_root
-                .as_deref()
-                .and_then(|root| self.nav.cwd.strip_prefix(root).ok())
-                .unwrap_or(&self.nav.cwd)
-        } else {
-            &self.nav.cwd
-        };
-        Self::pack_display(relative)
+        Self::pack_display(&self.nav.cwd)
     }
 
     fn pack_display(relative: &Path) -> String {
@@ -1112,10 +1145,6 @@ impl App {
         nav.entries.len().saturating_sub(nav.height.max(1))
     }
 
-    fn clamp_offset(&mut self) {
-        Self::clamp_nav_offset(&mut self.nav);
-    }
-
     fn clamp_nav_offset(nav: &mut Nav) {
         let max = Self::nav_max_offset(nav);
         if nav.offset > max {
@@ -1125,7 +1154,15 @@ impl App {
 
     pub(crate) fn list_index_at(&self, column: u16, row: u16) -> Option<usize> {
         let nav = self.active_nav();
-        list_index_at(nav.list_area, nav.offset, nav.entries.len(), column, row)
+        //AI=== 鼠标命中跳过表头行 / skip the header row in mouse hit-testing
+        let area = nav.list_area;
+        let rows = Rect {
+            y: area.y.saturating_add(1),
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        list_index_at(rows, nav.offset, nav.entries.len(), column, row)
+        //AI_END===
     }
 
     pub(crate) fn selected_entry(&self) -> Option<&Entry> {
@@ -1175,6 +1212,17 @@ impl App {
         if !source_local && self.pack.is_none() {
             return;
         }
+        //AI=== 目标列表沿用源列表视口 / target list mirrors the source viewport
+        // 目标列表沿用源列表的视口（选中项、偏移、高度），初始显示保持一致。
+        // The target list keeps the source list's viewport (selection, offset, height) so both start identical.
+        let (source_selected, source_offset, source_height) = {
+            let source = if source_local {
+                &self.local_nav
+            } else {
+                &self.nav
+            };
+            (source.selected, source.offset, source.height)
+        };
         let start = entry
             .path
             .parent()
@@ -1183,6 +1231,7 @@ impl App {
         let mut nav = Nav::default();
         nav.cwd = start;
         nav.show_preview = self.nav.show_preview;
+        nav.height = source_height;
         self.picker = Some(Picker {
             move_entry,
             source_local,
@@ -1194,16 +1243,17 @@ impl App {
             self.picker = None;
             return;
         }
-        if let Some(picker) = self.picker.as_mut()
-            && let Some(index) = picker
+        if let Some(picker) = self.picker.as_mut() {
+            picker.nav.selected = picker
                 .nav
                 .entries
                 .iter()
                 .position(|item| item.path == entry.path)
-        {
-            picker.nav.selected = index;
+                .unwrap_or_else(|| source_selected.min(picker.nav.entries.len().saturating_sub(1)));
+            picker.nav.offset = source_offset.min(Self::nav_max_offset(&picker.nav));
             Self::reveal_nav_selected(&mut picker.nav);
         }
+        //AI_END===
     }
 
     fn enter_picker(&mut self) {
@@ -1540,6 +1590,30 @@ impl App {
         self.ui.error = None;
     }
 
+    /// 当前打开的包在文件系统上的文件、`.lock`/`.wbm` 附属文件，或包含它们的目录。
+    /// The open pack's filesystem file, its `.lock`/`.wbm` sidecars, or a directory containing them.
+    fn is_open_pack_path(&self, path: &Path) -> bool {
+        if self.pack.is_none() {
+            return false;
+        }
+        let Some(pack_path) = self.pack_path.as_deref() else {
+            return false;
+        };
+        let candidate = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if candidate == pack_path || pack_path.starts_with(&candidate) {
+            return true;
+        }
+        for suffix in [".lock", ".wbm"] {
+            let mut name = pack_path.as_os_str().to_os_string();
+            name.push(suffix);
+            let sidecar = PathBuf::from(name);
+            if candidate == sidecar || sidecar.starts_with(&candidate) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// 请求删除当前条目（弹窗确认）/ request deletion of the selected entry (confirmation popup).
     pub(crate) fn request_delete(&mut self) {
         if !self.is_manager()
@@ -1556,6 +1630,14 @@ impl App {
             return;
         }
         let source_local = self.focus == Focus::Local;
+        // 删除当前打开的包会破坏管理器自身 / deleting the open pack would break the manager itself
+        if source_local && self.is_open_pack_path(&entry.path) {
+            self.ui.error = Some(format!(
+                "不能删除当前打开的包或其附属文件 / cannot delete the open pack or its sidecars: {}",
+                entry.path.display()
+            ));
+            return;
+        }
         self.delete = Some((source_local, entry));
         self.ui.window = Window::Confirm;
     }
@@ -1565,6 +1647,13 @@ impl App {
         let Some((source_local, entry)) = self.delete.take() else {
             return;
         };
+        if source_local && self.is_open_pack_path(&entry.path) {
+            self.ui.error = Some(format!(
+                "不能删除当前打开的包或其附属文件 / cannot delete the open pack or its sidecars: {}",
+                entry.path.display()
+            ));
+            return;
+        }
         let result = if source_local {
             if entry.is_dir {
                 fs::remove_dir_all(&entry.path)
@@ -1618,6 +1707,25 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// 该条目是否属于已变更文件 / whether the entry is one of the changed files.
+    pub(crate) fn is_changed(&self, nav_is_local: bool, entry: &Entry) -> bool {
+        if entry.is_dir {
+            return false;
+        }
+        let key = if nav_is_local {
+            let Some(root) = self.local_nav.local_root.as_deref() else {
+                return false;
+            };
+            match entry.path.strip_prefix(root) {
+                Ok(relative) => relative.to_path_buf(),
+                Err(_) => return false,
+            }
+        } else {
+            entry.path.clone()
+        };
+        self.jobs.changed.contains(&key)
     }
 
     pub(crate) fn status_of(&self, entry: &Entry) -> Option<RowStatus> {
@@ -1840,6 +1948,9 @@ impl App {
                 }
                 self.task_progress(path, done, total);
             }
+            JobEvent::Changed { path } => {
+                self.jobs.changed.insert(path);
+            }
             JobEvent::Done { path, status, .. } => {
                 let previous = self.jobs.statuses.get(&path).copied();
                 self.set_status(path.clone(), status);
@@ -1896,6 +2007,21 @@ impl App {
                 self.finish_tasks(success);
                 //AI=== 管理器任务结束后刷新两侧列表 / refresh both manager panes after a job
                 if self.is_manager() {
+                    if let Err(e) = self.load_local_dir() {
+                        self.ui.error = Some(e);
+                    }
+                    if self.pack.is_some()
+                        && let Err(e) = self.load_pack_dir()
+                    {
+                        self.ui.error = Some(e);
+                    }
+                } else if matches!(self.ui.mode, Mode::Pack | Mode::Unpack) {
+                    // 打包完成后打开结果包；解包完成后刷新输出目录 / open the packed result; refresh the unpack output
+                    if self.ui.mode == Mode::Pack
+                        && let Err(e) = self.open_packed_result()
+                    {
+                        self.ui.error = Some(e);
+                    }
                     if let Err(e) = self.load_local_dir() {
                         self.ui.error = Some(e);
                     }
