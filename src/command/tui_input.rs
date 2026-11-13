@@ -14,6 +14,7 @@ use std::error::Error;
 use std::io::{self, Read, Write};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+use tracing::warn;
 use vtparse::{CsiParam, VTActor, VTParser};
 
 /// 滚轮一次滚动的行数 / rows per wheel notch.
