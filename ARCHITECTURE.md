@@ -1341,18 +1341,19 @@ the writer side.
 
 ## 14. Test Architecture
 
-| File                                                    | Type         | Coverage                                                                                                                    |
-|---------------------------------------------------------|--------------|-----------------------------------------------------------------------------------------------------------------------------|
-| `src/command/test.rs`                                   | Integration  | ff + wbfp commands, cross-platform symlink cycle detection, synthetic fixture longtime tests (1000 random files via `rand`) |
-| `water_ball_tool_lib/src/file_finder/test.rs`           | Unit         | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream                            |
-| `water_ball_tool_lib/src/concurrent_ring/test.rs`       | Unit         | Ring buffer push/pop, capacity, wait/reject paths                                                                           |
-| `water_ball_tool_lib/src/split_ring_buffer/test/`       | Unit         | Basic/blocking/non-copy/drain-release/reject/resize scenarios                                                                  |
-| `water_ball_tool_lib/src/wb_files_pack/test.rs`         | Module       | Pack file create, read/write, verify                                                                                        |
-| `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | Internal API | Manager internal logic                                                                                                      |
-| `.../wb_files_pack/manager_sync/test.rs`                | Public API   | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access                                         |
-| `water_ball_tool_lib/src/music_play/effect/test.rs`     | Unit         | Effect chain / resampler / fade behavior                                                                                    |
-| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | Unit     | Event dispatch thread, drop counting, stop semantics                                                                        |
-| `src/command/wbfp/ops.rs` / `tui/` (`cfg(test)`)        | Unit         | TUI pack/verify/unpack roundtrip, lazy pack browsing, navigation/viewport, layout rendering                                  |
+| File                                                        | Type         | Coverage                                                                                                                                                    |
+|-------------------------------------------------------------|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `src/command/test.rs`                                       | Integration  | ff + wbfp commands, cross-platform symlink cycle detection, synthetic fixture longtime tests (1000 random files via `rand`)                                 |
+| `water_ball_tool_lib/src/file_finder/test.rs`               | Unit         | Symlink discovery, ancestor cycles, multi-level, broken, mixed, chain propagation, search_stream                                                            |
+| `water_ball_tool_lib/src/concurrent_ring/test.rs`           | Unit         | Ring buffer push/pop, capacity, wait/reject paths                                                                                                           |
+| `water_ball_tool_lib/src/split_ring_buffer/test/`           | Unit         | Basic/blocking/non-copy/drain-release/reject/resize scenarios                                                                                               |
+| `water_ball_tool_lib/src/wb_files_pack/test.rs`             | Module       | Pack file create, read/write, verify                                                                                                                        |
+| `water_ball_tool_lib/src/wb_files_pack/manager/test.rs`     | Internal API | Manager internal logic                                                                                                                                      |
+| `.../wb_files_pack/manager_sync/test.rs`                    | Public API   | Delete + erase (11 tests), file create/rw/reopen, cow, hash verify, threaded access                                                                         |
+| `water_ball_tool_lib/src/music_play/effect/test.rs`         | Unit         | Effect chain / resampler / fade behavior                                                                                                                    |
+| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | Unit         | Event dispatch thread, drop counting, stop semantics                                                                                                        |
+| `src/command/wbfp/ops.rs` / `tui/` (`cfg(test)`)            | Unit         | TUI pack/verify/unpack roundtrip, lazy pack browsing, navigation/viewport, layout rendering                                                                 |
+| `src/command/ram_probe.rs` (`cfg(test)`)                    | Unit         | Block ownership/round-robin, truncation cursor, page alignment, partitioned store, growth policy, descriptor triple-copy, hash-stamp correction/attribution |
 
 **Testing conventions**
 

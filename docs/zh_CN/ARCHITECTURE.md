@@ -1219,18 +1219,19 @@ flowchart TD
 
 ## 14. 测试架构
 
-| 文件                                                    | 类型     | 覆盖范围                                                                                     |
-|---------------------------------------------------------|----------|----------------------------------------------------------------------------------------------|
-| `src/command/test.rs`                                   | 集成     | ff + wbfp 命令、跨平台符号链接循环检测、合成夹具长时间测试（经 `rand` 生成 1000 个随机文件） |
-| `water_ball_tool_lib/src/file_finder/test.rs`           | 单元     | 符号链接发现、祖先循环、多层、断链、混合场景、链传播、search_stream                          |
-| `water_ball_tool_lib/src/concurrent_ring/test.rs`       | 单元     | 环形缓冲区 push/pop、容量、等待/拒绝路径                                                     |
-| `water_ball_tool_lib/src/split_ring_buffer/test/`       | 单元     | basic/blocking/non-copy/drain-release/reject/resize 场景                                            |
-| `water_ball_tool_lib/src/wb_files_pack/test.rs`         | 模块     | 包文件创建、读写、校验                                                                       |
-| `water_ball_tool_lib/src/wb_files_pack/manager/test.rs` | 内部 API | Manager 内部逻辑                                                                             |
-| `.../wb_files_pack/manager_sync/test.rs`                | 公共 API | 删除 + 擦除（11 个测试）、文件创建/读写/重开、cow、哈希校验、线程访问                        |
-| `water_ball_tool_lib/src/music_play/effect/test.rs`     | 单元     | 效果器链 / 重采样 / 淡入淡出行为                                                             |
-| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | 单元 | 事件分发线程、丢弃计数、停止语义                                                             |
-| `src/command/wbfp/ops.rs` / `tui/`（`cfg(test)`）        | 单元     | TUI 打包/校验/解包往返、包目录懒加载、导航/视口、布局渲染                                      |
+| 文件                                                        | 类型     | 覆盖范围                                                                                       |
+|-------------------------------------------------------------|----------|------------------------------------------------------------------------------------------------|
+| `src/command/test.rs`                                       | 集成     | ff + wbfp 命令、跨平台符号链接循环检测、合成夹具长时间测试（经 `rand` 生成 1000 个随机文件）   |
+| `water_ball_tool_lib/src/file_finder/test.rs`               | 单元     | 符号链接发现、祖先循环、多层、断链、混合场景、链传播、search_stream                            |
+| `water_ball_tool_lib/src/concurrent_ring/test.rs`           | 单元     | 环形缓冲区 push/pop、容量、等待/拒绝路径                                                       |
+| `water_ball_tool_lib/src/split_ring_buffer/test/`           | 单元     | basic/blocking/non-copy/drain-release/reject/resize 场景                                       |
+| `water_ball_tool_lib/src/wb_files_pack/test.rs`             | 模块     | 包文件创建、读写、校验                                                                         |
+| `water_ball_tool_lib/src/wb_files_pack/manager/test.rs`     | 内部 API | Manager 内部逻辑                                                                               |
+| `.../wb_files_pack/manager_sync/test.rs`                    | 公共 API | 删除 + 擦除（11 个测试）、文件创建/读写/重开、cow、哈希校验、线程访问                          |
+| `water_ball_tool_lib/src/music_play/effect/test.rs`         | 单元     | 效果器链 / 重采样 / 淡入淡出行为                                                               |
+| `water_ball_tool_lib/src/music_play/event_dispatch/test.rs` | 单元     | 事件分发线程、丢弃计数、停止语义                                                               |
+| `src/command/wbfp/ops.rs` / `tui/`（`cfg(test)`）           | 单元     | TUI 打包/校验/解包往返、包目录懒加载、导航/视口、布局渲染                                      |
+| `src/command/ram_probe.rs`（`cfg(test)`）                   | 单元     | 数据块所有权/轮询顺序、裁剪后的游标、页对齐、分区存储、增长策略、描述符三副本、哈希戳纠错/归因 |
 
 **测试规范**
 

@@ -301,6 +301,33 @@
   appending at the end touches none of them. In `PeriodicShuffle` the new tracks are queued for the current cycle when
   one is in progress.
 
+### RAM Probe (`rp`)
+
+- Data blocks now own their allocation: `PageBlock` allocates in its constructor and frees in `Drop`, exposing only
+  slices and the address. Producer threads move a whole `Block` through the channel instead of sending a raw pointer,
+  and `MemManager` keeps one `Vec<Block>` instead of three parallel arrays, so a block can no longer be freed while
+  still referenced and truncation deallocates automatically. Blocks stay aligned to the system page size.
+- `remove_count` clamps with `saturating_sub` instead of subtracting first, thread-spawn failures are returned as
+  errors instead of panicking, and the block-size/page-size check returns an error instead of `assert!`.
+- Growth now runs as one session over the persistent worker pool (threads are created once and reused): a single
+  progress bar, with system memory re-read every 256 MiB and the three usage bars updated on the same pass. The session
+  stops at the target or when available memory would drop below the reserve, so another program growing at the same
+  time cannot drive the machine into OOM. The reserve is `max(512 MiB, 1% of total)`, and a bounded 16 MiB hand-off
+  queue caps how far producers can run ahead of the checks. Allocation failures end the session and pause growth for
+  two seconds instead of spinning on a failing allocation. `reset_count` and `ratio` are validated, and hash mismatches
+  are reported once per block.
+- Each block stores a self-correcting hash stamp (two hash copies plus a byte-wise complement), so one corrupted copy
+  is recovered from the other two. On a mismatch the log attributes the fault to the hash metadata or to the data
+  block, distinguishes a transient data read from stable corruption, and prints both the stamp address and the block
+  address plus the block position.
+- Allocation descriptors (address/size/alignment) are also stored three times. A single corrupted copy is outvoted
+  before any dereference; when the copies cannot be resolved the block is skipped and reported, and `Drop` leaks it
+  instead of calling `dealloc` with a bad layout, so a memory fault cannot turn into use-after-free or heap corruption.
+- The block index is now a partitioned fixed-capacity store instead of `Vec<Block>`: partitions (512 MiB of blocks) are
+  allocated on demand and freed as soon as they empty, so the metadata is reclaimed dynamically. The partition table,
+  every partition header and the round-robin cursor are triple-redundant with majority voting; an undecidable header
+  makes the probe stop and report instead of indexing or freeing a bad pointer.
+
 ### Documentation
 
 - `AGENTS.md` now holds conventions only; the per-module architecture notes moved to `ARCHITECTURE.md`, which gained a
