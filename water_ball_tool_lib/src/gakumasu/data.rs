@@ -87,30 +87,18 @@ enum TriggerTiming {
     TurnEnd,   //回合结束
 }
 
-//运行时效果
-enum CardRunningEffect {}
-
 //技能卡
-struct SkillCard {
+pub struct SkillCard {
     name: String,
     consumption_type: ConsumptionType, //消费类型
     effects: Vec<Effect>,              //卡牌效果
 }
 
-//技能卡运行时
-struct SkillCardRunning {
-    id: String,
-    skill_card: Arc<SkillCard>,
-    card_running_effects: Vec<CardRunningEffect>,
-}
-
-//场地效果卡
-struct FieldEffectCard {
+//场地卡
+pub struct FieldCard {
     name: String,
 }
 
-//场地效果卡运行时
-struct FieldEffectCardRunning {
-    id: String,
-    field_effect_card: Arc<FieldEffectCard>,
-}
+// 场地卡效果
+#[derive(Clone)]
+pub struct FieldCardEffect {}
