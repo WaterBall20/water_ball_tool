@@ -22,10 +22,6 @@ pub(crate) struct MusicPlayArgs {
     /// 初始音量（0.0–1.0）/ Initial volume (0.0–1.0)
     #[arg(short, long, default_value_t = 0.75)]
     volume: f32,
-    //AI_END===
-    ///详细输出 / Verbose output
-    #[arg(long)]
-    verbose: bool,
     //AI=== 默认只加载第一首、不自动播放 / load the first track but do not start playing by default
     /// 找到第一首后自动开始播放 / Start playing automatically once the first track is found
     #[arg(short, long)]
@@ -42,6 +38,10 @@ pub(crate) struct MusicPlayArgs {
     )]
     mode: LoopMode,
     //AI_END===
+    /// 设置输出声道
+    channels: Option<u16>,
+    /// 设置输出采样率（完整数字，例：48000）
+    sample_rate: Option<u32>,
 }
 
 //AI=== 把 panic 写进日志文件：TUI 崩溃后不保留界面，文件是唯一证据
@@ -71,7 +71,7 @@ pub fn args(args: MusicPlayArgs) -> Result<(), Box<dyn error::Error>> {
     install_panic_logging();
     info!("启动 TUI 音乐播放器 / starting the TUI music player");
 
-    let mut runtime = match Runtime::new(args.mode, args.volume) {
+    let mut runtime = match Runtime::new(args.mode, args.volume, args.channels, args.sample_rate) {
         Ok(runtime) => runtime,
         Err(e) => {
             return Err(format!("创建运行时失败 / failed to create runtime: {e:?}").into());

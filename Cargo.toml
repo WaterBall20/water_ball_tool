@@ -20,8 +20,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 chrono = "0.4.45"
 directories = "6.0"
 thread-priority = "3.1.1"
-windows-sys = "0.61.2"
-winapi = "0.3.9"
 libc = "0.2.191"
 
 rand = "0.10.3"
@@ -42,13 +40,17 @@ lofty = "0.25.4"
 pretty_assertions = "1.4.1"
 colored = "3.1.1"
 #Audio
-cpal = "0.18.2"
+cpal = { version = "0.18.2", features = ["pipewire", "pulseaudio"] }
 symphonia = { version = "0.6.1", features = ["default"] }
 rubato = "5.0.1"
 
 #TUI
 ratatui = "0.30.2"
 unicode-width = "0.2.2"
+
+#AI=== 打开 ENABLE_VIRTUAL_TERMINAL_INPUT / enable ENABLE_VIRTUAL_TERMINAL_INPUT
+windows-sys = "0.61.2"
+winapi = "0.3.9"
 
 [profile.release]
 debug = true
@@ -101,7 +103,7 @@ vtparse = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 #AI=== 打开 ENABLE_VIRTUAL_TERMINAL_INPUT / enable ENABLE_VIRTUAL_TERMINAL_INPUT
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Console"] }
 #AI_END===
 
 [dev-dependencies]

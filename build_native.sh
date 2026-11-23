@@ -1,0 +1,1 @@
+cargo +nightly build --release -Zbuild-std="std,panic_abort" --config .cargo/native-config.toml

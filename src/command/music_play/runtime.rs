@@ -115,8 +115,10 @@ impl Runtime {
     pub(super) fn new(
         loop_mode: LoopMode,
         volume: f32,
+        channels: Option<u16>,
+        sample_rate: Option<u32>,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let mut player = Player::new()?;
+        let mut player = Player::new(None, channels, sample_rate)?;
         player.set_volume(volume);
         let shared = Arc::new(Shared::new(loop_mode));
 

@@ -20,7 +20,7 @@ use crate::music_play::tools::{DurationAccumulator, TimeMetrics};
 use crate::music_play::watchdog::{SLOT_DECODER, SLOT_PRE_EFFECT, WatchNotify};
 use crate::split_ring_buffer::{LockedWriter, UnlockedReader};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use cpal::{ChannelCount, Device, SampleFormat, Stream, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// 播放器生命周期所有者：`Drop` 必定执行完整关停（解码线程、前效果器、事件线程、看门狗），
 /// 因此关停不依赖引用计数归零，也不会因为前端忘记调用 `try_stop` 而泄漏。
@@ -70,9 +70,23 @@ impl Player {
     ///
     /// Create the player and return its lifetime owner; audio-device or thread-spawn failures are
     /// returned as errors.
-    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
+    pub fn new(
+        device: Option<Device>,
+        channels: Option<u16>,
+        sample_rate: Option<u32>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         Ok(Self {
-            player: PlayerHandle::new()?,
+            player: PlayerHandle::new(device, channels, sample_rate)?,
+        })
+    }
+
+    /// 创建播放器并返回生命周期所有者；音频设备或内部线程创建失败时返回错误。
+    ///
+    /// Create the player and return its lifetime owner; audio-device or thread-spawn failures are
+    /// returned as errors.
+    pub fn new_default() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(Self {
+            player: PlayerHandle::new_default()?,
         })
     }
 }
@@ -384,12 +398,28 @@ impl PlayerHandle {
         Ok(Arc::new(Mutex::new(Some(join_handle))))
     }
 
-    fn get_audio_config()
-    -> Result<(Device, AudioFormat, Arc<StreamConfig>), Box<dyn Error + Send + Sync>> {
-        let host = cpal::default_host();
-        let Some(device) = host.default_output_device() else {
-            return Err("No output device available".into());
+    fn get_audio_config(
+        device: Option<Device>,
+        channels: Option<u16>,
+        sample_rate: Option<u32>,
+    ) -> Result<(Device, AudioFormat, Arc<StreamConfig>), Box<dyn Error + Send + Sync>> {
+        let device = if let Some(device) = device {
+            device
+        } else {
+            #[cfg(not(target_os = "linux"))]
+            let host = cpal::default_host();
+            #[cfg(target_os = "linux")]
+            let host = cpal::host_from_id(cpal::HostId::PipeWire).or_else(|err| {
+                warn!("选择音频后端PipeWire失败， 将尝试PulseAudio, err: {err}");
+                cpal::host_from_id(cpal::HostId::PulseAudio)
+            })?;
+            if let Some(device) = host.default_output_device() {
+                device
+            } else {
+                return Err("No output device available".into());
+            }
         };
+
         let config = device.default_output_config()?;
         if config.sample_format() != SampleFormat::F32 {
             return Err(format!(
@@ -398,9 +428,16 @@ impl PlayerHandle {
             )
             .into());
         }
-        let channels = config.channels();
-        let sample_rate = config.sample_rate();
-        let stream_config = Arc::new(config.config());
+        let mut config = config.config();
+        if let Some(channels) = channels {
+            config.channels = channels;
+        }
+        let channels = config.channels;
+        if let Some(sample_rate) = sample_rate {
+            config.sample_rate = sample_rate;
+        }
+        let sample_rate = config.sample_rate;
+        let stream_config = Arc::new(config);
         Ok((
             device,
             AudioFormat::new(channels, sample_rate),
@@ -409,8 +446,13 @@ impl PlayerHandle {
     }
 }
 impl PlayerHandle {
-    fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let (device, audio_format, stream_config) = Self::get_audio_config()?;
+    fn new(
+        device: Option<Device>,
+        channels: Option<u16>,
+        sample_rate: Option<u32>,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let (device, audio_format, stream_config) =
+            Self::get_audio_config(device, channels, sample_rate)?;
         // 在你的播放器初始化阶段
         //创建缓冲区
         //效果缓冲区
@@ -545,6 +587,10 @@ impl PlayerHandle {
         };
         player.start_watchdog()
         //AI_END===
+    }
+
+    fn new_default() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Self::new(None, None, None)
     }
 
     pub fn is_playing(&self) -> bool {
